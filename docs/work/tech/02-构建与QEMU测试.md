@@ -13,12 +13,14 @@
 ```bash
 # 进入容器（若尚未进入）
 sudo systemd-nspawn -D /var/lib/machines/archbuild \
-     --bind ~/Code/Projects/MipLinux/out:/out \
-     -b
+     -u root \
+     --bind ~/Code/Projects/MipLinux/out:/out
 
 # 构建
 mkarchiso -v -w /tmp/work -o /out /usr/share/archiso/configs/releng
 ```
+
+> **不要加 `-b`。** 原因见 [01-容器环境搭建.md](01-容器环境搭建.md) 步骤 3 —— bootstrap 的 root 账户没有密码，加 `-b` 会停在登录提示符且无法登录。
 
 **参数说明：**
 

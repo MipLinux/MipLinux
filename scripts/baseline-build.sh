@@ -100,9 +100,12 @@ ls -lh /out/*.iso
 INNER
     chmod +x "${CONTAINER_DIR}/root/baseline-build.sh"
 
+    # 注意：不加 -b。bootstrap 的 root 账户没有密码，引导会停在无法登录的
+    # 提示符；而且 -b 会把命令行参数当作 init 的参数而非待执行的命令。
+    # 构建不需要容器内有 init 在跑，直接执行脚本即可。
     systemd-nspawn -D "${CONTAINER_DIR}" \
+      -u root --machine=archbuild \
       --bind "${OUT_DIR}:/out" \
-      -b --machine=archbuild \
       /root/baseline-build.sh
   else
     info "进入容器。请在容器内执行："
@@ -119,8 +122,8 @@ INNER
 
 HINT
     systemd-nspawn -D "${CONTAINER_DIR}" \
-      --bind "${OUT_DIR}:/out" \
-      -b --machine=archbuild
+      -u root --machine=archbuild \
+      --bind "${OUT_DIR}:/out"
   fi
 }
 

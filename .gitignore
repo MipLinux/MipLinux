@@ -1,0 +1,17 @@
+# 构建产物
+out/
+*.iso
+*.iso.sha256
+*.iso.sig
+*.tar.zst
+
+# QEMU 测试资产
+OVMF_VARS*.fd
+*.qcow2
+
+# 临时文件
+/tmp/
+*.log
+
+# IDE
+.idea/

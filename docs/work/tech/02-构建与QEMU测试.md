@@ -3,6 +3,10 @@
 > 目标：用未修改的 `releng` profile 构建出 ISO，并在 QEMU（UEFI）中引导成功。
 >
 > 前置：已完成 [01-容器环境搭建.md](01-容器环境搭建.md)。
+>
+> **权限**：本文所有 `mipl` 命令都要 `sudo` 跑。脚本一律要求 root，普通用户运行
+> 会被直接拒绝 —— 它不自己提权，因为同一件事一会儿降权一会儿提权，
+> 出问题时根本分不清是谁的权限在起作用（`out/` 里的产物一会儿归你、一会儿归 root）。
 
 ---
 
@@ -12,7 +16,7 @@
 
 ```bash
 # 进入容器（若尚未进入）—— 路径由脚本自己定位，两台机器都适用
-./scripts/mipl.sh shell
+sudo ./scripts/mipl.sh shell
 ```
 
 > `mipl shell` 等价于下面这条命令，但它会先检查容器是否已经在跑
@@ -36,8 +40,8 @@ mkarchiso -v -w /tmp/work -o /out /usr/share/archiso/configs/releng
 > 也可以不进容器，直接让脚本一条龙跑完（下载 bootstrap → 解压 → 构建）：
 >
 > ```bash
-> ./scripts/mipl.sh build
-> ./scripts/mipl.sh build --work /var/tmp/mipl-work   # /tmp 空间不够时换目录（Issue #6）
+> sudo ./scripts/mipl.sh build
+> sudo ./scripts/mipl.sh build --work /var/tmp/mipl-work   # /tmp 空间不够时换目录（Issue #6）
 > ```
 
 > **不要加 `-b`。** 原因见 [01-容器环境搭建.md](01-容器环境搭建.md) 步骤 3 —— bootstrap 的 root 账户没有密码，加 `-b` 会停在登录提示符且无法登录。
@@ -72,7 +76,7 @@ archlinux-bootstrap-<日期>-x86_64.tar.zst
 >
 > 只有 `.iso` 是必然会生成的：`.sha256` 要自己算，`.sig` 要有 GPG 密钥，
 > bootstrap 压缩包留在容器内的 `/tmp`。**这不是故障**（Issue #7 问的就是这个）。
-> 想看当前到底有哪些产物：`./scripts/mipl.sh iso`
+> 想看当前到底有哪些产物：`sudo ./scripts/mipl.sh iso`
 
 ### A.2 返回宿主机
 
@@ -82,7 +86,7 @@ poweroff
 
 > **不要直接用 `exit`，也不要关终端窗口。** 那样只是断开连接，容器还在后台跑
 > （`archbuild.scope`），下次就进不去了 —— 见 Issue #4。
-> 忘了关的补救：`./scripts/mipl.sh stop`。
+> 忘了关的补救：`sudo ./scripts/mipl.sh stop`。
 
 ---
 
@@ -93,8 +97,8 @@ poweroff
 ### B.1 安装测试依赖
 
 ```bash
-./scripts/mipl.sh deps              # 按你的发行版打印要装什么，并检查还缺什么
-./scripts/mipl.sh deps --install    # 直接执行
+sudo ./scripts/mipl.sh deps              # 按你的发行版打印要装什么，并检查还缺什么
+sudo ./scripts/mipl.sh deps --install    # 直接执行
 ```
 
 手工装的话：
@@ -114,12 +118,12 @@ ls -l /dev/kvm
 ```
 
 **本机已确认可用。** 若不存在，需检查 BIOS 中的虚拟化开关。
-（`./scripts/mipl.sh doctor` 会一并检查这一项，顺便告诉你缺什么。）
+（`sudo ./scripts/mipl.sh doctor` 会一并检查这一项，顺便告诉你缺什么。）
 
 ### B.3 确认 OVMF 固件路径
 
 ```bash
-./scripts/mipl.sh doctor
+sudo ./scripts/mipl.sh doctor
 ```
 
 **不同发行版路径和文件名都不一样**，脚本会自动探测并打印结果：
@@ -139,12 +143,12 @@ ls -l /dev/kvm
 > 列这张表不是为了让你手抄 —— 手抄正是 Issue #8 的成因。
 > 列出来是为了**探测失败时你知道去哪看**。
 >
-> 探测结果要回报给文档（线 B4）：`./scripts/mipl.sh doctor --report`
+> 探测结果要回报给文档（线 B4）：`sudo ./scripts/mipl.sh doctor --report`
 
 ### B.4 准备 UEFI 变量文件
 
 ```bash
-./scripts/mipl.sh vars
+sudo ./scripts/mipl.sh vars
 ```
 
 > **每次测试都要重新复制一份。**
@@ -166,14 +170,14 @@ ls -l /dev/kvm
 ### C.1 启动命令（UEFI）
 
 ```bash
-./scripts/mipl.sh qemu
+sudo ./scripts/mipl.sh qemu
 ```
 
 不给参数就用 `out/` 里**最新的**那个 ISO；也可以指定：
 
 ```bash
-./scripts/mipl.sh qemu out/archlinux-2026.09.18-x86_64.iso
-./scripts/mipl.sh -n qemu        # 只看它准备执行什么，不真的启动
+sudo ./scripts/mipl.sh qemu out/archlinux-2026.09.18-x86_64.iso
+sudo ./scripts/mipl.sh -n qemu        # 只看它准备执行什么，不真的启动
 ```
 
 脚本实际拼出来的命令长这样 —— **读一遍，出问题时才知道去哪查**：
@@ -244,7 +248,8 @@ run_archiso -u -i out/archlinux-*.iso
 把画面截出来看：
 
 ```bash
-MIPL_QEMU_EXTRA="-display none -monitor unix:/tmp/mipl-mon,server,nowait" \
+# 环境变量要写在 sudo 后面 —— sudo 默认会清掉你 shell 里的变量
+sudo MIPL_QEMU_EXTRA="-display none -monitor unix:/tmp/mipl-mon,server,nowait" \
   ./scripts/mipl.sh qemu &
 
 echo 'screendump /tmp/boot.ppm' | socat - UNIX-CONNECT:/tmp/mipl-mon
@@ -267,7 +272,7 @@ archiso login: root
 ```
 
 > **已实测通过**（2026-09-18，CachyOS 宿主机 + QEMU 11.1.1 + `archlinux-2026.09.18-x86_64.iso`）：
-> 用 `./scripts/mipl.sh qemu` 启动，UEFI 引导进入 Live 环境，
+> 用 `sudo ./scripts/mipl.sh qemu` 启动，UEFI 引导进入 Live 环境，
 > 出现 `archiso login: root (automatic login)` 与 `[root@archiso ~]#` 提示符。
 > 无头复现方式见上面的 C.3。
 
@@ -311,8 +316,9 @@ ls /etc/pacman.d/mirrorlist && head -3 /etc/pacman.d/mirrorlist
 
 | 现象 | 可能原因 |
 |---|---|
-| `qemu-system-x86_64: -file=...: invalid option` | `file=` 被换行拆成了独立参数 —— **Issue #8**。用 `./scripts/mipl.sh qemu`，或把 `file=` 并回 `-drive` 那一行 |
+| `qemu-system-x86_64: -file=...: invalid option` | `file=` 被换行拆成了独立参数 —— **Issue #8**。用 `sudo ./scripts/mipl.sh qemu`，或把 `file=` 并回 `-drive` 那一行 |
 | QEMU 报找不到 `OVMF_VARS.fd` | 复制出来的名字和命令里写的名字不一致（`.4m.fd` vs `.fd`）。`mipl` 统一成固定名，不会有这个问题 |
+| QEMU 报 `cannot open display` / 窗口不出现 | 脚本以 root 跑，图形会话却是你的用户的。`sudo` 默认保留 `DISPLAY` 和 `XAUTHORITY`（走 XWayland 通常没问题），但会清掉 `WAYLAND_DISPLAY`。用 `sudo DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY ./scripts/mipl.sh qemu`，或改用 C.3 的无头方式 |
 | QEMU 卡在 UEFI shell，不进引导 | ISO 没有 UEFI 引导路径，或 `bootmodes` 配置错 |
 | 引导菜单出现但内核加载失败 | initramfs 生成有问题，看构建日志第 6 步 |
 | 卡在 `Waiting for /dev/disk/by-label/...` | `iso_label` 与实际不符 |
@@ -323,8 +329,8 @@ ls /etc/pacman.d/mirrorlist && head -3 /etc/pacman.d/mirrorlist
 排查第一步永远是：
 
 ```bash
-./scripts/mipl.sh doctor          # 环境对不对
-./scripts/mipl.sh -n qemu         # 命令拼出来是什么
+sudo ./scripts/mipl.sh doctor          # 环境对不对
+sudo ./scripts/mipl.sh -n qemu         # 命令拼出来是什么
 ```
 
 **构建阶段失败**时，`-v` 的输出就是排查依据。重点看：

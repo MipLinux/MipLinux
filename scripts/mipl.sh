@@ -4,28 +4,36 @@
 #
 # 把「每次都要手抄的长命令」变成一条不会抄错的命令。
 #
-#   ./scripts/mipl.sh doctor        环境自检（换机器第一件事）
-#   ./scripts/mipl.sh qemu          刷新 OVMF 变量 + 启动 QEMU
-#   ./scripts/mipl.sh shell         进入 nspawn 构建容器
+#   sudo ./scripts/mipl.sh doctor        环境自检（换机器第一件事）
+#   sudo ./scripts/mipl.sh qemu          刷新 OVMF 变量 + 启动 QEMU
+#   sudo ./scripts/mipl.sh shell         进入 nspawn 构建容器
 #
-# 三条设计约束，每条都来自实际踩过的坑（GitHub Issues）：
+# 四条设计约束，每条都来自实际踩过的坑（GitHub Issues）：
 #
-#   1. 一切路径从脚本自身位置推导，不含 $HOME、不含写死的目录。
+#   1. 整个脚本一律要求 root，不自己 sudo。
+#      同一件事一会儿降权一会儿提权，出问题时根本分不清是谁的权限在起作用
+#      （out/ 里的产物一会儿归你、一会儿归 root 就是典型症状）。
+#      所以：非 root → 打印该敲的命令，然后退出。
+#
+#   2. 一切路径从脚本自身位置推导，不含 $HOME、不含写死的目录。
 #      两台机器的仓库路径不同 —— 见 Issue #7 里文档写死了
 #      ~/Code/Projects/MipLinux/out/，换个人就对不上。
 #
-#   2. OVMF 固件靠探测，不硬编码。
+#   3. OVMF 固件靠探测，不硬编码。
 #      Arch 是 /usr/share/edk2/x64/OVMF_{CODE,VARS}.4m.fd，
 #      Fedora 是 /usr/share/edk2/ovmf/OVMF_{CODE,VARS}_4M.fd，
 #      Debian 是 /usr/share/OVMF/OVMF_{CODE,VARS}.fd。
 #
-#   3. QEMU 参数用 bash 数组拼装，一个参数就是数组的一个元素。
+#   4. QEMU 参数用 bash 数组拼装，一个参数就是数组的一个元素。
 #      手写时换行会把 file= 拆成独立的 -file=，QEMU 直接报
 #      `invalid option` —— 见 Issue #8。
 #
 # ─────────────────────────────────────────────────────────────────────
-# 用法：  ./scripts/mipl.sh <命令> [参数]
-#         ./scripts/mipl.sh --help
+# 用法：  sudo ./scripts/mipl.sh <命令> [参数]
+#         sudo ./scripts/mipl.sh --help
+#
+# 环境变量要写在 sudo 后面（sudo 默认会清掉你的环境）：
+#         sudo MIPL_MEM=8192 ./scripts/mipl.sh qemu
 #
 # fish 用户： ./scripts/mipl.fish 是同目录的薄封装，逻辑不重复实现。
 #
@@ -33,7 +41,7 @@
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-MIPL_VERSION="0.1.0"
+MIPL_VERSION="0.2.0"
 
 # ── 自身定位 ──────────────────────────────────────────────────────────
 # 循环解引用：脚本被软链到 ~/.local/bin/mipl 时也能定位到真实仓库。
@@ -65,10 +73,11 @@ VARS_DST="${OUT_DIR}/OVMF_VARS.fd"
 
 # 提示信息里怎么称呼自己：在仓库根目录下写相对路径（好复制），在别处写绝对
 # 路径（照样能跑）。脚本自己不依赖 cwd，那它给出的下一步命令也不该依赖。
+# 一律带 sudo —— 因为脚本本身就要求 root（见下面的权限检查）。
 if [[ "$PWD" == "$REPO_ROOT" ]]; then
-  MIPL_CMD="./scripts/mipl.sh"
+  MIPL_CMD="sudo ./scripts/mipl.sh"
 else
-  MIPL_CMD="${SCRIPT_DIR}/mipl.sh"
+  MIPL_CMD="sudo ${SCRIPT_DIR}/mipl.sh"
 fi
 
 DRY_RUN=0
@@ -109,22 +118,36 @@ run() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# 需要 root 的操作：当前已是 root 就直接跑，否则套 sudo。
-run_root() {
+# ── 权限：一律要求 root ───────────────────────────────────────────────
+# 不提供「部分命令自动 sudo」这种半吊子模式。原来 shell/stop/build 会自己套
+# sudo，结果是同一个脚本有时降权有时提权、out/ 里的产物一会儿归你一会儿归
+# root，出问题时根本分不清是谁的权限在起作用。现在只有一种模式：
+#
+#   不是 root → 什么都不做，直接退出，并把该敲的命令原样打给你。
+#
+# 检查放在最前面（连 --help 也要拦）：「这条命令会以什么身份跑」这件事，
+# 不该因为参数不同而不同。
+require_root() {
   if [[ ${EUID} -eq 0 ]]; then
-    run "$@"
-  else
-    have sudo || die "需要 root 权限，但系统里没有 sudo"
-    run sudo "$@"
+    return 0
   fi
+
+  printf '%s[错误]%s 需要 root 权限，当前是普通用户（uid=%s）。\n' \
+    "$C_ERR" "$C_OFF" "$EUID" >&2
+  echo >&2
+  echo "这个脚本会动构建容器、OVMF 固件和 out/ 里的产物，一律以 root 运行。" >&2
+  echo "它不会自己 sudo（那属于隐式提权），请显式提权后重跑：" >&2
+  echo >&2
+  printf '  sudo %s\n' "$0 $*" >&2
+  echo >&2
+  echo "要传环境变量，写在 sudo 后面（sudo 默认会清掉你的环境）：" >&2
+  printf '  sudo MIPL_MEM=8192 %s qemu\n' "$0" >&2
+  exit 1
 }
 
-need_root_or_sudo() {
-  if [[ ${EUID} -ne 0 ]] && ! have sudo; then
-    die "这一步需要 root 权限，但系统里没有 sudo"
-  fi
-  return 0
-}
+# 需要 root 的操作。脚本入口已经强制 root，所以这里就是直接跑 ——
+# 保留这个函数只是为了在调用点标明「这一步为什么需要特权」。
+run_root() { run "$@"; }
 
 fmt_size() {
   awk -v b="${1:-0}" 'BEGIN{
@@ -160,18 +183,10 @@ distro_pretty() {
   else echo "未知（读不到 /etc/os-release）"; fi
 }
 
-# ── root 权限探测（容器目录是 0700，非 root 读不到）────────────────────
-# 返回 0=存在 1=不存在 2=需要 root 才能确认
-probe_root_exists() {
-  local p="$1"
-  if [[ ${EUID} -eq 0 ]]; then
-    [[ -e "$p" ]] && return 0 || return 1
-  fi
-  if have sudo && sudo -n true 2>/dev/null; then
-    sudo -n test -e "$p" 2>/dev/null && return 0 || return 1
-  fi
-  return 2
-}
+# ── 路径存在性检查 ────────────────────────────────────────────────────
+# 容器目录 /var/lib/machines 是 0700。脚本一律以 root 运行，所以这里不需要
+# 再兜「权限不足」的分支 —— 那正是改成强制 root 换来的简化。
+path_exists() { [[ -e "$1" ]]; }
 
 # ── OVMF 固件探测 ─────────────────────────────────────────────────────
 ovmf_search_dirs() {
@@ -301,18 +316,7 @@ machine_running() {
     | awk 'NF {print $1}' | grep -qx "$MACHINE_NAME"
 }
 
-# 0=存在 1=不存在 2=无法确认
-container_exists() {
-  local st=0
-  probe_root_exists "${CONTAINER_DIR}/etc/os-release" || st=$?
-  case "$st" in
-    0|1) return "$st" ;;
-  esac
-  # 文件系统这条路看不到（/var/lib/machines 是 0700），但 machinectl 不需要
-  # root：机器名只要已注册，就说明容器存在（正在跑）。
-  if machine_running; then return 0; fi
-  return 2
-}
+container_exists() { path_exists "${CONTAINER_DIR}/etc/os-release"; }
 
 # ── 命令：doctor ──────────────────────────────────────────────────────
 cmd_doctor() {
@@ -337,6 +341,11 @@ cmd_doctor() {
 
   _line "repo"     "$REPO_ROOT"
   _line "cwd"      "$PWD  （脚本不依赖它）"
+  if [[ ${EUID} -eq 0 ]]; then
+    _line "user"   "uid=0（root）"
+  else
+    _bad  "user"   "uid=${EUID}（非 root —— 本该在入口就被拒绝，请报告这个 bug）"
+  fi
   _line "distro"   "$(distro_pretty)"
 
   local families_ok=1
@@ -353,37 +362,25 @@ cmd_doctor() {
   fi
 
   if [[ -w /dev/kvm ]]; then _line "kvm" "/dev/kvm 可读写（硬件加速可用）"
-  elif [[ -e /dev/kvm ]]; then _miss "kvm" "/dev/kvm 存在但当前用户不可写 —— 需加入 kvm 组"
+  elif [[ -e /dev/kvm ]]; then _miss "kvm" "/dev/kvm 存在但不可写"
   else _miss "kvm" "/dev/kvm 不存在 —— QEMU 只能软件模拟（很慢）"; fi
 
-  # 容器（/var/lib/machines 是 0700，非 root 可能看不到）
-  local cst=0
-  container_exists || cst=$?
-  if [[ $cst -eq 0 ]]; then
+  # 容器
+  if container_exists; then
     if machine_running; then
       _miss "container" "${CONTAINER_DIR}（正在运行！用完记得 ${MIPL_CMD} stop，见 Issue #4）"
     else
       _line "container" "${CONTAINER_DIR}（已初始化）"
     fi
-    local t st missing_tools=() probe_unknown=0
+    local t missing_tools=()
     for t in mkarchiso pacstrap mkinitcpio mksquashfs xorriso; do
-      st=0
-      probe_root_exists "${CONTAINER_DIR}/usr/bin/${t}" >/dev/null 2>&1 || st=$?
-      case "$st" in
-        0) ;;
-        1) missing_tools+=("$t") ;;
-        *) probe_unknown=1 ;;
-      esac
+      path_exists "${CONTAINER_DIR}/usr/bin/${t}" || missing_tools+=("$t")
     done
-    if [[ $probe_unknown -eq 1 ]]; then
-      _miss "toolchain" "无法确认（需要 root：sudo ${MIPL_CMD} doctor）"
-    elif [[ ${#missing_tools[@]} -eq 0 ]]; then
+    if [[ ${#missing_tools[@]} -eq 0 ]]; then
       _line "toolchain" "mkarchiso / pacstrap / mkinitcpio / mksquashfs / xorriso 齐全"
     else
       _miss "toolchain" "缺：${missing_tools[*]}（进容器后 pacman -S archiso，见 Issue #5）"
     fi
-  elif [[ $cst -eq 2 ]]; then
-    _miss "container" "${CONTAINER_DIR}（权限不足，无法确认；用 sudo 再跑一次）"
   else
     _miss "container" "${CONTAINER_DIR}（尚未创建 —— 先跑 ${MIPL_CMD} build）"
   fi
@@ -424,7 +421,7 @@ _doctor_report() {
   local iso
   iso="$(latest_iso || echo "")"
   cat <<EOF
-<!-- 由 ./scripts/mipl.sh doctor --report 生成 -->
+<!-- 由 ${MIPL_CMD} doctor --report 生成 -->
 | 项 | 值 |
 |---|---|
 | 发行版 | $(distro_pretty) |
@@ -510,6 +507,19 @@ cmd_qemu() {
     return 0
   fi
 
+  # 现在是以 root 跑的，而图形会话属于调用 sudo 的那个用户。sudo 默认会保留
+  # DISPLAY 与 XAUTHORITY（所以 XWayland 那条路通常能开窗），但会清掉
+  # WAYLAND_DISPLAY 和 XDG_RUNTIME_DIR。两者都没有时先说一句，别让人对着
+  # 一个「什么都没发生」的终端发呆。
+  if [[ -n "${SUDO_USER:-}" && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    warn "没有检测到图形会话环境（DISPLAY / WAYLAND_DISPLAY 都是空的）"
+    note "QEMU 可能开不出窗口。三个办法，任选一个："
+    note "  1) 显式把会话变量递给 sudo："
+    note "     sudo DISPLAY=\$DISPLAY XAUTHORITY=\$XAUTHORITY $0 qemu"
+    note "  2) 用无头方式验证，见 docs/work/tech/02-构建与QEMU测试.md 的 C.3"
+    note "  3) 只想确认参数对不对： sudo $0 -n qemu"
+  fi
+
   echo
   note "预期结果：出现 [root@archiso ~]# 提示符（releng 没有桌面环境，这是成功）"
   note "退出 QEMU：窗口里 Ctrl+A 然后 X，或直接关窗口"
@@ -522,24 +532,15 @@ cmd_shell() {
   local restart=0
   [[ "${1:-}" == "--restart" ]] && restart=1
 
-  need_root_or_sudo
   ensure_out_dir
 
-  # 容器：先看能不能直接确认；确认不了（/var/lib/machines 是 0700）就交给
-  # sudo 去问 —— 反正下一步本来就要 sudo，密码只会问一次。
-  local running=0 cst=0
+  # 机器名被占用这件事要单独判：容器可能在文件系统里存在、但正跑着，
+  # 那种情况下 nspawn 会拒绝启动（Issue #4）。
+  local running=0
   if machine_running; then running=1; fi
-  container_exists || cst=$?
-  if [[ $running -eq 0 ]]; then
-    case "$cst" in
-      0) ;;
-      1) die "构建容器不存在：${CONTAINER_DIR}
-     先创建： ${MIPL_CMD} build" ;;
-      *) if ! run_root test -e "${CONTAINER_DIR}/etc/os-release"; then
-           die "构建容器不存在：${CONTAINER_DIR}
+  if [[ $running -eq 0 ]] && ! container_exists; then
+    die "构建容器不存在：${CONTAINER_DIR}
      先创建： ${MIPL_CMD} build"
-         fi ;;
-    esac
   fi
 
   if [[ $running -eq 1 ]]; then
@@ -567,7 +568,6 @@ cmd_shell() {
 cmd_stop() {
   local force=0
   [[ "${1:-}" == "--force" ]] && force=1
-  need_root_or_sudo
   have machinectl || die "找不到 machinectl"
 
   if ! machine_running; then
@@ -608,16 +608,15 @@ cmd_build() {
   local script="${SCRIPT_DIR}/baseline-build.sh"
   [[ -x "$script" ]] || die "找不到可执行的 ${script}"
 
-  need_root_or_sudo
   ensure_out_dir
 
   info "构建工作目录（容器内）： ${INNER_WORK_DIR}"
   note "  空间不够时换一个： ${MIPL_CMD} build --work /var/tmp/mipl-work（Issue #6）"
 
   # baseline-build.sh 已经处理了「下载 bootstrap → 解压 → 进容器构建」的完整流程。
-  # 这里只负责把工作目录传进去，不重复实现。
-  # sudo 默认会清空环境，所以用 `sudo env VAR=值 …` 显式带过去，
-  # 再由 baseline-build.sh 用 systemd-nspawn --setenv 送进容器。
+  # 这里只负责把工作目录传进去，不重复实现。用 env 显式赋值而不是靠环境继承：
+  # 如果用户是用 `sudo MIPL_WORK_DIR=… mipl build` 调用的，sudo 会保留；但直接
+  # 在普通 shell 里 export 的变量，sudo 默认会清掉 —— 显式传一次最稳。
   run_root env "MIPL_WORK_DIR=${INNER_WORK_DIR}" "$script" "${passthrough[@]}"
 }
 
@@ -742,8 +741,13 @@ cmd_help() {
   cat <<EOF
 mipl ${MIPL_VERSION} · MipLinux 项目操作台
 
-用法： ./scripts/mipl.sh <命令> [参数]
-       ./scripts/mipl.fish <命令> [参数]     # fish 用户的同一入口
+用法： sudo ./scripts/mipl.sh <命令> [参数]
+       sudo ./scripts/mipl.fish <命令> [参数]     # fish 用户的同一入口
+
+权限： 整个脚本一律要求 root，普通用户运行会被直接拒绝（连 --help 也是）。
+       它不会自己 sudo —— 隐式提权会让「谁在改我的 out/」变得说不清。
+       环境变量写在 sudo 后面，例如：
+         sudo MIPL_MEM=8192 ./scripts/mipl.sh qemu
 
 命令：
   doctor [--report]   环境自检。换机器、换人接手时先跑这个；
@@ -751,7 +755,7 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   qemu [ISO]          刷新一份全新的 OVMF 变量文件并启动 QEMU。
                       不给 ISO 就用 out/ 里最新的那个。
   vars                只复制 OVMF 变量文件，不启动 QEMU。
-  shell [--restart]   进入 nspawn 构建容器（自动 sudo、自动 --bind）。
+  shell [--restart]   进入 nspawn 构建容器（自动 --bind）。
                       旧容器还开着时会拦住你，--restart 会先关掉它。
   stop [--force]      关闭构建容器（poweroff；--force 用 terminate）。
   build [--work DIR]  跑 baseline-build.sh：下载 bootstrap → 解压 → 构建 ISO。
@@ -790,6 +794,10 @@ EOF
 
 # ── 主流程 ────────────────────────────────────────────────────────────
 main() {
+  # 权限检查放在最前面：连 --help 也要拦。
+  # 「这条命令会以什么身份跑」不该因为参数不同而不同。
+  require_root "$@"
+
   # 先把 --dry-run 从任何位置摘出来：`mipl -n qemu` 和 `mipl qemu -n` 都接受，
   # 因为手最容易两种都打，而其中一种静默失效是最讨厌的失败方式。
   local -a args=()

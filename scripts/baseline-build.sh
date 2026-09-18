@@ -8,13 +8,13 @@
 #       docs/work/tech/02-构建与QEMU测试.md
 #
 # 用法：
-#   ./scripts/baseline-build.sh                # 交互式，进入容器后手动执行
-#   ./scripts/baseline-build.sh --auto         # 自动执行完整构建
+#   sudo ./scripts/baseline-build.sh           # 交互式，进入容器后手动执行
+#   sudo ./scripts/baseline-build.sh --auto    # 自动执行完整构建
 #
 #   一般不用直接调用它，用上层入口更省事：
-#   ./scripts/mipl.sh build                    # 等价于 sudo 本脚本 --auto
-#   ./scripts/mipl.sh build --work /var/tmp/w  # 换容器内的工作目录（/tmp 空间不足时）
-#   ./scripts/mipl.sh shell                    # 只进容器，不构建
+#   sudo ./scripts/mipl.sh build                    # 等价于本脚本 --auto
+#   sudo ./scripts/mipl.sh build --work /var/tmp/w  # 换容器内的工作目录（/tmp 空间不足时）
+#   sudo ./scripts/mipl.sh shell                    # 只进容器，不构建
 #
 # 环境变量：
 #   MIPL_WORK_DIR   容器内 mkarchiso 的工作目录，默认 /tmp/work
@@ -166,10 +166,10 @@ main() {
     cat <<EOF
 
   cd ${REPO_ROOT}
-  ./scripts/mipl.sh qemu
+  sudo ./scripts/mipl.sh qemu
 
   它会自己探测 OVMF 固件路径、每次重新复制一份变量文件，再启动 QEMU。
-  只想看它准备执行什么： ./scripts/mipl.sh -n qemu
+  只想看它准备执行什么： sudo ./scripts/mipl.sh -n qemu
 
   预期结果：出现 [root@archiso ~]# 提示符
   （官方 releng 没有桌面环境，命令行提示符就是成功）

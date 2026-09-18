@@ -35,24 +35,33 @@ scripts/
 日常操作都走 `scripts/mipl.sh`。**不要手抄长命令** —— 仓库里的 Issue #7、#8
 都是手抄抄出来的，而且都出现在最不该花时间的地方。
 
+**所有命令都要 `sudo`**：脚本一律要求 root，普通用户运行会被直接拒绝。
+它不自己提权 —— 隐式提权会让「谁改了 `out/`」变得说不清。
+环境变量也要写在 `sudo` 后面（`sudo` 默认会清掉你 shell 里的变量）。
+
 | 命令 | 作用 |
 |---|---|
-| `./scripts/mipl.sh doctor` | 环境自检（换机器第一件事）；`--report` 输出可粘进文档的表格 |
-| `./scripts/mipl.sh build` | 下载 bootstrap → 解压 → 构建 ISO |
-| `./scripts/mipl.sh qemu` | 刷新 `OVMF_VARS` 并启动 QEMU |
-| `./scripts/mipl.sh shell` | 进入 nspawn 构建容器 |
-| `./scripts/mipl.sh stop` | 关闭容器（**用完别忘了**，见 Issue #4） |
-| `./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
+| `sudo ./scripts/mipl.sh doctor` | 环境自检（换机器第一件事）；`--report` 输出可粘进文档的表格 |
+| `sudo ./scripts/mipl.sh build` | 下载 bootstrap → 解压 → 构建 ISO |
+| `sudo ./scripts/mipl.sh qemu` | 刷新 `OVMF_VARS` 并启动 QEMU |
+| `sudo ./scripts/mipl.sh shell` | 进入 nspawn 构建容器 |
+| `sudo ./scripts/mipl.sh stop` | 关闭容器（**用完别忘了**，见 Issue #4） |
+| `sudo ./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
 
-两个设计约束：**路径全部从脚本自身位置推导**（两台机器的仓库路径不同），
-**固件路径靠探测**（Arch 与 Fedora 不一样）。完整说明见 `./scripts/mipl.sh --help`。
+三个设计约束：**一律 root 且不隐式提权**、**路径全部从脚本自身位置推导**
+（两台机器的仓库路径不同）、**固件路径靠探测**（Arch 与 Fedora 不一样）。
+完整说明见 `sudo ./scripts/mipl.sh --help`。
 
-fish 用户：
+fish 用户（fish 函数不能直接 `sudo`，所以函数体里是「先 sudo、再带脚本路径」）：
 
 ```fish
-ln -s (realpath scripts/mipl.fish) ~/.config/fish/functions/mipl.fish
-mipl qemu
+# ~/.config/fish/functions/mipl.fish
+function mipl --description 'MipLinux 项目操作台'
+    sudo /绝对路径/scripts/mipl.sh $argv
+end
 ```
+
+之后敲 `mipl qemu` 即可。
 
 ---
 

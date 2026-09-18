@@ -36,23 +36,27 @@
 
 | 脚本 | 内容 |
 |---|---|
-| [mipl.sh](scripts/mipl.sh) | 项目操作台：环境自检、构建、QEMU 测试、进出构建容器。`./scripts/mipl.sh --help` |
+| [mipl.sh](scripts/mipl.sh) | 项目操作台：环境自检、构建、QEMU 测试、进出构建容器。`sudo ./scripts/mipl.sh --help` |
 | [mipl.fish](scripts/mipl.fish) | 同一操作台的 fish 入口（薄封装，逻辑不重写） |
 | [baseline-build.sh](scripts/baseline-build.sh) | 基线构建本体，由 `mipl build` 调用 |
 
-常用四条：
+常用四条（**都要 `sudo`**）：
 
 ```bash
-./scripts/mipl.sh doctor     # 换机器第一件事：环境自检
-./scripts/mipl.sh build      # 构建 ISO
-./scripts/mipl.sh qemu       # 刷新 OVMF 变量并启动 QEMU
-./scripts/mipl.sh stop       # 关闭构建容器（用完别忘了）
+sudo ./scripts/mipl.sh doctor     # 换机器第一件事：环境自检
+sudo ./scripts/mipl.sh build      # 构建 ISO
+sudo ./scripts/mipl.sh qemu       # 刷新 OVMF 变量并启动 QEMU
+sudo ./scripts/mipl.sh stop       # 关闭构建容器（用完别忘了）
 ```
 
 > **为什么要有个脚本：** 两个人、两台机器、两种发行版，仓库路径还不一样。
 > 手抄带绝对路径的长命令必然出错 —— Issue #7（文档写死家目录）和 #8
 > （`-file=` 被换行拆开）都是这么来的。
 > 所以脚本里的路径一律**从自身位置推导**，固件路径一律**运行时探测**。
+>
+> **为什么一律要 root：** 它要动构建容器、OVMF 固件和 `out/` 里的产物。
+> 不提供「部分命令自动 sudo」——同一件事一会儿降权一会儿提权，出问题时
+> 分不清是谁的权限在起作用。所以非 root 会被直接拒绝，而不是隐式提权。
 
 ---
 

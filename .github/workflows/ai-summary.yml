@@ -18,7 +18,11 @@ jobs:
 
       - name: Run DeepSeek Inference
         id: inference
-        uses: appleboy/LLM-action@v1
+        # 不要用浮动的 @v1：它仍指向 v1.3.1，其镜像以 uid 1000 运行，
+        # 无权写入 runner 的 GITHUB_OUTPUT（挂载在 /github/file_commands），
+        # 会报 "failed to set output: ... permission denied"。
+        # v1.4.0 起容器改回 root 运行，已修复。
+        uses: appleboy/LLM-action@v1.4.0
         with:
           base_url: 'https://api.deepseek.com'
           api_key: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -30,7 +34,11 @@ jobs:
 
       - name: Comment with AI summary
         run: |
-          gh issue comment $ISSUE_NUMBER --body "$RESPONSE"
+          if [ -z "$RESPONSE" ]; then
+            echo "::error::inference produced no output; skip commenting"
+            exit 1
+          fi
+          gh issue comment "$ISSUE_NUMBER" --body "$RESPONSE"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}

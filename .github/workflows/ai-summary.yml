@@ -5,10 +5,26 @@ on:
     types: [opened]
 
 jobs:
+  # 临时诊断 job：定位 author_association 白名单为何误判，验证完即删。
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump author association
+        env:
+          ASSOC: ${{ github.event.issue.author_association }}
+          ASSOC_JSON: ${{ toJSON(github.event.issue.author_association) }}
+        run: |
+          echo "raw=[$ASSOC]"
+          echo "json=[$ASSOC_JSON]"
+          echo "eq_test=[${{ github.event.issue.author_association == 'MEMBER' }}]"
+          echo "contains_const=[${{ contains(fromJSON('["OWNER","MEMBER"]'), 'MEMBER') }}]"
+          echo "contains_dynamic=[${{ contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) }}]"
+          echo "actor=[${{ github.actor }}]"
+
   summary:
     # 仓库已公开，任何人都能开 issue 触发一次真实的 DeepSeek 调用并公开评论。
     # 只对仓库所有者/组织成员/协作者生效；若希望外部 issue 也被自动总结，删掉下面这行即可。
-    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+    if: github.event.issue.author_association == 'OWNER' || github.event.issue.author_association == 'MEMBER' || github.event.issue.author_association == 'COLLABORATOR'
     runs-on: ubuntu-latest
     permissions:
       issues: write

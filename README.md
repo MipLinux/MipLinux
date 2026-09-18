@@ -141,15 +141,4 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 
 ---
 
-## 协作说明
-
-项目由两人协作，一位使用 CachyOS，一位使用 Fedora。
-
-**宿主发行版与项目无关**，因为：
-
-- 构建环境由 `systemd-nspawn` 提供，容器内是纯 Arch，与宿主机无关
-- 测试环境是 QEMU，Fedora 上原生可用
-
-两人唯一需要保持一致的接口是**包清单文件**。
-
 构建与测试环境详见 [02-环境与工具链.md](docs/knowledge/02-环境与工具链.md)。

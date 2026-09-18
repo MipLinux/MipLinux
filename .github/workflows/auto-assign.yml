@@ -11,9 +11,13 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-    - name: 'Auto-assign issue'
-      uses: pozil/auto-assign-issue@v1
+    - name: 'Auto-assign issue or PR'
+      # 必须钉具体版本：该仓库同时存在同名 branch 和 tag 的 v1，
+      # 而 tag 优先级更高，@v1 会被解析到远古版本（tag v1 -> 2f3e41b/d11e715）：
+      # 它只认 repo-token/assignees，且只读 context.payload.issue，
+      # 于是在 pull_request 事件下报 "Couldn't find issue info in current context"。
+      # v4.0.1 才同时支持 issues 与 pull_request 上下文。
+      uses: pozil/auto-assign-issue@v4.0.1
       with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           assignees: LaT-SKY
-          numOfAssignee: 1

@@ -13,12 +13,45 @@
 docs/work/
 ├── README.md                本文件，索引
 ├── 2026-09-18.md            当日任务清单
-├── tech/                    技术细节（可复现的操作步骤）
-│   ├── 01-容器环境搭建.md
-│   ├── 02-构建与QEMU测试.md
-│   └── 03-术语表.md
-└── scripts/
-    └── baseline-build.sh    基线构建脚本（备选：手工执行）
+└── tech/                    技术细节（可复现的操作步骤）
+    ├── 01-容器环境搭建.md
+    ├── 02-构建与QEMU测试.md
+    └── 03-术语表.md
+```
+
+脚本在仓库根目录的 `scripts/`，不在 `docs/` 下：
+
+```
+scripts/
+├── mipl.sh                  项目操作台（doctor / build / qemu / shell / stop …）
+├── mipl.fish                同上的 fish 入口，只是转发
+└── baseline-build.sh        基线构建（被 mipl build 调用）
+```
+
+---
+
+## 常用命令
+
+日常操作都走 `scripts/mipl.sh`。**不要手抄长命令** —— 仓库里的 Issue #7、#8
+都是手抄抄出来的，而且都出现在最不该花时间的地方。
+
+| 命令 | 作用 |
+|---|---|
+| `./scripts/mipl.sh doctor` | 环境自检（换机器第一件事）；`--report` 输出可粘进文档的表格 |
+| `./scripts/mipl.sh build` | 下载 bootstrap → 解压 → 构建 ISO |
+| `./scripts/mipl.sh qemu` | 刷新 `OVMF_VARS` 并启动 QEMU |
+| `./scripts/mipl.sh shell` | 进入 nspawn 构建容器 |
+| `./scripts/mipl.sh stop` | 关闭容器（**用完别忘了**，见 Issue #4） |
+| `./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
+
+两个设计约束：**路径全部从脚本自身位置推导**（两台机器的仓库路径不同），
+**固件路径靠探测**（Arch 与 Fedora 不一样）。完整说明见 `./scripts/mipl.sh --help`。
+
+fish 用户：
+
+```fish
+ln -s (realpath scripts/mipl.fish) ~/.config/fish/functions/mipl.fish
+mipl qemu
 ```
 
 ---

@@ -9,7 +9,15 @@
 #
 # 用法：
 #   ./scripts/baseline-build.sh                # 交互式，进入容器后手动执行
-#   ./scripts/baseline-build.sh --auto         # 交互式 + 自动执行构建
+#   ./scripts/baseline-build.sh --auto         # 自动执行完整构建
+#
+#   一般不用直接调用它，用上层入口更省事：
+#   ./scripts/mipl.sh build                    # 等价于 sudo 本脚本 --auto
+#   ./scripts/mipl.sh build --work /var/tmp/w  # 换容器内的工作目录（/tmp 空间不足时）
+#   ./scripts/mipl.sh shell                    # 只进容器，不构建
+#
+# 环境变量：
+#   MIPL_WORK_DIR   容器内 mkarchiso 的工作目录，默认 /tmp/work
 #
 set -euo pipefail
 
@@ -73,6 +81,9 @@ step_enter() {
 #!/usr/bin/env bash
 set -euo pipefail
 PROFILE="/usr/share/archiso/configs/releng"
+# 构建工作目录。默认 /tmp/work；容器内 /tmp 空间不够时（Issue #6）
+# 由外层用 systemd-nspawn --setenv 传进来一个更大的位置。
+WORK_DIR="${MIPL_WORK_DIR:-/tmp/work}"
 
 echo "==> 初始化密钥环（若尚未初始化）"
 if [[ ! -d /etc/pacman.d/gnupg/private-keys-v1.d ]] || \
@@ -93,18 +104,27 @@ for c in mkarchiso pacstrap arch-chroot mkinitcpio mksquashfs xorriso; do
 done
 
 echo "==> 开始构建（原版 releng）"
-mkarchiso -v -w /tmp/work -o /out "${PROFILE}"
+echo "    工作目录：${WORK_DIR}"
+mkarchiso -v -w "${WORK_DIR}" -o /out "${PROFILE}"
 
 echo "==> 构建完成，产物："
 ls -lh /out/*.iso
 INNER
     chmod +x "${CONTAINER_DIR}/root/baseline-build.sh"
 
+    # 把工作目录带进容器。用 --setenv 而不是依赖环境继承：nspawn 不会把
+    # 宿主机的任意变量透进去。没设置时数组为空，行为与以前完全一致。
+    local -a SETENV_ARGS=()
+    if [[ -n "${MIPL_WORK_DIR:-}" ]]; then
+      SETENV_ARGS+=(--setenv="MIPL_WORK_DIR=${MIPL_WORK_DIR}")
+    fi
+
     # 注意：不加 -b。bootstrap 的 root 账户没有密码，引导会停在无法登录的
     # 提示符；而且 -b 会把命令行参数当作 init 的参数而非待执行的命令。
     # 构建不需要容器内有 init 在跑，直接执行脚本即可。
     systemd-nspawn -D "${CONTAINER_DIR}" \
       -u root --machine=archbuild \
+      "${SETENV_ARGS[@]}" \
       --bind "${OUT_DIR}:/out" \
       /root/baseline-build.sh
   else
@@ -145,14 +165,11 @@ main() {
     info "下一步：QEMU 引导验证"
     cat <<EOF
 
-  cd ${OUT_DIR}
-  cp /usr/share/edk2/x64/OVMF_VARS.4m.fd .
-  qemu-system-x86_64 -enable-kvm -m 4096 \\
-    -drive if=pflash,format=raw,readonly=on \\
-      -file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \\
-    -drive if=pflash,format=raw -file=./OVMF_VARS.fd \\
-    -cdrom archlinux-*.iso -boot order=d \\
-    -netdev user,id=n0 -device virtio-net,netdev=n0
+  cd ${REPO_ROOT}
+  ./scripts/mipl.sh qemu
+
+  它会自己探测 OVMF 固件路径、每次重新复制一份变量文件，再启动 QEMU。
+  只想看它准备执行什么： ./scripts/mipl.sh -n qemu
 
   预期结果：出现 [root@archiso ~]# 提示符
   （官方 releng 没有桌面环境，命令行提示符就是成功）

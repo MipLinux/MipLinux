@@ -1,0 +1,75 @@
+# 本文件是 MipLinux/.github（组织级）中同名文件的副本，内容保持一致。
+# 原因：组织级 ISSUE_TEMPLATE 在本仓库实测不生效（New issue 选择页空白），
+# 而仓库级模板一定会显示。修改请先改组织级，再同步到这里。
+name: 功能请求
+description: 提出一个新想法或改进建议
+title: "[功能] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        谢谢你的想法。请尽量把「问题」和「方案」分开讲 ——
+        描述清楚你遇到的问题，往往比直接给方案更有价值，因为方案可以有很多种。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索过现有 Issue，没有重复
+          required: true
+        - label: 这不是安全漏洞报告（安全漏洞请走 SECURITY.md 的私下通道）
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决的是什么问题
+      description: 描述问题本身，而不是你期望的答案。例如「每次装完系统都要手动配输入法环境变量，很烦」。
+      placeholder: 当……的时候，我总是需要……，这让我觉得……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你期望的方案
+      description: 你希望 MipLinux 怎么做。如果还没想好，写「未定」也可以。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你考虑过的替代方案
+      description: 有没有别的做法也能解决？为什么你更倾向上面那个？
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关范围
+      description: 这个想法主要涉及哪一层？
+      options:
+        - 中文支持 · 网络与镜像源
+        - 中文支持 · 字体
+        - 中文支持 · 输入法
+        - 中文支持 · 本地化
+        - 中文支持 · 文档
+        - NVIDIA 驱动
+        - 安装程序
+        - 构建链路与工具链
+        - 品牌与视觉
+        - 其它 / 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充说明
+      description: 截图、参考发行版的做法、相关链接等。
+    validations:
+      required: false

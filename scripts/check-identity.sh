@@ -221,11 +221,13 @@ check_profile_residue() {
   local -a hits=() lines=()
   local line
 
-  # 品牌文本（忽略大小写）+ 旧卷标前缀（区分大小写：%ARCH% 不带下划线，不会误伤）
+  # 品牌文本（忽略大小写）+ 旧卷标前缀（区分大小写：%ARCH% 不带下划线，不会误伤）。
+  # ARCH_ 必须卡词首：不然 foo_SEARCH_BAR 里的 "SEARCH_" 也会命中
+  # （se-ARCH-_bar）—— 产物侧的 ARCHISO_SEARCH_FILENAME 就是这么误报的。
   mapfile -t lines < <(
     {
       grep -rnI -i -- "arch linux" "$PROFILE_DIR" 2>/dev/null || true
-      grep -rnI -- "ARCH_" "$PROFILE_DIR" 2>/dev/null || true
+      grep -rnIE -- '(^|[^A-Za-z])ARCH_' "$PROFILE_DIR" 2>/dev/null || true
     } | sed "s|^${REPO_ROOT}/||" | sort -u -t: -k1,1 -k2,2n
   )
 
@@ -289,12 +291,15 @@ check_iso() {
 
   # 未压缩区（引导配置、EFI 镜像、PVD）里的残留。squashfs 是压缩的，
   # 里面的东西看不见 —— 所以这里查的是「用户能直接看到的那一层」。
+  # 旧卷标前缀要卡词首：mkarchiso 生成的 grubenv 里有
+  # ARCHISO_SEARCH_FILENAME=…，其中 "SEARCH_" 里藏着一个 "ARCH_"
+  # （se-ARCH-_filename），不卡词首就会把它当成残留报出来。
   local -a hits=() lines=()
   local line
   mapfile -t lines < <(
     {
       strings -a -- "$iso" | grep -i -- "arch linux" || true
-      strings -a -- "$iso" | grep -- "ARCH_" || true
+      strings -a -- "$iso" | grep -E -- '(^|[^A-Za-z])ARCH_' || true
     } | sort -u
   )
   for line in ${lines[@]+"${lines[@]}"}; do

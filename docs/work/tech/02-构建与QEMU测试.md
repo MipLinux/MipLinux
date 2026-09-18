@@ -407,6 +407,11 @@ archiso login: root
 [root@archiso ~]#
 ```
 
+> **改名后复验通过**（2026-09-18 20:16 的 `miplinux-2026.09.18-x86_64.iso`）：
+> UEFI 菜单标题变成 `MipLinux install medium (x86_64, UEFI)`，仍能进
+> `[root@archiso ~]#`（主机名属线 C，这次没动）。产物的卷标 / publisher /
+> application 由 `./scripts/check-identity.sh --iso` 断言，不需要 root。
+>
 > **已实测通过**（2026-09-18，CachyOS 宿主机 + QEMU 11.1.1 + `archlinux-2026.09.18-x86_64.iso`，
 > 这是**改名前**的那份产物）：用 `sudo ./scripts/mipl.sh qemu` 启动，UEFI 引导进入 Live 环境，
 > 出现 `archiso login: root (automatic login)` 与 `[root@archiso ~]#` 提示符。

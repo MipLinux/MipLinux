@@ -5,7 +5,8 @@
 # 把「每次都要手抄的长命令」变成一条不会抄错的命令。
 #
 #   sudo ./scripts/mipl.sh doctor        环境自检（换机器第一件事）
-#   sudo ./scripts/mipl.sh qemu          刷新 OVMF 变量 + 启动 QEMU
+#   sudo ./scripts/mipl.sh target        建一块空的目标盘（装系统用）
+#   sudo ./scripts/mipl.sh qemu          启动 QEMU（--disk 挂盘，--boot c 从盘启动）
 #   sudo ./scripts/mipl.sh shell         进入 nspawn 构建容器
 #
 # 四条设计约束，每条都来自实际踩过的坑（GitHub Issues）：
@@ -41,7 +42,7 @@
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-MIPL_VERSION="0.2.0"
+MIPL_VERSION="0.5.0"
 
 # ── 自身定位 ──────────────────────────────────────────────────────────
 # 循环解引用：脚本被软链到 ~/.local/bin/mipl 时也能定位到真实仓库。
@@ -85,6 +86,11 @@ PROFILE_INNER="/profile"
 # 目标文件用固定名。源文件名各发行版不同（OVMF_VARS.4m.fd / OVMF_VARS_4M.fd），
 # 固定名意味着 QEMU 参数永远不需要跟着变——Issue #8 的第二个错误就出在这里。
 VARS_DST="${OUT_DIR}/OVMF_VARS.fd"
+# 目标盘（A5 的 mipl target）：给线 B 装系统用。默认建在 out/ 里 —— 整个 out/
+# 都被 .gitignore 忽略，盘和它的派生文件都不会误进 git。
+# 40G 是 qcow2 的**虚拟**大小，实际占用随写入增长（刚建好只有约 200 KiB）。
+TARGET_DISK_NAME="${MIPL_DISK_NAME:-target.qcow2}"
+TARGET_DISK_SIZE="${MIPL_DISK_SIZE:-40G}"
 
 # 提示信息里怎么称呼自己：在仓库根目录下写相对路径（好复制），在别处写绝对
 # 路径（照样能跑）。脚本自己不依赖 cwd，那它给出的下一步命令也不该依赖。
@@ -416,6 +422,17 @@ cmd_doctor() {
     _miss "ISO" "${OUT_DIR} 里还没有 .iso —— 先跑 ${MIPL_CMD} build"
   fi
 
+  # 目标盘（A5）：装系统用。有就报一句，没有就告诉你怎么建 ——
+  # 「线 B 卡在没有盘」这件事，应该在这里就能看见。
+  local tdisk="${OUT_DIR}/${TARGET_DISK_NAME}" tinfo
+  if [[ -f "$tdisk" ]]; then
+    tinfo="$(file_size "$tdisk") 占用"
+    if have qemu-img; then tinfo="${tinfo}，虚拟 $(disk_virtual_size "$tdisk")"; fi
+    _line "target disk" "$(basename "$tdisk")  (${tinfo})"
+  else
+    _miss "target disk" "还没有 —— 建一块： ${MIPL_CMD} target"
+  fi
+
   # profile：构建的「源代码」。它不在，mipl build 会直接拒绝运行 ——
   # 所以这一项要能和 ISO 并排看见。
   if [[ -f "${REPO_PROFILE}/profiledef.sh" ]]; then
@@ -461,6 +478,46 @@ _doctor_report() {
 EOF
 }
 
+# ── 目标盘与它的 NVRAM ────────────────────────────────────────────────
+# 一块盘和它的 UEFI 变量是**一套**测试资产：安装器写进 NVRAM 的引导项，决定
+# 「装完重启能不能进新系统」。所以变量文件按盘走，不与 ISO 测试共用那一份 ——
+# 否则任何人跑一次普通 mipl qemu（测构建、测中文），装好系统的引导项就被刷掉了。
+# 名字刻意避开 mipl clean 的 OVMF_VARS*.fd glob：清 ISO 测试残留不该误伤一块
+# 装好系统的盘。删盘走 mipl clean --disk。
+disk_vars_path() {
+  local disk="$1"
+  printf '%s/%s.vars.fd\n' "$(dirname -- "$disk")" "$(basename -- "${disk%.*}")"
+}
+
+# 盘的格式交给 qemu-img 探测，而不是假设 qcow2：format= 写错时 QEMU 会拒绝启动，
+# 报错却像「镜像损坏」，很难查。
+# 用人类可读输出而不是 --output=json：JSON 里嵌套了 child 节点，第一处
+# "format" 是子节点的 "file"，按行解析会拿到错误答案。
+disk_format() {
+  LC_ALL=C qemu-img info -- "$1" 2>/dev/null | sed -n 's/^file format: //p' | head -1
+}
+
+disk_virtual_size() {
+  local n
+  n="$(LC_ALL=C qemu-img info -- "$1" 2>/dev/null \
+      | sed -n 's/^virtual size: .*(\([0-9]*\) bytes).*/\1/p' | head -1)"
+  if [[ -n "$n" ]]; then fmt_size "$n"; else printf '未知\n'; fi
+}
+
+# 变量文件怎么来：refresh = 从固件重拷（NVRAM 清空）；keep = 没有才建，有就留着。
+ensure_vars() {
+  local dst="$1" how="$2"
+  if [[ "$how" == keep && -f "$dst" ]]; then
+    note "变量文件：${dst}（保留 —— NVRAM 里的引导项还在，从盘启动靠的就是它）"
+    return 0
+  fi
+  run cp -f "$OVMF_VARS" "$dst"
+  if [[ $DRY_RUN -eq 0 ]]; then
+    ok "变量文件：${dst}（新拷一份，NVRAM 是干净的）"
+  fi
+  return 0
+}
+
 # ── 命令：vars ────────────────────────────────────────────────────────
 cmd_vars() {
   detect_ovmf || exit 1
@@ -469,9 +526,8 @@ cmd_vars() {
   note "        $OVMF_CODE"
   # 每次都重新复制：引导过的系统会把引导项写进 NVRAM，复用旧文件会让
   # 上一次的引导项影响这一次，表现为「上次能启动、这次不行」。
-  run cp -f "$OVMF_VARS" "$VARS_DST"
+  ensure_vars "$VARS_DST" refresh
   if [[ $DRY_RUN -eq 0 ]]; then
-    ok "已刷新 ${VARS_DST}  ($(file_size "$VARS_DST"))"
     local stale
     for stale in "${OUT_DIR}"/OVMF_VARS*.fd; do
       [[ -e "$stale" ]] || continue
@@ -486,18 +542,80 @@ cmd_vars() {
 cmd_qemu() {
   have qemu-system-x86_64 || die "找不到 qemu-system-x86_64。先跑： ${MIPL_CMD} deps"
 
-  local iso="${1:-}"
-  if [[ -z "$iso" ]]; then
-    iso="$(latest_iso)" || die "${OUT_DIR} 里没有 .iso。先跑： ${MIPL_CMD} build"
-  elif [[ ! -f "$iso" && -f "${OUT_DIR}/${iso}" ]]; then
-    iso="${OUT_DIR}/${iso}"
+  local iso="" disk="" boot="d" want_fresh=0 want_keep=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --disk)
+        [[ -n "${2:-}" ]] || die "--disk 后面要跟目标盘（裸文件名按 ${OUT_DIR} 解析）"
+        disk="$2"; shift 2 ;;
+      --boot)
+        [[ -n "${2:-}" ]] || die "--boot 后面要跟 d 或 c"
+        boot="$2"; shift 2 ;;
+      --fresh-vars) want_fresh=1; shift ;;
+      --keep-vars)  want_keep=1;  shift ;;
+      -*) die "未知选项：$1（用 --help 看用法）" ;;
+      *)
+        [[ -z "$iso" ]] || die "ISO 参数只能给一个，多出来的是：$1"
+        iso="$1"; shift ;;
+    esac
+  done
+
+  [[ "$boot" == d || "$boot" == c ]] \
+    || die "--boot 只接受 d（光驱优先，装系统用）或 c（从盘启动），收到：${boot}"
+  [[ $want_fresh -eq 0 || $want_keep -eq 0 ]] \
+    || die "--fresh-vars 与 --keep-vars 只能选一个"
+
+  # ── 目标盘 ──
+  local disk_fmt="" vars_file="$VARS_DST"
+  if [[ -n "$disk" ]]; then
+    [[ -f "$disk" || -f "${OUT_DIR}/${disk}" ]] || die "目标盘不存在：${disk}
+     先建一块： ${MIPL_CMD} target"
+    [[ -f "$disk" ]] || disk="${OUT_DIR}/${disk}"
+    have qemu-img || die "找不到 qemu-img（要用它探测盘的格式）。Arch → pacman -S qemu-img"
+    disk_fmt="$(disk_format "$disk")"
+    [[ -n "$disk_fmt" ]] || die "读不出盘的格式：${disk}
+     文件可能坏了，先看： qemu-img info '${disk}'"
+    vars_file="$(disk_vars_path "$disk")"
   fi
-  [[ -f "$iso" ]] || die "ISO 不存在：$iso"
+
+  # ── 从盘启动 = 不挂 ISO ──
+  # 「挂着 ISO 又从盘启动」是最坏的组合：盘上引导不了时它会安静地回落到 ISO，
+  # 你会在 Live 环境里以为装好的系统起来了。宁可给你一个明确的 no bootable device。
+  if [[ "$boot" == c ]]; then
+    [[ -n "$disk" ]] || die "--boot c 是「从盘启动」，得先有 --disk FILE"
+    [[ -z "$iso" ]] || die "--boot c 不挂 ISO —— 它要验的是盘上的系统。
+     去掉 ISO 参数，或改用 --boot d（装系统时用这个）。"
+    [[ $want_fresh -eq 0 ]] || die "--boot c 靠的就是 NVRAM 里的引导项，不能再加 --fresh-vars"
+    want_keep=1
+  fi
+
+  # ── ISO ──
+  if [[ -n "$iso" ]]; then
+    [[ -f "$iso" || -f "${OUT_DIR}/${iso}" ]] || die "ISO 不存在：$iso"
+    [[ -f "$iso" ]] || iso="${OUT_DIR}/${iso}"
+  elif [[ "$boot" == d ]]; then
+    iso="$(latest_iso)" || die "${OUT_DIR} 里没有 .iso。先跑： ${MIPL_CMD} build"
+  fi
 
   detect_ovmf || exit 1
-  cmd_vars
+  ensure_out_dir
 
-  info "引导： $(basename "$iso")  ($(file_size "$iso"))"
+  # ── 变量文件（NVRAM）──
+  # 有盘：默认**保留** —— 装完重启进新系统，靠的是安装器写进 NVRAM 的那个引导项。
+  # 没盘：保持老行为，每次刷新（反复引导同一个 ISO 时，旧引导项只会添乱）。
+  local vars_how="refresh"
+  if [[ -n "$disk"      ]]; then vars_how="keep";    fi
+  if [[ $want_fresh -eq 1 ]]; then vars_how="refresh"; fi
+  if [[ $want_keep  -eq 1 ]]; then vars_how="keep";    fi
+  ensure_vars "$vars_file" "$vars_how"
+
+  if [[ -n "$iso" ]]; then
+    info "引导 ISO： $(basename "$iso")  ($(file_size "$iso"))"
+  fi
+  if [[ -n "$disk" ]]; then
+    info "目标盘：   $(basename "$disk")  ($(file_size "$disk") 占用，虚拟 $(disk_virtual_size "$disk")，${disk_fmt})"
+    note "           客机里是 /dev/vda（virtio）—— 分区前先 lsblk 确认"
+  fi
 
   # 参数逐条放进数组：file= 永远和它所属的 -drive 在同一个元素里，
   # 换行/缩进都不可能把它们拆开 —— Issue #8 就是这么来的。
@@ -505,6 +623,7 @@ cmd_qemu() {
     qemu-system-x86_64
     -name "MipLinux 测试"
     -m "$MEM_MB"
+    -smp "$SMP"
   )
   if [[ -w /dev/kvm ]]; then
     q+=(-enable-kvm)
@@ -513,9 +632,16 @@ cmd_qemu() {
   fi
   q+=(
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
-    -drive "if=pflash,format=raw,file=${VARS_DST}"
-    -cdrom "$iso"
-    -boot order=d
+    -drive "if=pflash,format=raw,file=${vars_file}"
+  )
+  if [[ -n "$disk" ]]; then
+    q+=(-drive "file=${disk},if=virtio,format=${disk_fmt}")
+  fi
+  if [[ -n "$iso" ]]; then
+    q+=(-cdrom "$iso")
+  fi
+  q+=(
+    -boot "order=${boot}"
     -netdev user,id=n0
     -device virtio-net,netdev=n0
   )
@@ -547,10 +673,80 @@ cmd_qemu() {
   fi
 
   echo
-  note "预期结果：出现 [root@archiso ~]# 提示符（releng 没有桌面环境，这是成功）"
+  if [[ "$boot" == c ]]; then
+    note "预期结果：进入盘上装好的系统（不是 Live 环境）"
+    note "盘上若没有可引导的 ESP 项，UEFI 会给你 no bootable device / UEFI shell ——"
+    note "那说明安装器没把引导写上，不是这次启动的问题（NVRAM 我们特意保留了）。"
+  elif [[ -n "$disk" ]]; then
+    note "预期结果：出现 [root@archiso ~]# 提示符（Live 环境；releng 没有桌面环境）"
+    note "系统就装在挂的那块盘上：Live 里 lsblk 应该看到 vda"
+  else
+    note "预期结果：出现 [root@archiso ~]# 提示符（releng 没有桌面环境，这是成功）"
+  fi
   note "退出 QEMU：窗口里 Ctrl+A 然后 X，或直接关窗口"
   echo
   run "${q[@]}"
+}
+
+# ── 命令：target ──────────────────────────────────────────────────────
+# 建一块空的目标盘给线 B 装系统用。它本身只做一件事：qemu-img create ——
+# 但要把「下一步敲什么」和「它的 NVRAM 在哪」一起说清楚，否则挂载那一步
+# 只能靠人回忆，而回忆出来的命令迟早会漏掉 --disk c 这类关键参数。
+cmd_target() {
+  local name="$TARGET_DISK_NAME" size="$TARGET_DISK_SIZE" force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        [[ -n "${2:-}" ]] || die "--name 后面要跟文件名"
+        name="$2"; shift 2 ;;
+      --size)
+        [[ -n "${2:-}" ]] || die "--size 后面要跟大小，例如 40G"
+        size="$2"; shift 2 ;;
+      --force) force=1; shift ;;
+      -*) die "未知选项：$1（用 --help 看用法）" ;;
+      *)  die "target 不接受位置参数：$1（文件名用 --name）" ;;
+    esac
+  done
+
+  have qemu-img || die "找不到 qemu-img。装它：
+     Arch / CachyOS   sudo pacman -S qemu-img
+     Fedora           sudo dnf install qemu-img"
+  ensure_out_dir
+
+  # 裸文件名按 out/ 解析，和 qemu 的 ISO 参数同一套约定。
+  local path="$name"
+  [[ "$path" == */* ]] || path="${OUT_DIR}/${path}"
+  local vars; vars="$(disk_vars_path "$path")"
+
+  if [[ -e "$path" ]]; then
+    if [[ $force -eq 0 ]]; then
+      die "目标盘已存在：${path}
+     它上面可能已经装着一个系统 —— 所以默认不覆盖。
+       看看它：   qemu-img info '${path}'
+       直接用：   ${MIPL_CMD} qemu --disk $(basename -- "$path")
+       重新造：   ${MIPL_CMD} target --force   （盘和它的 NVRAM 一起换新）"
+    fi
+    warn "--force：覆盖已有的盘，并丢弃它的 NVRAM（$(basename -- "$vars")）"
+    run rm -f -- "$path" "$vars"
+  fi
+
+  info "建目标盘：$(basename -- "$path")  虚拟大小 ${size}"
+  run qemu-img create -f qcow2 -- "$path" "$size"
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    return 0
+  fi
+  [[ -f "$path" ]] || die "qemu-img 没有产出 ${path}，看上面的报错"
+
+  ok "已创建 ${path}（占用 $(file_size "$path")，虚拟 $(disk_virtual_size "$path")）"
+  note "它的 NVRAM 会存在 ${vars}（首次挂载时自动生成，之后一直保留）"
+  echo
+  info "下一步："
+  note "  1) 装系统（ISO 优先启动，同时挂上这块盘）："
+  note "       ${MIPL_CMD} qemu --disk $(basename -- "$path")"
+  note "  2) 装完重启进新系统（不挂 ISO、保留 NVRAM）："
+  note "       ${MIPL_CMD} qemu --disk $(basename -- "$path") --boot c"
+  note "  在 Live 里它应该是 /dev/vda —— 动手分区之前先 lsblk 确认。"
 }
 
 # ── 命令：shell / stop ────────────────────────────────────────────────
@@ -790,9 +986,33 @@ cmd_deps() {
 }
 
 # ── 命令：clean ───────────────────────────────────────────────────────
+# 删不可逆的东西之前问一句。管道/脚本里（非 tty）直接放行 ——
+# 否则自动化会被一个等不到输入的提示卡死。
+confirm_delete() {
+  local ans=""
+  [[ $DRY_RUN -eq 0 && -t 0 ]] || return 0
+  printf '输入 yes 确认删除：'
+  read -r ans || ans=""
+  if [[ "$ans" != "yes" ]]; then
+    note "已取消，什么都没删"
+    return 1
+  fi
+  return 0
+}
+
 cmd_clean() {
-  local with_iso=0
-  [[ "${1:-}" == "--iso" ]] && with_iso=1
+  local with_iso=0 with_disk=0 disk_name="$TARGET_DISK_NAME"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --iso)  with_iso=1; shift ;;
+      --disk)
+        # 盘名可选：mipl target --name 造出来的盘也能在这里删掉
+        with_disk=1
+        if [[ -n "${2:-}" && "$2" != -* ]]; then disk_name="$2"; shift 2; else shift; fi ;;
+      -*) die "未知选项：$1（用 --help 看用法）" ;;
+      *)  die "clean 不接受位置参数：$1（盘名跟在 --disk 后面）" ;;
+    esac
+  done
 
   local -a vars=()
   shopt -s nullglob
@@ -815,23 +1035,30 @@ cmd_clean() {
     if [[ ${#isos[@]} -gt 0 ]]; then
       warn "即将删除 ${#isos[@]} 个 ISO（重新构建要几分钟到几十分钟）"
       printf '  %s\n' "${isos[@]##*/}"
-      # 删 ISO 是不可逆的，交互时问一句；管道/脚本里（非 tty）直接执行，
-      # 否则自动化会被一个等不到输入的提示卡死。
-      if [[ $DRY_RUN -eq 0 && -t 0 ]]; then
-        local ans=""
-        printf '输入 yes 确认删除：'
-        read -r ans || ans=""
-        if [[ "$ans" != "yes" ]]; then
-          note "已取消，什么都没删"
-          return 0
-        fi
-      fi
-      run rm -f "${isos[@]}"
+      if confirm_delete; then run rm -f "${isos[@]}"; fi
     else
       note "没有 ISO 可删"
     fi
   else
     note "ISO 不动。真要删： ${MIPL_CMD} clean --iso"
+  fi
+
+  # 目标盘：**绝不默认删**。它上面可能装着一个系统，重建要跑一整遍安装。
+  # 它不在上面那个 OVMF_VARS*.fd glob 里，所以「清变量」不会误伤装好的系统。
+  if [[ $with_disk -eq 1 ]]; then
+    local disk="$disk_name" dvar
+    [[ "$disk" == */* ]] || disk="${OUT_DIR}/${disk}"
+    dvar="$(disk_vars_path "$disk")"
+    if [[ -e "$disk" || -e "$dvar" ]]; then
+      warn "即将删除目标盘及其 NVRAM（盘上的系统会一起没）："
+      if [[ -e "$disk" ]]; then printf '  %s\n' "${disk##*/}"; fi
+      if [[ -e "$dvar" ]]; then printf '  %s\n' "${dvar##*/}"; fi
+      if confirm_delete; then run rm -f -- "$disk" "$dvar"; fi
+    else
+      note "没有目标盘可删：${disk}"
+    fi
+  else
+    note "目标盘不动（它上面可能是装好的系统）。真要删： ${MIPL_CMD} clean --disk"
   fi
 }
 
@@ -851,9 +1078,23 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
 命令：
   doctor [--report]   环境自检。换机器、换人接手时先跑这个；
                       --report 输出一段可粘进文档的 Markdown 表格。
-  qemu [ISO]          刷新一份全新的 OVMF 变量文件并启动 QEMU。
-                      不给 ISO 就用 out/ 里最新的那个。
-  vars                只复制 OVMF 变量文件，不启动 QEMU。
+  qemu [ISO] [--disk FILE] [--boot d|c] [--fresh-vars] [--keep-vars]
+                      启动 QEMU。不给 ISO 就用 out/ 里最新的那个。
+      --disk FILE     挂一块目标盘（裸文件名按 out/ 解析）。**这块盘的 NVRAM
+                      存在 out/<盘名>.vars.fd**：首次挂载自动生成，之后一直保留
+                      —— ISO 测试用的 out/OVMF_VARS.fd 永远不会碰它。装完系统
+                      能重启进新系统，靠的就是它的 NVRAM 没被刷掉。
+      --boot d        光驱优先（默认）。**装系统用这个**。
+      --boot c        从盘启动：不挂 ISO、保留 NVRAM。**装完重启用这个**。
+                      盘上没有 ESP 引导项时你会看到 no bootable device ——
+                      那是诚实的失败，不会安静地回落到 Live 环境骗过你。
+      --fresh-vars    重置变量文件（NVRAM 清空，从头来一遍）。
+      --keep-vars     不重置（ISO 测试时想复现「上次的引导项」才用）。
+  target [--name F] [--size 40G] [--force]
+                      建一块空的目标盘（默认 out/target.qcow2）给安装器用。
+                      已存在就拒绝：它上面可能装着一个系统。
+                      --force 覆盖，并连同它的 NVRAM 一起换新。
+  vars                只复制 OVMF 变量文件（out/OVMF_VARS.fd），不启动 QEMU。
   shell [--restart]   进入 nspawn 构建容器（自动挂好 /out 与只读的 /profile）。
                       旧容器还开着时会拦住你，--restart 会先关掉它。
   stop [--force]      关闭构建容器（poweroff；--force 用 terminate）。
@@ -871,7 +1112,10 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                       拷 airootfs、生成 ISO，交给你一个「构建成功」的旧产物。
   iso                 列出 out/ 里的 ISO。
   deps [--install]    打印（或执行）本机需要装的包。
-  clean [--iso]       删除 OVMF 变量文件；--iso 连 ISO 一起删。
+  clean [--iso] [--disk [FILE]]
+                      删除 OVMF 变量文件；--iso 连 ISO 一起删；
+                      --disk 删目标盘及其 NVRAM（默认 out/target.qcow2；
+                      不可逆，会先问一句）。
 
 全局选项：
   -n, --dry-run       只打印将要执行的命令，不做任何改动。
@@ -885,6 +1129,8 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   MIPL_MACHINE    容器机器名      默认：archbuild
   MIPL_MEM        QEMU 内存(MB)   默认：4096
   MIPL_SMP        QEMU vCPU 数    默认：4（Live 引导 1 个也够，装机时多点省时间）
+  MIPL_DISK_NAME  目标盘文件名    默认：target.qcow2（mipl target 用，落在 out/）
+  MIPL_DISK_SIZE  目标盘虚拟大小  默认：40G（qcow2 稀疏文件，占用随写入增长）
   MIPL_WORK_DIR   容器内工作目录  默认：/var/tmp/mipl-work（别用 /tmp：内存盘）
   MIPL_PROFILE    宿主机 profile  默认：\$MIPL_ROOT/profile（build 与 shell 都用它）
   MIPL_PROFILE_RW 设 1 则 profile 可写挂载（默认只读；只在排查构建失败时用）
@@ -940,6 +1186,7 @@ main() {
     doctor)  cmd_doctor "$@" ;;
     vars)    cmd_vars "$@" ;;
     qemu)    cmd_qemu "$@" ;;
+    target)  cmd_target "$@" ;;
     shell)   cmd_shell "$@" ;;
     stop)    cmd_stop "$@" ;;
     build)   cmd_build "$@" ;;

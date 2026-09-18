@@ -1,0 +1,95 @@
+# 本文件是 MipLinux/.github（组织级）中同名文件的副本，内容保持一致。
+# 原因：组织级 ISSUE_TEMPLATE 在本仓库实测不生效（New issue 选择页空白），
+# 而仓库级模板一定会显示。修改请先改组织级，再同步到这里。
+name: 报告 Bug
+description: 报告功能异常、构建失败或系统行为不正确
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > ⚠️ **如果你依据任何文档执行操作遇到了问题，请改用「文档问题」模板。**
+        > 那类问题通常不是代码 Bug，而是文档与实际情况不符，处理方式不一样。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索过现有 Issue，没有重复
+          required: true
+        - label: 这不是安全漏洞报告（安全漏洞请走 SECURITY.md 的私下通道）
+          required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 问题出现在哪个阶段
+      options:
+        - 构建 ISO（mipl.sh build）
+        - QEMU 测试（mipl.sh qemu）
+        - Live 环境启动后
+        - 安装过程
+        - 安装后的系统
+        - 文档与脚本本身
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 发生了什么，以及你期望发生什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请给出准确的命令或操作序列，不要写「按文档操作」。
+      placeholder: |
+        1. 执行 `sudo ./scripts/mipl.sh build`
+        2. 等待到……
+        3. 出现……
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: 你所在的提交
+      description: 运行 `git rev-parse --short HEAD` 的结果。
+      placeholder: c689e09
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: 宿主机环境
+      description: 发行版与版本、内核版本、QEMU 版本。
+      placeholder: Fedora 42 / 6.15.4 / QEMU 10.0.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: |
+        构建或运行日志。**请贴文本，不要只贴截图** —— 文本可以搜索和引用。
+        注意删除日志中的个人信息。
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 你已经尝试过什么
+      description: 排查过程能帮我们省下大量时间，即使没有成功也值得写。
+    validations:
+      required: false

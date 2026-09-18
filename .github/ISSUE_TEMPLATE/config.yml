@@ -1,0 +1,11 @@
+# 本文件是 MipLinux/.github（组织级）中同名文件的副本，内容保持一致。
+# 原因：组织级 ISSUE_TEMPLATE 在本仓库实测不生效（New issue 选择页空白），
+# 而仓库级模板一定会显示。修改请先改组织级，再同步到这里。
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 报告安全漏洞
+    url: https://github.com/MipLinux/.github/blob/main/SECURITY.md
+    about: 请不要在公开 Issue 中披露安全问题，请走私下报告通道。
+  - name: 💬 先读项目文档
+    url: https://github.com/MipLinux/.github
+    about: 构建流程、环境要求与协作约定在这份说明里，可能已经回答了你的问题。

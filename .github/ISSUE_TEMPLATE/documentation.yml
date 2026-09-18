@@ -1,0 +1,62 @@
+# 本文件是 MipLinux/.github（组织级）中同名文件的副本，内容保持一致。
+# 原因：组织级 ISSUE_TEMPLATE 在本仓库实测不生效（New issue 选择页空白），
+# 而仓库级模板一定会显示。修改请先改组织级，再同步到这里。
+name: 文档问题
+description: 依据文档操作时遇到错误、歧义或缺失
+title: "[文档] "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个项目的文档是技术资产。文档写错的代价比代码写错更高 ——
+        因为维护者在两台不同的机器上照着它操作。
+
+        所以这类 Issue 和 Bug 一样重要，请放心提。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经搜索过现有 Issue，没有重复
+          required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: 哪份文档
+      description: 给出文件路径，方便定位。
+      placeholder: docs/knowledge/02-环境与工具链.md
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 命令/步骤照做会失败
+        - 内容与实际情况不符
+        - 表述有歧义，读不出该怎么做
+        - 缺少必要的前置说明
+        - 缺少某个主题的文档
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: 问题描述
+      description: 你照做的步骤、实际结果、以及你原本期望的结果。
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: 你建议怎么改
+      description: 如果你已经知道正确的做法，写在这里可以直接省一轮来回。
+    validations:
+      required: false

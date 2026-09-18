@@ -65,8 +65,23 @@ OUT_DIR="${MIPL_OUT_DIR:-${REPO_ROOT}/out}"
 CONTAINER_DIR="${MIPL_CONTAINER:-/var/lib/machines/archbuild}"
 MACHINE_NAME="${MIPL_MACHINE:-archbuild}"
 MEM_MB="${MIPL_MEM:-4096}"
-# 容器内 mkarchiso 的工作目录。Issue #6：/tmp 空间不足会导致构建失败。
-INNER_WORK_DIR="${MIPL_WORK_DIR:-/tmp/work}"
+# QEMU 的 vCPU 数。默认 4：Live 引导 1 个也够，但进去敲命令、以及以后挂盘
+# 装系统（A5 的 mipl qemu --disk）时单核会明显拖慢。
+SMP="${MIPL_SMP:-4}"
+# 容器内 mkarchiso 的工作目录。**不要用 /tmp**：systemd-nspawn 默认把容器的
+# /tmp 覆盖成一块 tmpfs（内存），默认只有 10% 内存大小（本机 30 GiB → 3.0 GiB）。
+# 构建树到写 EFI 镜像时已有近 3 GiB，撞上就是：
+#     plain_io read/write: No space left on device
+# 这就是 Issue #6「/tmp 空间不足」的真身。容器里的 /var/tmp 是普通目录，
+# 落在宿主磁盘上（2026-09-18 手工构建用的就是 /var/tmp/mkarchiso）。
+INNER_WORK_DIR="${MIPL_WORK_DIR:-/var/tmp/mipl-work}"
+# 仓库里的 profile：构建的「源代码」。容器不复制它，只读挂载到 /profile ——
+# 这样「构建用的是哪一份」就是结构上确定的，不靠人记。
+REPO_PROFILE="${MIPL_PROFILE:-${REPO_ROOT}/profile}"
+# 容器内原版 releng：基线（--baseline）用的那份，由容器里的 archiso 包提供。
+BASELINE_PROFILE="/usr/share/archiso/configs/releng"
+# 挂进容器的固定路径。build 与 shell 都挂在同一个位置，两个入口看到的是一份东西。
+PROFILE_INNER="/profile"
 # 目标文件用固定名。源文件名各发行版不同（OVMF_VARS.4m.fd / OVMF_VARS_4M.fd），
 # 固定名意味着 QEMU 参数永远不需要跟着变——Issue #8 的第二个错误就出在这里。
 VARS_DST="${OUT_DIR}/OVMF_VARS.fd"
@@ -400,6 +415,17 @@ cmd_doctor() {
   else
     _miss "ISO" "${OUT_DIR} 里还没有 .iso —— 先跑 ${MIPL_CMD} build"
   fi
+
+  # profile：构建的「源代码」。它不在，mipl build 会直接拒绝运行 ——
+  # 所以这一项要能和 ISO 并排看见。
+  if [[ -f "${REPO_PROFILE}/profiledef.sh" ]]; then
+    local iso_name
+    iso_name="$(sed -n 's/^iso_name="\(.*\)"/\1/p' "${REPO_PROFILE}/profiledef.sh" | head -1)"
+    _line "profile" "${REPO_PROFILE}  (iso_name=${iso_name:-未知}) → 容器内 ${PROFILE_INNER}"
+  else
+    _bad "profile" "仓库里没有 ${REPO_PROFILE}/profiledef.sh —— ${MIPL_CMD} build 会拒绝运行"
+  fi
+
   if [[ -d "$OUT_DIR" ]]; then
     _line "disk/out" "$(df -h --output=avail "$OUT_DIR" 2>/dev/null | tail -1 | tr -d ' ') 可用"
   fi
@@ -558,11 +584,30 @@ cmd_shell() {
 
   info "进入容器 ${CONTAINER_DIR}"
   note "宿主机 ${OUT_DIR}  →  容器内 /out"
+
+  # 和 mipl build 挂在同一个位置：容器里永远能在 /profile 看到仓库的 profile，
+  # 于是「进容器 diff 一下」（A1 的验收）和「构建」看到的是同一份东西。
+  # 只读，理由同 build：profile 的改动只能从宿主机走 git。
+  local -a bind_args=(--bind "${OUT_DIR}:/out")
+  local shell_profile="${REPO_PROFILE}"
+  [[ "$shell_profile" == /* ]] || shell_profile="${REPO_ROOT}/${shell_profile}"
+  if [[ -f "${shell_profile}/profiledef.sh" ]]; then
+    run mkdir -p "${CONTAINER_DIR}${PROFILE_INNER}"   # 挂载点先备好（老版本 systemd 不自动建）
+    bind_args+=(
+      --bind-ro "${shell_profile}:${PROFILE_INNER}"
+      --setenv "MIPL_PROFILE=${PROFILE_INNER}"
+    )
+    note "宿主机 ${shell_profile}  →  容器内 ${PROFILE_INNER}（只读）"
+    note "对照的原版 releng 在容器内 ${BASELINE_PROFILE}"
+  else
+    warn "仓库里没有 ${shell_profile}/profiledef.sh —— 这次不挂 ${PROFILE_INNER}"
+  fi
+
   note "用完请在容器内执行 poweroff，别直接关窗口"
   echo
   run_root systemd-nspawn --directory="${CONTAINER_DIR}" \
     -u root --machine="${MACHINE_NAME}" \
-    --bind "${OUT_DIR}:/out"
+    "${bind_args[@]}"
 }
 
 cmd_stop() {
@@ -593,31 +638,85 @@ cmd_stop() {
 }
 
 # ── 命令：build ───────────────────────────────────────────────────────
+# 默认用仓库里的 profile/ 构建，--baseline 改用容器内原版 releng。
+# profile 只在宿主机上定一次、在宿主机上先校验，然后只读挂进容器 —— 见
+# baseline-build.sh 顶部关于「为什么 profile 要挂进容器」的说明。
 cmd_build() {
-  local -a passthrough=()
+  local -a passthrough=(--auto)
+  local baseline=0 profile_given=0 profile="$REPO_PROFILE"
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --work)
         [[ -n "${2:-}" ]] || die "--work 后面要跟目录"
-        INNER_WORK_DIR="$2"; shift 2 ;;
+        INNER_WORK_DIR="$2"; passthrough+=(--work "$2"); shift 2 ;;
+      --baseline)
+        baseline=1; passthrough+=(--baseline); shift ;;
+      --profile)
+        [[ -n "${2:-}" ]] || die "--profile 后面要跟 profile 目录"
+        profile="$2"; profile_given=1; shift 2 ;;
+      --keep-work)
+        # 默认构建前会清工作目录（坑 1）。这个开关只给调试 mkarchiso 的
+        # _run_once 行为用 —— 清理本身在 baseline-build.sh 里做。
+        passthrough+=(--keep-work); shift ;;
+      --auto)
+        shift ;;                       # 默认就是一条龙；交互式请用 mipl shell
       --) shift; passthrough+=("$@"); break ;;
-      *)  passthrough+=("$1"); shift ;;
+      -*) die "未知选项：$1（用 --help 看用法）" ;;
+      *)  die "未知参数：$1（用 --help 看用法）" ;;
     esac
   done
+
+  [[ $baseline -eq 1 && $profile_given -eq 1 ]] \
+    && die "--baseline 与 --profile 只能选一个"
 
   local script="${SCRIPT_DIR}/baseline-build.sh"
   [[ -x "$script" ]] || die "找不到可执行的 ${script}"
 
   ensure_out_dir
 
+  if [[ $baseline -eq 1 ]]; then
+    info "构建 profile： 容器内原版 releng（${BASELINE_PROFILE}）"
+    note "  基线：用它分开「环境坏了」和「自己改坏了」"
+  else
+    # 相对路径按仓库根解析 —— 这条命令在仓库外敲也一样能用。
+    [[ "$profile" == /* ]] || profile="${REPO_ROOT}/${profile}"
+    profile="$(realpath -m -- "$profile")"
+    [[ -f "${profile}/profiledef.sh" ]] || die "profile 目录里没有 profiledef.sh：${profile}
+      （要用容器内原版 releng 构建，加 --baseline）"
+    passthrough+=(--profile "$profile")
+    info "构建 profile： ${profile}"
+    if [[ "${MIPL_PROFILE_RW:-0}" == 1 ]]; then
+      note "  容器内固定挂在 ${PROFILE_INNER}，可写挂载（MIPL_PROFILE_RW=1）"
+    else
+      note "  容器内固定挂在 ${PROFILE_INNER}，只读挂载；需要可写时设 MIPL_PROFILE_RW=1"
+    fi
+  fi
+
   info "构建工作目录（容器内）： ${INNER_WORK_DIR}"
-  note "  空间不够时换一个： ${MIPL_CMD} build --work /var/tmp/mipl-work（Issue #6）"
+  note "  **不要放在 /tmp**：容器里它是 nspawn 挂的内存盘（10% 内存），必然 ENOSPC"
+  note "  构建前会自动清空它（坑 1：_run_once 标记会让改动静默失效）；"
+  note "  要故意保留上一次的目录： --keep-work"
 
   # baseline-build.sh 已经处理了「下载 bootstrap → 解压 → 进容器构建」的完整流程。
-  # 这里只负责把工作目录传进去，不重复实现。用 env 显式赋值而不是靠环境继承：
+  # 这里只负责把配置传进去，不重复实现。用 env 显式赋值而不是靠环境继承：
   # 如果用户是用 `sudo MIPL_WORK_DIR=… mipl build` 调用的，sudo 会保留；但直接
   # 在普通 shell 里 export 的变量，sudo 默认会清掉 —— 显式传一次最稳。
-  run_root env "MIPL_WORK_DIR=${INNER_WORK_DIR}" "$script" "${passthrough[@]}"
+  # MIPL_OUT_DIR / MIPL_CONTAINER 也要传：否则子脚本按自己的默认值算，
+  # 产物目录和挂载点会和上面提示里说的不是同一个。
+  local -a env_args=(
+    "MIPL_WORK_DIR=${INNER_WORK_DIR}"
+    "MIPL_OUT_DIR=${OUT_DIR}"
+    "MIPL_CONTAINER=${CONTAINER_DIR}"
+    "MIPL_MACHINE=${MACHINE_NAME}"
+  )
+  # 试运行要一路传到底：否则 -n 只打印到这一步，容器里真正要跑的那条
+  # mkarchiso 命令（以及 profile 挂在哪）就看不见了。
+  [[ $DRY_RUN -eq 1 ]] && env_args+=("MIPL_DRY_RUN=1")
+  # 同上：显式传，别依赖 sudo 保留环境变量。
+  [[ -n "${MIPL_PROFILE_RW:-}" ]] && env_args+=("MIPL_PROFILE_RW=${MIPL_PROFILE_RW}")
+
+  run_root env "${env_args[@]}" "$script" "${passthrough[@]}"
 }
 
 # ── 命令：iso ─────────────────────────────────────────────────────────
@@ -755,11 +854,21 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   qemu [ISO]          刷新一份全新的 OVMF 变量文件并启动 QEMU。
                       不给 ISO 就用 out/ 里最新的那个。
   vars                只复制 OVMF 变量文件，不启动 QEMU。
-  shell [--restart]   进入 nspawn 构建容器（自动 --bind）。
+  shell [--restart]   进入 nspawn 构建容器（自动挂好 /out 与只读的 /profile）。
                       旧容器还开着时会拦住你，--restart 会先关掉它。
   stop [--force]      关闭构建容器（poweroff；--force 用 terminate）。
-  build [--work DIR]  跑 baseline-build.sh：下载 bootstrap → 解压 → 构建 ISO。
-                      DIR 是容器内的工作目录，默认 /tmp/work。
+  build [选项]        跑 baseline-build.sh：下载 bootstrap → 解压 → 构建 ISO。
+                      默认用仓库里的 profile/（只读挂进容器的 /profile）。
+      --baseline      改用容器内原版 releng 构建，即「基线」：
+                      构建挂了时跑一次它，就能分开「环境坏了」和「自己改坏了」。
+      --profile DIR   改用指定的 profile 目录（宿主机路径，相对仓库根解析）。
+      --work DIR      容器内的工作目录，默认 /var/tmp/mipl-work。
+                      **别放 /tmp**：容器里它是 nspawn 挂的内存盘（10% 内存），
+                      会在写 efiboot.img 时以 ENOSPC 失败。构建前会自动清空它
+                      —— 见 --keep-work。
+      --keep-work     保留工作目录，构建前不清理。只在调试 mkarchiso 的
+                      _run_once 行为时用：正常构建必须清，否则它会跳过装包、
+                      拷 airootfs、生成 ISO，交给你一个「构建成功」的旧产物。
   iso                 列出 out/ 里的 ISO。
   deps [--install]    打印（或执行）本机需要装的包。
   clean [--iso]       删除 OVMF 变量文件；--iso 连 ISO 一起删。
@@ -775,7 +884,10 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   MIPL_CONTAINER  容器目录        默认：/var/lib/machines/archbuild
   MIPL_MACHINE    容器机器名      默认：archbuild
   MIPL_MEM        QEMU 内存(MB)   默认：4096
-  MIPL_WORK_DIR   容器内工作目录  默认：/tmp/work
+  MIPL_SMP        QEMU vCPU 数    默认：4（Live 引导 1 个也够，装机时多点省时间）
+  MIPL_WORK_DIR   容器内工作目录  默认：/var/tmp/mipl-work（别用 /tmp：内存盘）
+  MIPL_PROFILE    宿主机 profile  默认：\$MIPL_ROOT/profile（build 与 shell 都用它）
+  MIPL_PROFILE_RW 设 1 则 profile 可写挂载（默认只读；只在排查构建失败时用）
   MIPL_OVMF_DIR   只在这个目录里找固件（不做兜底扫描，便于复现问题）
   MIPL_OVMF_CODE  显式指定固件本体
   MIPL_OVMF_VARS  显式指定变量文件

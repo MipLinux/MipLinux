@@ -1,18 +1,2 @@
-# MipLinux · Live 环境要编译的 locale
-#
-# 生效方式：本文件由 airootfs 叠加进 squashfs，然后由构建期 hook
-#   etc/pacman.d/hooks/00-locale-gen.hook
-# 在 pacstrap 之后、于 airootfs 内部执行 locale-gen。
-# 为什么只能在构建期做：Live 的 / 来自只读 squashfs，/usr/lib/locale 运行期不可写，
-# 没有第二次机会（releng 给 /etc/pacman.d/gnupg 单挂 tmpfs 是同一类原因）。
-#
-# locale-gen 的行为：先删掉整个 /usr/lib/locale/locale-archive 再重新生成，
-# 所以「这里没列 = 系统里没有」。不要漏掉兜底语言，否则除了 C.UTF-8 之外
-# 设任何 LANG 都会报 "cannot change locale"。
-#
-# 格式：<locale> <charmap>
-# 要加别的语言，从 glibc 原版 locale.gen 里抄对应行过来即可。
-# 体积量级：每个 UTF-8 locale 约 1–2 MiB（精确数字等 A7/P3 一起量）。
-
 en_US.UTF-8 UTF-8
 zh_CN.UTF-8 UTF-8

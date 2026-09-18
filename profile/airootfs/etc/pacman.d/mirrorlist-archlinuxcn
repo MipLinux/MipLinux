@@ -15,14 +15,14 @@
 #
 
 ## 中国大陆
-Server = https://mirrors.ustc.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.aliyun.com/archlinuxcn/$arch
-Server = https://mirrors.nju.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.ustc.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.hit.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.sustech.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.cloud.tencent.com/archlinuxcn/$arch
 Server = https://repo.huaweicloud.com/archlinuxcn/$arch
+Server = https://mirrors.nju.edu.cn/archlinuxcn/$arch
 
 ## 香港
 Server = https://mirrors.xtom.hk/archlinuxcn/$arch

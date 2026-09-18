@@ -3,7 +3,9 @@ on:
   issues:
     types: [opened]
   pull_request:
-    types: [opened]
+    # reopened/synchronize 也触发：一是 PR 重开或补提交时能补上分配，
+    # 二是让改了 workflow 之后能通过新事件（而非 Re-run）拿到新版本文件。
+    types: [opened, reopened, synchronize]
 jobs:
   run:
     runs-on: ubuntu-latest

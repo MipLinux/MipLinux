@@ -1,0 +1,45 @@
+#
+# Arch Linux CN 中文社区仓库镜像列表
+# MipLinux
+#
+# 格式：Server = <url>/$arch
+# ⚠️ 注意是 $arch，不是 $repo/os/$arch —— 这个仓库的目录结构不一样。
+#
+# 排序思路与主 mirrorlist 一致：大陆 -> 香港 -> 台湾 -> 日本 -> 新加坡 -> 美国 -> 官方主站
+# （archlinuxcn 官方没有韩国节点，韩国只存在于主 Arch 仓库的镜像列表里）
+#
+# 这份文件会被拷进 ISO 的 /etc/pacman.d/mirrorlist-archlinuxcn，
+# 由 /etc/pacman.conf 的 [archlinuxcn] 段 Include。
+#
+# 节点取自官方列表：github.com/archlinuxcn/mirrorlist-repo
+#
+
+## 中国大陆
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.aliyun.com/archlinuxcn/$arch
+Server = https://mirrors.ustc.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.hit.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.sustech.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.cloud.tencent.com/archlinuxcn/$arch
+Server = https://repo.huaweicloud.com/archlinuxcn/$arch
+Server = https://mirrors.nju.edu.cn/archlinuxcn/$arch
+
+## 香港
+Server = https://mirrors.xtom.hk/archlinuxcn/$arch
+
+## 台湾（台南 / 台北）
+Server = https://archlinux.ccns.ncku.edu.tw/archlinuxcn/$arch
+Server = https://mirror.twds.com.tw/archlinuxcn/$arch
+
+## 日本
+Server = https://mirrors.xtom.jp/archlinuxcn/$arch
+
+## 新加坡
+Server = https://mirrors.xtom.sg/archlinuxcn/$arch
+
+## 美国
+Server = https://mirrors.xtom.us/archlinuxcn/$arch
+Server = https://mirrors.ocf.berkeley.edu/archlinuxcn/$arch
+
+## 官方主站（荷兰阿姆斯特丹）
+Server = https://repo.archlinuxcn.org/$arch

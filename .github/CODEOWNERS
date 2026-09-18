@@ -1,0 +1,8 @@
+# 默认代码所有者：任何文件的改动都需要 @LaT-SKY 审核。
+# 配合 main 的 ruleset「Require review from Code Owners」使用，
+# 否则三个 write 权限的协作者可以互相审核、不经维护者同意就合入 main。
+#
+# 语法说明：每行 = 路径模式 + 一个或多个 owner（用户 @name / 团队 @org/team）。
+# 后面的规则会覆盖前面的，最后匹配的那条生效。
+
+*       @LaT-SKY

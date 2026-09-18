@@ -6,6 +6,9 @@ on:
 
 jobs:
   summary:
+    # 仓库已公开，任何人都能开 issue 触发一次真实的 DeepSeek 调用并公开评论。
+    # 只对仓库所有者/组织成员/协作者生效；若希望外部 issue 也被自动总结，删掉下面这行即可。
+    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
     runs-on: ubuntu-latest
     permissions:
       issues: write

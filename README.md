@@ -38,16 +38,33 @@
 |---|---|
 | [mipl.sh](scripts/mipl.sh) | 项目操作台：环境自检、构建、QEMU 测试、进出构建容器。`sudo ./scripts/mipl.sh --help` |
 | [mipl.fish](scripts/mipl.fish) | 同一操作台的 fish 入口（薄封装，逻辑不重写） |
-| [baseline-build.sh](scripts/baseline-build.sh) | 基线构建本体，由 `mipl build` 调用 |
+| [baseline-build.sh](scripts/baseline-build.sh) | 构建本体，由 `mipl build` 调用；`--baseline` 走容器内原版 releng，`--profile` 指定其它 profile |
+| [check-identity.sh](scripts/check-identity.sh) | 品牌一致性检查（**不需要 root**）：`./scripts/check-identity.sh` 扫 profile，`--iso out/miplinux-*.iso` 扫产物 |
 
-常用四条（**都要 `sudo`**）：
+常用几条（**都要 `sudo`**）：
 
 ```bash
-sudo ./scripts/mipl.sh doctor     # 换机器第一件事：环境自检
-sudo ./scripts/mipl.sh build      # 构建 ISO
-sudo ./scripts/mipl.sh qemu       # 刷新 OVMF 变量并启动 QEMU
-sudo ./scripts/mipl.sh stop       # 关闭构建容器（用完别忘了）
+sudo ./scripts/mipl.sh doctor                     # 换机器第一件事：环境自检
+sudo ./scripts/mipl.sh build                      # 用仓库里的 profile/ 构建 ISO
+sudo ./scripts/mipl.sh qemu                       # 启动 QEMU（只测 Live）
+sudo ./scripts/mipl.sh stop                       # 关闭构建容器（用完别忘了）
+
+# 装系统 / 验装后系统（线 B 的必需品）
+sudo ./scripts/mipl.sh target                     # 建 out/target.qcow2
+sudo ./scripts/mipl.sh qemu --disk target.qcow2   # 装：ISO 优先 + 挂盘
+sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启动
 ```
+
+> **盘的 NVRAM 是单独一份**（`out/target.vars.fd`）：装系统时安装器把引导项写进
+> NVRAM，UEFI 下决定这块盘能不能起来的就是它。所以有 `--disk` 时变量文件默认
+> **保留**，而 ISO 测试用的 `out/OVMF_VARS.fd` 照旧每次刷新 —— 两边互不干扰，
+> 测 ISO 不会把装好系统的引导项刷掉。`--boot c` 还会**不挂 ISO**：盘起不来时
+> 你会看到明确的 `no bootable device`，而不是安静地又回到 Live 环境。
+
+> **构建用的是哪份 profile：** 仓库里的 `profile/` 只读挂进容器的 `/profile`，
+> 容器不保存副本 —— 所以「构建用的」和「git 里改的」永远是同一份。
+> 构建挂了时跑 `sudo ./scripts/mipl.sh build --baseline`（用原版 releng）做对照，
+> 就能分开「环境坏了」和「自己改坏了」。
 
 > **为什么要有个脚本：** 两个人、两台机器、两种发行版，仓库路径还不一样。
 > 手抄带绝对路径的长命令必然出错 —— Issue #7（文档写死家目录）和 #8
@@ -97,17 +114,18 @@ sudo ./scripts/mipl.sh stop       # 关闭构建容器（用完别忘了）
 | D6 | 同一份包清单供 Live 环境与装后系统共用 | 防止「Live 里能用、装完不能用」的不一致 |
 | D7 | 「可变」指滚动更新，交付形态为装到硬盘的传统发行版 | 已确认；安装器是必需组件 |
 | D8 | NVIDIA 只需覆盖 Turing 及更新架构（开发者为 Blackwell / RTX 50 系） | `nvidia-open` 即可满足，无需 legacy 分支 |
+| D9 | 发行版名称定为 **MipLinux**；`iso_name="miplinux"`、`iso_label="MIPLINUX_<YYYYMM>"`、`iso_publisher` 带组织 URL、`iso_application="MipLinux Live/Install Medium"` | A6 改名落地。**引导项用的是构建时生成的时间戳 UUID**（`archisosearchuuid`），不是卷标 —— 所以改卷标不需要同步改引导配置 |
 
 待定：（详见 [06-待定事项.md](docs/knowledge/06-待定事项.md)）
 
 | 编号 | 待定问题 |
 |---|---|
-| P1 | 发行版名称是否确定为 MipLinux |
 | P2 | 目标范围：自用 / 还是对外发布 |
 | P3 | ISO 形态：在线安装 / 离线全量安装 |
 | P4 | Live 环境形态：全功能桌面 / 开机直弹安装器的极简形态 |
 | P5 | 桌面环境选型 |
 | P6 | 安装程序方案 |
+| P9 | 发行版本号制度：产物名沿用构建日期，是否改用语义版本 |
 
 ---
 

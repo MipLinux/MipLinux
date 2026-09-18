@@ -25,7 +25,8 @@ docs/work/
 scripts/
 ├── mipl.sh                  项目操作台（doctor / build / qemu / shell / stop …）
 ├── mipl.fish                同上的 fish 入口，只是转发
-└── baseline-build.sh        基线构建（被 mipl build 调用）
+├── baseline-build.sh        构建本体（被 mipl build 调用）
+└── check-identity.sh        品牌一致性检查（**不需要 root**：profile 与产物两种模式）
 ```
 
 ---
@@ -42,11 +43,16 @@ scripts/
 | 命令 | 作用 |
 |---|---|
 | `sudo ./scripts/mipl.sh doctor` | 环境自检（换机器第一件事）；`--report` 输出可粘进文档的表格 |
-| `sudo ./scripts/mipl.sh build` | 下载 bootstrap → 解压 → 构建 ISO |
-| `sudo ./scripts/mipl.sh qemu` | 刷新 `OVMF_VARS` 并启动 QEMU |
-| `sudo ./scripts/mipl.sh shell` | 进入 nspawn 构建容器 |
+| `sudo ./scripts/mipl.sh build` | 下载 bootstrap → 解压 → 用仓库 `profile/` 构建 ISO。工作目录默认容器内 `/var/tmp/mipl-work`，**构建前自动清空**（`--keep-work` 保留）；**别用 `/tmp`** —— 容器里它是内存盘。`--baseline` 改用容器内原版 releng |
+| `sudo ./scripts/mipl.sh qemu` | 启动 QEMU。默认刷新 `OVMF_VARS` 并只测 Live 环境 |
+| `sudo ./scripts/mipl.sh target` | 建一块空的目标盘（默认 `out/target.qcow2`，40G 虚拟）。已存在就拒绝 —— 它上面可能装着系统；`--force` 覆盖（连同它的 NVRAM） |
+| `sudo ./scripts/mipl.sh qemu --disk target.qcow2` | 装系统：ISO 优先启动 + 挂上这块盘。**盘的 NVRAM 是 `out/target.vars.fd`，保留**，不会被 ISO 测试的变量文件刷掉 |
+| `sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c` | 装完重启进新系统：不挂 ISO、保留 NVRAM。盘上没引导项时会明确报 `no bootable device`，不会悄悄回到 Live |
+| `sudo ./scripts/mipl.sh shell` | 进入 nspawn 构建容器（`/out` 与只读的 `/profile` 都挂好） |
 | `sudo ./scripts/mipl.sh stop` | 关闭容器（**用完别忘了**，见 Issue #4） |
 | `sudo ./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
+| `sudo ./scripts/mipl.sh clean` | 删 `OVMF_VARS*`；`--iso` 连 ISO 一起删；`--disk` 删目标盘及其 NVRAM（都不可逆，会先问一句） |
+| `./scripts/check-identity.sh` | **不需要 sudo**：扫 `profile/` 里有没有没改干净的旧品牌名；加 `--iso out/miplinux-*.iso` 扫产物（卷标 / publisher / application / 引导菜单文本） |
 
 三个设计约束：**一律 root 且不隐式提权**、**路径全部从脚本自身位置推导**
 （两台机器的仓库路径不同）、**固件路径靠探测**（Arch 与 Fedora 不一样）。

@@ -1,3 +1,4 @@
+# ==> 基础 · 从 releng 继承，勿动 ==>
 alsa-utils
 amd-ucode
 arch-install-scripts
@@ -127,3 +128,4 @@ xdg-utils
 xfsprogs
 xl2tpd
 zsh
+# <== 基础 · 从 releng 继承，勿动 <==

@@ -1,0 +1,26 @@
+# remove from airootfs!
+# ↑ 别删这一行：releng 的 zzzz99-remove-custom-hooks-from-airootfs.hook 会 grep
+#   这个字符串，把「构建期专用」的 hook 从成品 airootfs 里删掉
+#   （pacman FS#49347：否则用户在 live 环境里跑 pacstrap 会误触发）。
+#
+# 为什么需要这个 hook：
+#   mkarchiso 喂给 pacstrap 的 pacman.conf 里，HookDir 被写死为
+#   ${pacstrap_dir}/etc/pacman.d/hooks，而 airootfs 的拷贝发生在 pacstrap 之前
+#   （archiso v90 源码 _build：_make_pacman_conf → _make_custom_airootfs → _make_packages）。
+#   所以放在这里的 hook 会在构建时、于 airootfs 内部执行。
+#   hook 按文件名字母序执行，本文件排在 zzzz99 清理 hook 之前 —— 先跑，再被删。
+#   Live 的 / 是只读 squashfs，locale 只有构建期这一次机会。
+#
+# locale-gen 自带保护：/etc/locale.gen 不存在或为空时直接 exit 0。
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = glibc
+
+[Action]
+Description = Generating locales listed in /etc/locale.gen...
+When = PostTransaction
+Depends = glibc
+Exec = /usr/bin/locale-gen

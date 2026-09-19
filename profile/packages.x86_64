@@ -129,3 +129,24 @@ xfsprogs
 xl2tpd
 zsh
 # <== 基础 · 从 releng 继承，勿动 <==
+
+# ==> 中文支持 · 字体 ==>
+noto-fonts
+noto-fonts-cjk
+noto-fonts-emoji
+ttf-maplemono-nf-cn-unhinted
+ttf-maplemono-nf-unhinted
+ttf-maplemono
+# <== 中文支持 · 字体 <==
+
+# ==> 中文支持 · 输入法 ==>
+fcitx5
+fcitx5-configtool
+fcitx5-chinese-addons
+fcitx5-gtk
+fcitx5-qt
+# <== 中文支持 · 输入法 <==
+
+# ==> 中文支持 · 本地化 ==>
+man-pages-zh_cn
+# <== 中文支持 · 本地化 <==

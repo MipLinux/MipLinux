@@ -147,14 +147,14 @@ wqy-microhei
 # <== 中文支持 · 字体 <==
 
 # ==> 中文支持 · 输入法 ==>
-fcitx5
-fcitx5-configtool
-fcitx5-chinese-addons
-fcitx5-rime
-fcitx5-gtk
-fcitx5-qt
-fcitx5-pinyin-zhwiki
-fcitx5-material-color
+#fcitx5
+#fcitx5-configtool
+#fcitx5-chinese-addons
+#fcitx5-rime
+#fcitx5-gtk
+#fcitx5-qt
+#fcitx5-pinyin-zhwiki
+#fcitx5-material-color
 # <== 中文支持 · 输入法 <==
 
 # ==> 中文支持 · 本地化 ==>

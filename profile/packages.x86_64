@@ -131,35 +131,22 @@ zsh
 # <== 基础 · 从 releng 继承，勿动 <==
 
 # ==> 中文支持 · 字体 ==>
+noto-fonts
 noto-fonts-cjk
-# 彩色 emoji：不装的话文件管理器和浏览器里全是黑白方块
 noto-fonts-emoji
-# 拉丁文与等宽基线
-ttf-dejavu
-# 轻量兜底：Noto 缺字时补位，只有 5 MiB
-wqy-microhei
-
-# 可选，按需取消注释
-# adobe-source-han-sans-cn-fonts
-# adobe-source-han-serif-cn-fonts
-# ttf-maplemono-nf-cn
-
+ttf-maplemono-nf-cn-unhinted
+ttf-maplemono-nf-unhinted
+ttf-maplemono
 # <== 中文支持 · 字体 <==
 
 # ==> 中文支持 · 输入法 ==>
-#fcitx5
-#fcitx5-configtool
-#fcitx5-chinese-addons
-#fcitx5-rime
-#fcitx5-gtk
-#fcitx5-qt
-#fcitx5-pinyin-zhwiki
-#fcitx5-material-color
+fcitx5
+fcitx5-configtool
+fcitx5-chinese-addons
+fcitx5-gtk
+fcitx5-qt
 # <== 中文支持 · 输入法 <==
 
 # ==> 中文支持 · 本地化 ==>
 man-pages-zh_cn
-# 等装了 firefox / libreoffice 再放开
-# firefox-i18n-zh-cn
-# libreoffice-fresh-zh-cn
 # <== 中文支持 · 本地化 <==

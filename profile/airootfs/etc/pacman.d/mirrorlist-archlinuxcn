@@ -1,0 +1,29 @@
+## 中国大陆
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.aliyun.com/archlinuxcn/$arch
+Server = https://mirrors.ustc.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.hit.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.sustech.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.cloud.tencent.com/archlinuxcn/$arch
+Server = https://repo.huaweicloud.com/archlinuxcn/$arch
+Server = https://mirrors.nju.edu.cn/archlinuxcn/$arch
+
+## 香港
+Server = https://mirrors.xtom.hk/archlinuxcn/$arch
+
+## 台湾（台南 / 台北）
+Server = https://archlinux.ccns.ncku.edu.tw/archlinuxcn/$arch
+Server = https://mirror.twds.com.tw/archlinuxcn/$arch
+
+## 日本
+Server = https://mirrors.xtom.jp/archlinuxcn/$arch
+
+## 新加坡
+Server = https://mirrors.xtom.sg/archlinuxcn/$arch
+
+## 美国
+Server = https://mirrors.xtom.us/archlinuxcn/$arch
+Server = https://mirrors.ocf.berkeley.edu/archlinuxcn/$arch
+
+## 官方主站（荷兰阿姆斯特丹）
+Server = https://repo.archlinuxcn.org/$arch

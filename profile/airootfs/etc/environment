@@ -1,15 +1,3 @@
-# MipLinux · 输入法（fcitx5）环境变量
-#
-# 读取方：PAM（pam_env，登录会话）和 systemd-environment-d-generator（用户管理器），
-# 图形会话与 tty 都能拿到。
-#
-# 语法限制（pam_env 源码 pam_env.c 实测）：
-#   · 只有 KEY=value，不展开变量、不能写 export、值里不能出现 '#'（会被当注释截断）
-#   · '#' 开头的行是注释，所以这里可以放心写中文说明
-#
-# 这三行要等 fcitx5 装了、并且会常驻才有意义（包清单见 C2）。
-# P5 定案后若桌面换成 GNOME（自带 ibus 集成），这三行要跟着改。
-
 GTK_IM_MODULE=fcitx
 QT_IM_MODULE=fcitx
 XMODIFIERS=@im=fcitx

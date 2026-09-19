@@ -45,7 +45,7 @@ URL            : https://gitlab.archlinux.org/archlinux/archiso
 
 | 日期 | 文件 | 差异 | 为什么 |
 |---|---|---|---|
-| 2026-09-18 | `packages.x86_64` | 首尾各加一行分区注释（`# ==> 基础 · 从 releng 继承，勿动 <==`） | 三个人共写这一个文件，按注释分段是唯一不撞车的方式 |
+| 2026-09-18 | `packages.x86_64` | 首尾各加一行分区注释（`# ==> 基础 · 从 releng 继承，勿动 <==`） | 两位长期开发者共写这一个文件，按注释分段是唯一不撞车的方式 |
 | 2026-09-18 | `PROFILE.md` | 新增本文件 | 记录来源、archiso 版本、拷贝日期，否则「零差异」无从复核 |
 | 2026-09-18 | `profiledef.sh` | `iso_name` / `iso_label` / `iso_publisher` / `iso_application` 四个变量 | A6 改名（P1 定案：MipLinux） |
 | 2026-09-18 | `efiboot/loader/entries/*.conf`、`syslinux/archiso_{head,sys-linux,pxe-linux}.cfg`、`grub/{grub,loopback}.cfg` | 菜单标题与帮助文本里的 `Arch Linux` → `MipLinux` | 同上；这些文件都会进 ISO，是用户能看见的那一层 |

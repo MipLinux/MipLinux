@@ -10,6 +10,25 @@
 
 ---
 
+## 当前进度
+
+> 截至 **2026-09-19**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
+
+| 阶段 | 状态 |
+|---|---|
+| 构建环境与基线 | ✅ 未修改的 `releng` 构建出 ISO，QEMU（UEFI）引导到 `[root@archiso ~]#` |
+| 自有 profile | ✅ `profile/` 进仓库并改名 MipLinux，产物 `miplinux-<日期>-x86_64.iso`（1.5 GiB，构建 2 分 08 秒） |
+| 装系统链路 | ✅ `mipl target` + `mipl qemu --disk … --boot c`：装完能从盘重启（[05-测试方法](docs/knowledge/05-测试方法.md) 检查点 4） |
+| 国内源与中文本地化 | 🚧 已并入主线：国内源、`zh_CN.UTF-8`、CJK fallback 规则、终端字体；**字体与输入法的包**还没进 `packages.x86_64` |
+| NVIDIA 驱动 | 未开始（`packages.x86_64` 里还没有 `nvidia-open`） |
+| 安装程序 | 未开始（P6 未定，见 [06-待定事项.md](docs/knowledge/06-待定事项.md)） |
+| 桌面环境 / 品牌化 | 未开始 |
+
+**「✅」表示本机实测过**，不代表用户拿到的成品已经具备该能力。每一阶段验到了第几个检查点，
+以 [05-测试方法.md](docs/knowledge/05-测试方法.md) 的六个检查点为准。
+
+---
+
 ## 文档导航
 
 ### 知识文档 `docs/knowledge/`
@@ -28,7 +47,8 @@
 | 文档 | 内容 |
 |---|---|
 | [工作计划索引](docs/work/README.md) | 当前阶段与任务导航 |
-| [2026-09-18.md](docs/work/2026-09-18.md) | 当日任务清单 |
+| [2026-09-18.md](docs/work/2026-09-18.md) | 基线构建：容器、构建、QEMU 引导 |
+| [2026-09-19.md](docs/work/2026-09-19.md) | 自有 profile 落地：构建管线、目标盘、改名 |
 | [tech/](docs/work/tech/) | 可复现的技术操作步骤 |
 | [tech/03-术语表.md](docs/work/tech/03-术语表.md) | 各工具是什么、彼此什么关系 |
 
@@ -66,7 +86,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 > 构建挂了时跑 `sudo ./scripts/mipl.sh build --baseline`（用原版 releng）做对照，
 > 就能分开「环境坏了」和「自己改坏了」。
 
-> **为什么要有个脚本：** 两个人、两台机器、两种发行版，仓库路径还不一样。
+> **为什么要有个脚本：** 两个人、两台机器、两种发行版（CachyOS 与 Arch），仓库路径还不一样。
 > 手抄带绝对路径的长命令必然出错 —— Issue #7（文档写死家目录）和 #8
 > （`-file=` 被换行拆开）都是这么来的。
 > 所以脚本里的路径一律**从自身位置推导**，固件路径一律**运行时探测**。
@@ -80,7 +100,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 ## 三十秒版本
 
 ```
-【源码】profile/                    ← 你和你朋友用 git 协作
+【源码】profile/                    ← 两位长期开发者用 git 协作
            │
 【构建】systemd-nspawn 里的纯 Arch   ← 必须是 Arch：需要 pacman / pacstrap / mkinitcpio
            │  跑 mkarchiso
@@ -113,7 +133,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 | D5 | 不使用 CachyOS 内核或其仓库 | 与项目目标冲突，且引入外部仓库依赖 |
 | D6 | 同一份包清单供 Live 环境与装后系统共用 | 防止「Live 里能用、装完不能用」的不一致 |
 | D7 | 「可变」指滚动更新，交付形态为装到硬盘的传统发行版 | 已确认；安装器是必需组件 |
-| D8 | NVIDIA 只需覆盖 Turing 及更新架构（开发者为 Blackwell / RTX 50 系） | `nvidia-open` 即可满足，无需 legacy 分支 |
+| D8 | NVIDIA 只需覆盖 Turing 及更新架构（两位长期开发者的显卡 —— Blackwell / Ada Lovelace —— 都落在范围内） | `nvidia-open` 即可满足，无需 legacy 分支 |
 | D9 | 发行版名称定为 **MipLinux**；`iso_name="miplinux"`、`iso_label="MIPLINUX_<YYYYMM>"`、`iso_publisher` 带组织 URL、`iso_application="MipLinux Live/Install Medium"` | A6 改名落地。**引导项用的是构建时生成的时间戳 UUID**（`archisosearchuuid`），不是卷标 —— 所以改卷标不需要同步改引导配置 |
 
 待定：（详见 [06-待定事项.md](docs/knowledge/06-待定事项.md)）
@@ -126,6 +146,25 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 | P5 | 桌面环境选型 |
 | P6 | 安装程序方案 |
 | P9 | 发行版本号制度：产物名沿用构建日期，是否改用语义版本 |
+
+---
+
+## 开发团队
+
+**两位长期开发者**，宿主机发行版不同 —— 这正是 `scripts/` 里「路径从脚本自身位置推导」
+和「固件路径运行时探测」的由来：
+
+| 开发者 | 宿主发行版 | 显卡（决定 D8 的覆盖范围） |
+|---|---|---|
+| 望向天脉（[@LaT-SKY](https://github.com/LaT-SKY)） | CachyOS | Blackwell · RTX 50 系 |
+| ieer040126（[@ieer040126](https://github.com/ieer040126)） | Arch Linux | Ada Lovelace · RTX 40 系 |
+
+**宿主发行版与项目无关**：构建环境由 `systemd-nspawn` 提供，容器内是纯 Arch；
+测试环境是宿主机的 QEMU。两人唯一必须保持一致的接口是包清单
+[`profile/packages.x86_64`](profile/packages.x86_64)（见 [03-项目结构.md](docs/knowledge/03-项目结构.md)）。
+
+**合并权限是单点**：`main` 受保护，PR 必须包含 code owner
+（[@LaT-SKY](https://github.com/LaT-SKY)）的审核，见 [`.github/CODEOWNERS`](.github/CODEOWNERS)。
 
 ---
 

@@ -26,6 +26,7 @@ docs/work/
 scripts/
 ├── mipl.sh                  项目操作台（doctor / build / qemu / shell / stop …）
 ├── mipl.fish                同上的 fish 入口，只是转发
+├── mipl-lib.sh              mipl.sh 与 baseline-build.sh 共用的判断（容器能不能用、bootstrap 完不完整）
 ├── baseline-build.sh        构建本体（被 mipl build 调用）
 └── check-identity.sh        品牌一致性检查（**不需要 root**：profile 与产物两种模式）
 ```
@@ -52,8 +53,20 @@ scripts/
 | `sudo ./scripts/mipl.sh shell` | 进入 nspawn 构建容器（`/out` 与只读的 `/profile` 都挂好） |
 | `sudo ./scripts/mipl.sh stop` | 关闭容器（**用完别忘了**，见 Issue #4） |
 | `sudo ./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
-| `sudo ./scripts/mipl.sh clean` | 删 `OVMF_VARS*`；`--iso` 连 ISO 一起删；`--disk` 删目标盘及其 NVRAM（都不可逆，会先问一句） |
+| `sudo ./scripts/mipl.sh clean` | 删 `OVMF_VARS*`；`--iso` 连 ISO 一起删；`--disk` 删目标盘及其 NVRAM；`--bootstrap` 删 bootstrap 缓存（下载的 126 MB 那个）。都不可逆，会先问一句 |
 | `./scripts/check-identity.sh` | **不需要 sudo**：扫 `profile/` 里有没有没改干净的旧品牌名；加 `--iso out/miplinux-*.iso` 扫产物（卷标 / publisher / application / 引导菜单文本） |
+
+`build` 现在会在下载前后校验 bootstrap（`sha256` + `zstd` 完整性），缓存坏了直接删掉重下；
+解压前后各查一次容器是否真的能用（能执行的 shell / 动态链接器 / `pacman`），而不是只看
+`etc/os-release` 在不在 —— 它在归档里排第 630 条，`usr/bin/bash` 排第 5815 条，
+半途而废的解压恰好能骗过「文件在不在」式的检查（Issue #32）。
+
+进容器时还会挂两份宿主机生成的配置（容器里的原文件不动）：
+`<out>/mirrorlist` → `/etc/pacman.d/mirrorlist.mipl`（默认清华源），
+`<out>/resolv.conf` → `/etc/resolv.conf`（bootstrap 自带的那两份都不可用，
+是 `pacman` 静默失败、`archiso` / `mkinitcpio` 装不上的根源）。
+容器里装的是 `archiso + mkinitcpio + arch-install-scripts` ——
+**`archiso` 不依赖 `mkinitcpio`**，只装 `archiso` 永远不会带上它。
 
 三个设计约束：**一律 root 且不隐式提权**、**路径全部从脚本自身位置推导**
 （两台机器的仓库路径不同）、**固件路径靠探测**（不同发行版的 OVMF 路径不一样）。

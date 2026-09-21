@@ -29,6 +29,13 @@
 #      手写时换行会把 file= 拆成独立的 -file=，QEMU 直接报
 #      `invalid option` —— 见 Issue #8。
 #
+#   5. 「文件在不在」不等于「东西能不能用」。
+#      bootstrap 缓存存在 ≠ 它下完整了；容器里有 etc/os-release ≠ 它进得去。
+#      Issue #32 就是这么来的：半截的 tarball 被当成缓存、残缺的解压被当成
+#      「已初始化」，一路绿灯到 systemd-nspawn 抛 execv 才炸，而那句报错
+#      和真正的原因隔了三层。所以状态判断一律落在「能不能用」上，
+#      并且 doctor / shell / build 三个入口用的是同一段判断（scripts/mipl-lib.sh）。
+#
 # ─────────────────────────────────────────────────────────────────────
 # 用法：  sudo ./scripts/mipl.sh <命令> [参数]
 #         sudo ./scripts/mipl.sh --help
@@ -91,26 +98,31 @@ VARS_DST="${OUT_DIR}/OVMF_VARS.fd"
 # 40G 是 qcow2 的**虚拟**大小，实际占用随写入增长（刚建好只有约 200 KiB）。
 TARGET_DISK_NAME="${MIPL_DISK_NAME:-target.qcow2}"
 TARGET_DISK_SIZE="${MIPL_DISK_SIZE:-40G}"
+# bootstrap 的本地缓存。构建走的是 baseline-build.sh，但 doctor 要报告它的状态，
+# clean --bootstrap 要删它，两边必须说同一个路径。
+BOOTSTRAP_FILE="${MIPL_BOOTSTRAP_FILE:-/tmp/archlinux-bootstrap-x86_64.tar.zst}"
+BOOTSTRAP_CHECKSUMS_FILE="${MIPL_CHECKSUMS_FILE:-${BOOTSTRAP_FILE}.sha256sums.txt}"
+# 容器里的软件源与 DNS。构建时由 baseline-build.sh 生成、只读挂进容器 ——
+# 容器自带的 mirrorlist 可能只剩 Include 转发、resolv.conf 更是纯注释，
+# 两者都会让 pacman 静默失败、archiso / mkinitcpio 装不上 ——
+# 这是 Issue #32 那条链上的另一半：容器「看起来装上了」和「真的能用」是两回事。
+MIRROR_URL="${MIPL_MIRROR_URL:-https://mirrors.tuna.tsinghua.edu.cn/archlinux/\$repo/os/\$arch}"
+DNS_FALLBACK="${MIPL_DNS_FALLBACK:-223.5.5.5 119.29.29.29 1.1.1.1}"
 
-# 提示信息里怎么称呼自己：在仓库根目录下写相对路径（好复制），在别处写绝对
-# 路径（照样能跑）。脚本自己不依赖 cwd，那它给出的下一步命令也不该依赖。
-# 一律带 sudo —— 因为脚本本身就要求 root（见下面的权限检查）。
-if [[ "$PWD" == "$REPO_ROOT" ]]; then
-  MIPL_CMD="sudo ./scripts/mipl.sh"
-else
-  MIPL_CMD="sudo ${SCRIPT_DIR}/mipl.sh"
+# ── 共用库（容器健康检查、颜色约定、提示里怎么称呼自己）──────────────
+MIPL_LIB="${SCRIPT_DIR}/mipl-lib.sh"
+if [[ ! -r "$MIPL_LIB" ]]; then
+  printf '[错误] 缺少共用库：%s —— 仓库不完整或脚本被单独拷走了\n' "$MIPL_LIB" >&2
+  exit 1
 fi
+# shellcheck source=scripts/mipl-lib.sh
+MIPL_LIB_COLORS=1 . "$MIPL_LIB"
 
 DRY_RUN=0
 
 # ── 输出 ──────────────────────────────────────────────────────────────
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-  C_INFO=$'\033[1;34m'; C_OK=$'\033[1;32m'; C_WARN=$'\033[1;33m'
-  C_ERR=$'\033[1;31m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
-else
-  C_INFO=''; C_OK=''; C_WARN=''; C_ERR=''; C_DIM=''; C_OFF=''
-fi
-
+# 颜色由共用库按同一套约定定下（非终端或 NO_COLOR 就不上色），这里不再判断 ——
+# 两份判断迟早会漂移，而「两个入口对同一件事说法不同」正是 Issue #32 的形态。
 info() { printf '%s==>%s %s\n' "$C_INFO" "$C_OFF" "$*"; }
 ok()   { printf '%s[ok]%s %s\n' "$C_OK" "$C_OFF" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
@@ -337,7 +349,55 @@ machine_running() {
     | awk 'NF {print $1}' | grep -qx "$MACHINE_NAME"
 }
 
+# 「容器建过没有」和「容器能不能用」是两回事。
+# 前者原来只看 etc/os-release —— 而它在 bootstrap 归档里排第 630 条，
+# usr/bin/bash 排第 5815 条（共 33105 条）。于是半途而废的解压会被判成
+# 「已初始化」，一路绿灯到 systemd-nspawn 那里才炸（Issue #32）。
+# 现在这个函数只回答「建过没有」，「能不能用」交给 mipl_container_health。
 container_exists() { path_exists "${CONTAINER_DIR}/etc/os-release"; }
+
+# 容器的体检报告。与 baseline-build.sh 里的 report_container_health 说的是
+# 同一件事 —— 两处排版不同没关系，判断依据必须只有一份，就是共用库里的
+# mipl_container_health。
+#
+# $2：容器是不是正跑着（1 = 是）。跑着的容器 nspawn 会拒绝再进（Issue #4），
+#     这时候要报的是「先 stop」，而不是跟着报一句「已初始化」。
+# $3：要不要打 [ok] 那行（默认 1）。调用方只想知道结论时关掉它。
+report_container_health() {
+  local running="${2:-0}" print_ok="${3:-1}"
+  local -a local_missing=()
+  if mipl_container_health "$CONTAINER_DIR" local_missing; then
+    if [[ $print_ok -eq 1 ]]; then
+      if [[ $running -eq 1 ]]; then
+        _miss "container" "${CONTAINER_DIR}（正在运行！用完记得 ${MIPL_CMD} stop，见 Issue #4）"
+      else
+        _line "container" "${CONTAINER_DIR}（已初始化，shell ${mipl_shell}）"
+      fi
+    fi
+    return 0
+  fi
+  _bad "container" "${CONTAINER_DIR}（残缺！缺：$(mipl_missing_paths local_missing)）"
+  local item label paths p found
+  for item in "${MIPL_HEALTH_ITEMS[@]}"; do
+    label="${item%%|*}"
+    IFS='|' read -r -a paths <<< "${item#*|}"
+    found=""
+    for p in "${paths[@]}"; do
+      if [[ -e "${CONTAINER_DIR}/${p}" || -L "${CONTAINER_DIR}/${p}" ]]; then
+        found="/${p}"; break
+      fi
+    done
+    if [[ -n "$found" ]]; then
+      note "     [ok] ${label}  ${found}"
+    else
+      note "     [缺] ${label}  （找过：${paths[*]/#//}）"
+    fi
+  done
+  note "     这不是「还没建」，是 bootstrap 没解压完 —— 重建："
+  note "       rm -rf ${CONTAINER_DIR}"
+  note "       ${MIPL_CMD} build"
+  return 1
+}
 
 # ── 命令：doctor ──────────────────────────────────────────────────────
 cmd_doctor() {
@@ -388,22 +448,68 @@ cmd_doctor() {
 
   # 容器
   if container_exists; then
-    if machine_running; then
-      _miss "container" "${CONTAINER_DIR}（正在运行！用完记得 ${MIPL_CMD} stop，见 Issue #4）"
-    else
-      _line "container" "${CONTAINER_DIR}（已初始化）"
-    fi
+    # 「有 etc/os-release」不等于「能进去」。残缺容器必须在这里就现形，
+    # 而不是等 systemd-nspawn 抛一句 execv(...) failed（Issue #32）。
+    local running=0
+    machine_running && running=1
+    report_container_health "$CONTAINER_DIR" "$running" || true
+    # 工具链：mkarchiso / pacstrap 来自 archiso，mkinitcpio 来自它自己的包 ——
+    # **archiso 不依赖 mkinitcpio**，所以只装 archiso 永远不会带上它。
+    # 缺哪几个要逐个点名，否则「pacman -S archiso 不就完了」会把 mkinitcpio
+    # 一直漏下去（那正是「容器里找不到 archiso 和 mkinitcpio」的来路）。
     local t missing_tools=()
-    for t in mkarchiso pacstrap mkinitcpio mksquashfs xorriso; do
+    for t in mkarchiso pacstrap arch-chroot mkinitcpio mksquashfs xorriso mkfs.vfat; do
       path_exists "${CONTAINER_DIR}/usr/bin/${t}" || missing_tools+=("$t")
     done
     if [[ ${#missing_tools[@]} -eq 0 ]]; then
-      _line "toolchain" "mkarchiso / pacstrap / mkinitcpio / mksquashfs / xorriso 齐全"
+      _line "toolchain" "mkarchiso / pacstrap / mkinitcpio / mksquashfs / xorriso / mkfs.vfat 齐全"
+    elif [[ ! -x "${CONTAINER_DIR}/usr/bin/pacman" ]]; then
+      _bad "toolchain" "容器不完整（连 pacman 都没有），先重建容器再说装包"
     else
-      _miss "toolchain" "缺：${missing_tools[*]}（进容器后 pacman -S archiso，见 Issue #5）"
+      _miss "toolchain" "缺：${missing_tools[*]}"
+      note "     补齐（进容器后，或直接 ${MIPL_CMD} build 会自己装）："
+      note "       pacman -S --needed archiso mkinitcpio arch-install-scripts"
+      note "     mkinitcpio 单独列：archiso 不依赖它，只装 archiso 装不上它。"
+    fi
+    # 动态链接器单独列一行：它缺了同样是「execv ... No such file or directory」，
+    # 报错长得和「容器里没有 bash」一模一样，不单独查就分不清（Issue #32）。
+    if [[ -e "${CONTAINER_DIR}/usr/lib/ld-linux-x86-64.so.2" ]]; then
+      _line "container loader" "/usr/lib/ld-linux-x86-64.so.2 在（能执行容器里的二进制）"
+    else
+      _bad "container loader" "缺 /usr/lib/ld-linux-x86-64.so.2 —— 容器里的程序一个都起不来"
     fi
   else
     _miss "container" "${CONTAINER_DIR}（尚未创建 —— 先跑 ${MIPL_CMD} build）"
+  fi
+
+  # 容器里的源与 DNS —— 这两个是「装不上 archiso / mkinitcpio」的常见真凶，
+  # 所以在 doctor 里也要能看到。构建时宿主机生成好后只读挂进容器。
+  _line "pacman source" "${MIRROR_URL}"
+  if grep -qE '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null; then
+    _line "container DNS" "$(awk '/^[[:space:]]*nameserver[[:space:]]/ {printf "%s ", $2}' /etc/resolv.conf)"
+  else
+    _miss "container DNS" "宿主机 /etc/resolv.conf 里没有 nameserver —— 构建时会用兜底的 ${DNS_FALLBACK}"
+  fi
+
+  # bootstrap 缓存：它是不是「下好了」不能只看在不在 —— 截断的文件同样在，
+  # 而它会在解压时把容器做成残缺的。这里按构建脚本用的同一套标准报（Issue #32）。
+  if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      _miss "bootstrap" "$(file_size "$BOOTSTRAP_FILE")（试运行：不下载清单、不校验）"
+    else
+      local bs_rc=0
+      bootstrap_cache_ok || bs_rc=$?
+      case $bs_rc in
+        0)  _line "bootstrap" "$(file_size "$BOOTSTRAP_FILE")，sha256 与镜像清单一致、zstd 完整" ;;
+        2)  _miss "bootstrap" "$(file_size "$BOOTSTRAP_FILE")（本地还没有 sha256sums.txt，验不了；构建时会取一份再验）" ;;
+        *)  _bad "bootstrap" "$(file_size "$BOOTSTRAP_FILE")：$(mipl_checksum_reason "$MIPL_CHK_LAST")" ;;
+      esac
+      [[ -f "$BOOTSTRAP_CHECKSUMS_FILE" ]] \
+        || note "     清单：${BOOTSTRAP_CHECKSUMS_FILE}（构建时会从镜像取）"
+      note "     清掉缓存： ${MIPL_CMD} clean --bootstrap"
+    fi
+  else
+    _miss "bootstrap" "还没有本地缓存 —— ${MIPL_CMD} build 会下载到 ${BOOTSTRAP_FILE}"
   fi
 
   # 固件
@@ -905,7 +1011,18 @@ cmd_build() {
     "MIPL_OUT_DIR=${OUT_DIR}"
     "MIPL_CONTAINER=${CONTAINER_DIR}"
     "MIPL_MACHINE=${MACHINE_NAME}"
+    # bootstrap 的路径也要传：doctor / clean --bootstrap 说的是这个路径，
+    # 子脚本要是按自己的默认值算，就可能出现「这边说缓存是好的、那边在下另一份」。
+    "MIPL_BOOTSTRAP_FILE=${BOOTSTRAP_FILE}"
+    "MIPL_CHECKSUMS_FILE=${BOOTSTRAP_CHECKSUMS_FILE}"
   )
+  # 换镜像时把地址一起带过去，子脚本自己推 sha256sums.txt 的位置。
+  [[ -n "${MIPL_BOOTSTRAP_URL:-}" ]] && env_args+=("MIPL_BOOTSTRAP_URL=${MIPL_BOOTSTRAP_URL}")
+  # 容器里的源与 DNS 同理：doctor 报的是这两个值，构建时就得用同两个值，
+  # 否则会出现「doctor 说源没问题、构建里却在用另一个源」。
+  env_args+=("MIPL_MIRROR_URL=${MIRROR_URL}")
+  [[ -n "${MIPL_DNS:-}" ]] && env_args+=("MIPL_DNS=${MIPL_DNS}")
+  [[ -n "${MIPL_MIRRORLIST:-}" ]] && env_args+=("MIPL_MIRRORLIST=${MIPL_MIRRORLIST}")
   # 试运行要一路传到底：否则 -n 只打印到这一步，容器里真正要跑的那条
   # mkarchiso 命令（以及 profile 挂在哪）就看不见了。
   [[ $DRY_RUN -eq 1 ]] && env_args+=("MIPL_DRY_RUN=1")
@@ -1001,10 +1118,16 @@ confirm_delete() {
 }
 
 cmd_clean() {
-  local with_iso=0 with_disk=0 disk_name="$TARGET_DISK_NAME"
+  local with_iso=0 with_disk=0 with_bootstrap=0 disk_name="$TARGET_DISK_NAME"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --iso)  with_iso=1; shift ;;
+      --bootstrap)
+        # 缓存的 bootstrap 是「下载 → 解压」这条链的上游。它一旦是坏的
+        # （截断 / 下到一半 / 镜像换了版本），解压出来的容器就是残缺的，
+        # 而残缺容器要到进 nspawn 才现形 —— 见 Issue #32。
+        # 所以除了让构建脚本自己认出坏文件，也给一条「我自己来清」的路。
+        with_bootstrap=1; shift ;;
       --disk)
         # 盘名可选：mipl target --name 造出来的盘也能在这里删掉
         with_disk=1
@@ -1060,6 +1183,32 @@ cmd_clean() {
   else
     note "目标盘不动（它上面可能是装好的系统）。真要删： ${MIPL_CMD} clean --disk"
   fi
+
+  # bootstrap 缓存：只有明确要删才删。默认不碰 —— 它是 126 MB 的下载，
+  # 留着能让下次构建少等一次下载；而且「坏缓存」本来就会在构建时被校验认出来。
+  if [[ $with_bootstrap -eq 1 ]]; then
+    local -a boot_files=("$BOOTSTRAP_FILE" "$BOOTSTRAP_CHECKSUMS_FILE")
+    local -a present=()
+    local f
+    for f in "${boot_files[@]}"; do
+      [[ -e "$f" ]] && present+=("$f")
+    done
+    if [[ ${#present[@]} -eq 0 ]]; then
+      note "没有 bootstrap 缓存可删：${BOOTSTRAP_FILE}"
+    else
+      info "即将删除 bootstrap 缓存（下次构建要重新下载约 126 MB）："
+      local sz=""
+      for f in "${present[@]}"; do
+        sz=""
+        [[ -f "$f" ]] && sz="  ($(file_size "$f"))"
+        printf '  %s%s\n' "$f" "$sz"
+      done
+      if confirm_delete; then run rm -f -- "${present[@]}"; fi
+    fi
+  else
+    note "bootstrap 缓存不动。构建时它会自己校验，坏了会重下；"
+    note "要现在清掉： ${MIPL_CMD} clean --bootstrap（缓存：${BOOTSTRAP_FILE}）"
+  fi
 }
 
 # ── 命令：help ────────────────────────────────────────────────────────
@@ -1100,6 +1249,9 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   stop [--force]      关闭构建容器（poweroff；--force 用 terminate）。
   build [选项]        跑 baseline-build.sh：下载 bootstrap → 解压 → 构建 ISO。
                       默认用仓库里的 profile/（只读挂进容器的 /profile）。
+                      进容器时会把「干净的镜像列表」和「可用的 resolv.conf」
+                      只读挂进去 —— 容器自带的那两份都不能用（前者可能只剩
+                      Include 转发，后者是纯注释），pacman 会静默失败。
       --baseline      改用容器内原版 releng 构建，即「基线」：
                       构建挂了时跑一次它，就能分开「环境坏了」和「自己改坏了」。
       --profile DIR   改用指定的 profile 目录（宿主机路径，相对仓库根解析）。
@@ -1112,10 +1264,11 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                       拷 airootfs、生成 ISO，交给你一个「构建成功」的旧产物。
   iso                 列出 out/ 里的 ISO。
   deps [--install]    打印（或执行）本机需要装的包。
-  clean [--iso] [--disk [FILE]]
+  clean [--iso] [--disk [FILE]] [--bootstrap]
                       删除 OVMF 变量文件；--iso 连 ISO 一起删；
-                      --disk 删目标盘及其 NVRAM（默认 out/target.qcow2；
-                      不可逆，会先问一句）。
+                      --disk 删目标盘及其 NVRAM（默认 out/target.qcow2）；
+                      --bootstrap 删 bootstrap 缓存（下载的 126 MB 那个）
+                      后两个不可逆，会先问一句。
 
 全局选项：
   -n, --dry-run       只打印将要执行的命令，不做任何改动。
@@ -1137,6 +1290,15 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   MIPL_OVMF_DIR   只在这个目录里找固件（不做兜底扫描，便于复现问题）
   MIPL_OVMF_CODE  显式指定固件本体
   MIPL_OVMF_VARS  显式指定变量文件
+  MIPL_BOOTSTRAP_FILE   bootstrap 缓存路径  默认：/tmp/archlinux-bootstrap-x86_64.tar.zst
+  MIPL_BOOTSTRAP_URL    bootstrap 下载地址  默认：清华镜像；构建时可换镜像
+  MIPL_CHECKSUMS_FILE   校验和清单缓存      默认：<bootstrap>.sha256sums.txt
+  MIPL_MIRROR_URL  容器内 pacman 的源   默认：清华 https://…/archlinux/\$repo/os/\$arch
+                   构建时生成一份干净的 mirrorlist 只读挂进容器（容器自带的那份
+                   可能只剩 Include 转发，pacman 会 failed to synchronize）
+  MIPL_DNS         容器内 /etc/resolv.conf 的 nameserver，空格或逗号分隔
+                   默认：抄宿主机 /etc/resolv.conf；抄不到时用内置兜底
+                   （bootstrap 自带的 resolv.conf 是纯注释，DNS 全废）
   MIPL_QEMU_EXTRA 追加给 qemu 的参数（按空格切分），如 "-display none"
   NO_COLOR        设了就不输出颜色
 

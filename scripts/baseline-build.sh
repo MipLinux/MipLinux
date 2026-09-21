@@ -36,6 +36,26 @@
 #   MIPL_BOOTSTRAP_FILE   bootstrap 的本地缓存，默认 /tmp/archlinux-bootstrap-x86_64.tar.zst
 #   MIPL_CHECKSUMS_URL    校验和清单地址，默认与 bootstrap 同目录的 sha256sums.txt
 #   MIPL_CHECKSUMS_FILE   校验和清单的本地缓存（默认 <bootstrap>.sha256sums.txt）
+#   MIPL_MIRROR_URL       容器里 pacman 用的源，默认清华的 archlinux 仓库
+#   MIPL_MIRRORLIST       它在容器内的挂载点，默认 /etc/pacman.d/mirrorlist.mipl
+#   MIPL_DNS              容器 /etc/resolv.conf 的 nameserver（空格/逗号分隔）
+#   MIPL_DNS_FALLBACK     宿主机也拿不到 nameserver 时的兜底 DNS
+#
+# 容器里的源与 DNS（Issue #32 的延伸）：
+#   bootstrap 自带的 /etc/pacman.d/mirrorlist 有效内容全是
+#   `Include = /etc/pacman.d/mirrorlist.d/*.conf` 这种转发，指向的目录可能是空的；
+#   自带的 /etc/resolv.conf 更是纯注释、一个 nameserver 都没有。
+#   两者都会让 pacman 静默失败 → archiso / mkinitcpio 装不上。
+#   所以这两个文件都由宿主机生成后**只读挂进容器**，容器里的原文件不动。
+#
+#   这里只保证「有一个能用的源」，不解决「哪个源最快」—— 自动测速换源是
+#   Issue #18，还没做。眼下要换源就是改 MIPL_MIRROR_URL。
+#
+# 工具链（Issue #32 的延伸）——「装上了」和「能用」是两回事：
+#   装的是 archiso + mkinitcpio + arch-install-scripts。
+#   **archiso 不依赖 mkinitcpio**（只依赖 arch-install-scripts、squashfs-tools、
+#   libisoburn、mtools、dosfstools、e2fsprogs、erofs-utils…），所以
+#   `pacman -S archiso` 永远不会带上 mkinitcpio —— 必须显式装。
 #
 # 下载与解压都会验完整性（Issue #32）：
 #   1. 本地缓存先过 sha256（对照镜像的 sha256sums.txt）—— 对不上就删掉重下；
@@ -88,6 +108,22 @@ BASELINE_PROFILE="/usr/share/archiso/configs/releng"
 DEFAULT_PROFILE="${REPO_ROOT}/profile"
 # 挂进容器的固定路径。容器内的命令、文档、脚本都只认这一个位置。
 PROFILE_INNER="/profile"
+
+# ── 容器里的软件源与 DNS ─────────────────────────────────────────────
+# 这两样都不改容器里的原文件，而是宿主机生成好后只读挂进去 —— 于是
+# 「这次用的是哪个镜像」和「DNS 从哪来」都是结构上确定的，不靠容器之前
+# 碰巧是什么状态。
+#
+# 为什么非做不可：bootstrap 自带的 /etc/pacman.d/mirrorlist 只有 79 行有效
+# 内容，而且全是 `Include = /etc/pacman.d/mirrorlist.d/*.conf` 这种转发，
+# 指向的目录在容器里可能是空的 —— 于是 pacman 以 "failed to synchronize"
+# 失败，archiso / mkinitcpio 一个也装不上。bootstrap 自带的
+# /etc/resolv.conf 更是**纯注释、没有 nameserver**，DNS 直接全废。
+MIRROR_URL="${MIPL_MIRROR_URL:-https://mirrors.tuna.tsinghua.edu.cn/archlinux/\$repo/os/\$arch}"
+MIRRORLIST_INNER="${MIPL_MIRRORLIST:-/etc/pacman.d/mirrorlist.mipl}"
+# 显式指定 DNS。留空就从宿主机的 /etc/resolv.conf 里抄；一个 nameserver
+# 都抄不到时用 MIPL_DNS_FALLBACK，保证容器里总有东西可解析。
+DNS_FALLBACK="${MIPL_DNS_FALLBACK:-223.5.5.5 119.29.29.29 1.1.1.1}"
 
 MODE="repo"          # repo（仓库/指定的 profile） | baseline（容器内原版 releng）
 PROFILE_HOST=""      # 宿主机上的 profile 目录（baseline 模式为空 = 不挂载）
@@ -289,6 +325,22 @@ profile 怎么进容器：
   MIPL_BOOTSTRAP_FILE    bootstrap 本地缓存（默认 /tmp 下那个）
   MIPL_CHECKSUMS_URL     校验和清单地址（默认与 bootstrap 同目录）
   MIPL_CHECKSUMS_FILE    校验和清单的本地缓存
+  MIPL_MIRROR_URL        容器里 pacman 的源（默认清华 archlinux 仓库）
+  MIPL_MIRRORLIST        它在容器内的挂载点（默认 /etc/pacman.d/mirrorlist.mipl）
+  MIPL_DNS               容器里 /etc/resolv.conf 的 nameserver（空格/逗号分隔）
+  MIPL_DNS_FALLBACK      宿主机也拿不到 nameserver 时的兜底 DNS
+
+容器里的源与 DNS：
+  这两个文件由宿主机生成后只读挂进容器，容器内的原文件不动：
+    <out>/mirrorlist     →  /etc/pacman.d/mirrorlist.mipl（默认清华）
+    <out>/resolv.conf    →  /etc/resolv.conf
+  为什么非做不可：bootstrap 自带的 mirrorlist 有效内容全是 Include 转发、
+  指向的目录可能是空的；自带的 resolv.conf 是纯注释、没有 nameserver。
+  pacman 会以 failed to synchronize 失败，archiso / mkinitcpio 一个也装不上。
+
+装什么：
+  archiso + mkinitcpio + arch-install-scripts。**archiso 不依赖 mkinitcpio**，
+  只装 archiso 永远不会带上它，而构建 initramfs 要用到。
 
 bootstrap 的完整性：
   本地缓存先按镜像的 sha256sums.txt 核对 sha256；对不上就删掉重下。
@@ -356,6 +408,78 @@ resolve_profile() {
 }
 
 # ── nspawn 参数（profile 与 /out 的挂载都在这里定）──────────────────
+# ── 容器里的源与 DNS：宿主机生成，只读挂进容器 ───────────────────────
+# 生成物都放在 $OUT_DIR 里（整个 out/ 都被 .gitignore 忽略，会被挂到容器
+# /out，所以它们同时也是「这次到底用了哪个镜像」的现场证据）。
+
+# 镜像列表。容器里那份是 bootstrap 原带的，可能是空的或只剩 Include 转发；
+# 我们不动它，而是生成一份干净的挂到 /etc/pacman.d/mirrorlist.mipl。
+generate_mirrorlist() {
+  local dst="${OUT_DIR}/mirrorlist"
+  run mkdir -p "$OUT_DIR"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    dry "写入 ${dst}（容器内 ${MIRRORLIST_INNER}）："
+    printf '        Server = %s\n' "$MIRROR_URL"
+    return 0
+  fi
+  {
+    echo "## 由 mipl 生成（baseline-build.sh）—— 容器里的 pacman 用这一份。"
+    echo "## 源：${MIRROR_URL}"
+    echo "## 容器自带的 /etc/pacman.d/mirrorlist 没被改动。"
+    echo "## 换源： sudo MIPL_MIRROR_URL='https://<镜像>/archlinux/\$repo/os/\$arch' ./scripts/mipl.sh build"
+    echo
+    echo "Server = ${MIRROR_URL}"
+  } > "$dst"
+  note "软件源：${MIRROR_URL}"
+  note "  → 容器内 ${MIRRORLIST_INNER}（只读；不动容器自带的 mirrorlist）"
+}
+
+# resolv.conf。nspawn 默认把宿主机那份拷进容器，但宿主机/容器里那份可能
+# 只有注释（bootstrap 自带的就是），于是容器里 DNS 全废、pacman 静默失败。
+# 这里显式备一份有 nameserver 的挂进去，从根上不等 nspawn 的默认行为。
+generate_resolv_conf() {
+  local dst="${OUT_DIR}/resolv.conf" ns=() line s
+
+  run mkdir -p "$OUT_DIR"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    dry "写入 ${dst}（容器内 /etc/resolv.conf）："
+    if [[ -n "${MIPL_DNS:-}" ]]; then
+      printf '        nameserver %s\n' ${MIPL_DNS}
+    else
+      printf '        nameserver %s\n' ${DNS_FALLBACK}
+    fi
+    return 0
+  fi
+
+  if [[ -n "${MIPL_DNS:-}" ]]; then
+    # 环境变量里可以给多个，用空格或逗号分隔都认。
+    IFS=' ,' read -r -a ns <<< "${MIPL_DNS}"
+    note "DNS：用 MIPL_DNS 指定的 ${ns[*]}"
+  else
+    while IFS= read -r line; do
+      ns+=("$line")
+    done < <(awk '/^[[:space:]]*nameserver[[:space:]]/ { print $2 }' /etc/resolv.conf 2>/dev/null || true)
+    if [[ ${#ns[@]} -gt 0 ]]; then
+      note "DNS：抄宿主机 /etc/resolv.conf 的 ${ns[*]}"
+    else
+      IFS=' ' read -r -a ns <<< "${DNS_FALLBACK}"
+      warn "宿主机的 /etc/resolv.conf 里没有 nameserver —— 用兜底的 ${ns[*]}"
+      wnote "容器里解析不了域名的话，用 MIPL_DNS=\"<你的 DNS>\" 显式指定。"
+    fi
+  fi
+
+  {
+    echo "# 由 mipl 生成（baseline-build.sh）—— 容器里就是这一份。"
+    echo "# 宿主机 /etc/resolv.conf 可能只有注释（bootstrap 自带的那份就是纯注释），"
+    echo "# 那种情况下容器里 DNS 全废、pacman 静默失败。"
+    for s in "${ns[@]}"; do
+      echo "nameserver ${s}"
+    done
+    echo "options edns0 trust-ad"
+  } > "$dst"
+  note "  → 容器内 /etc/resolv.conf（只读）"
+}
+
 build_nspawn_args() {
   NSPAWN_ARGS=(
     systemd-nspawn -D "${CONTAINER_DIR}"
@@ -366,6 +490,17 @@ build_nspawn_args() {
   # 任意变量透进去（与 mipl.sh 一致）。无条件传：默认值只在 $WORK_DIR 里定一次，
   # 内层脚本自己不再兜底 —— 否则「这次到底用了哪个目录」会有两个答案。
   NSPAWN_ARGS+=(--setenv="MIPL_WORK_DIR=${WORK_DIR}")
+
+  # 源与 DNS：只读挂载 + 显式 --setenv 告诉容器内脚本用哪一份。
+  NSPAWN_ARGS+=(--bind-ro="${OUT_DIR}/mirrorlist:${MIRRORLIST_INNER}")
+  NSPAWN_ARGS+=(--setenv="MIPL_MIRRORLIST=${MIRRORLIST_INNER}")
+  NSPAWN_ARGS+=(--setenv="MIPL_MIRROR_URL=${MIRROR_URL}")
+  # --resolv-conf=off 是必须的：nspawn 默认（auto）会按它自己的规则处理
+  # /etc/resolv.conf，可能把容器里那份**原样留着**（宿主机那份只有注释时，
+  # 容器里就是纯注释 —— DNS 全废）。关掉它，容器里看到的就只有我们挂的这一份，
+  # 于是「DNS 从哪来」是结构上确定的，不随 systemd 版本或宿主机状态变。
+  NSPAWN_ARGS+=(--resolv-conf=off)
+  NSPAWN_ARGS+=(--bind-ro="${OUT_DIR}/resolv.conf:/etc/resolv.conf")
 
   if [[ -n "$PROFILE_HOST" ]]; then
     local mount_kind="只读挂载"
@@ -700,6 +835,39 @@ if command -v findmnt >/dev/null 2>&1; then
   fi
 fi
 
+echo "==> 软件源（镜像）"
+# 这里永远看到的是宿主机准备好、只读挂进来的那份，所以「用的是哪个镜像」是
+# 结构上确定的：容器自己的 /etc/pacman.d/mirrorlist 是 bootstrap 原带的（容易
+# 是空的或全是 Include 转发），我们不改它，而是把干净的一份盖在上面。
+MIRRORLIST="${MIPL_MIRRORLIST:-/etc/pacman.d/mirrorlist.mipl}"
+if [[ -f "${MIRRORLIST}" ]]; then
+  echo "    用 ${MIRRORLIST}（宿主机只读挂载，内容是干净的镜像列表）"
+  awk '!/^[[:space:]]*#/ && NF { print "      " $0 }' "${MIRRORLIST}"
+else
+  echo "    警告：没挂到 ${MIRRORLIST}，只能用容器自带的镜像列表"
+  echo "          它是空的或全是注释时，pacman 会以 'failed to synchronize' 失败"
+  if ! awk '!/^[[:space:]]*#/ && NF { found = 1 } END { exit !found }' \
+       /etc/pacman.d/mirrorlist 2>/dev/null; then
+    echo "          而且 /etc/pacman.d/mirrorlist 里没有一个有效的 Server ——"
+    echo "          这次多半装不上包。"
+  fi
+fi
+
+echo "==> DNS 解析"
+# nspawn 默认把宿主机的 resolv.conf 拷进来，但宿主机那份可能只有注释
+# （bootstrap 自带的 /etc/resolv.conf 就是纯注释），于是容器里 DNS 全废、
+# pacman 静默失败。所以宿主机显式挂了一份进来，这里确认一下它真的在。
+if grep -qE '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null; then
+  awk '/^[[:space:]]*nameserver[[:space:]]/ { print "    " $0 }' /etc/resolv.conf
+  if ! getent hosts 'mirror' >/dev/null 2>&1; then
+    # getent 用 NSS，不等于 DNS；这里只是提醒，不当失败处理。
+    :
+  fi
+else
+  echo "    警告：/etc/resolv.conf 里没有 nameserver —— 容器里解析不了域名。"
+  echo "          宿主机上看 /etc/resolv.conf；需要时用 MIPL_DNS=\"1.1.1.1\" 显式指定。"
+fi
+
 echo "==> 初始化密钥环（若尚未初始化）"
 if [[ ! -d /etc/pacman.d/gnupg/private-keys-v1.d ]] || \
    [[ -z "$(ls -A /etc/pacman.d/gnupg/private-keys-v1.d 2>/dev/null)" ]]; then
@@ -709,18 +877,112 @@ else
   echo "    已初始化，跳过"
 fi
 
-echo "==> 安装/确认 archiso"
-pacman -S --needed --noconfirm archiso
-echo "    archiso 版本：$(pacman -Q archiso 2>/dev/null || echo 未知)"
-# 上面这行的版本号是「profile/ 与 releng 零差异」这条验收的参照物：
-# profile/ 是照这个版本拷的。不记下来，以后 diff 失败时分不清是
+echo "==> 更新包数据库"
+# 单独一步：pacman -Sy 失败是「源不通」，和「装包失败」是两回事，
+# 分开报才说得清是哪一头的问题。
+if ! pacman -Sy --noconfirm; then
+  echo "错误：pacman -Sy 失败 —— 包数据库同步不下来。按这个顺序查：" >&2
+  echo "      1) 镜像：上面那行 awk 打出来的 Server 是不是有效" >&2
+  echo "      2) DNS ：getent hosts mirrors.tuna.tsinghua.edu.cn 有没有结果" >&2
+  echo "      3) 时间：date 差太多的话 PGP 校验会失败" >&2
+  exit 1
+fi
+
+# 要装什么、以及为什么：
+#   archiso    提供 mkarchiso / pacstrap，构建本体
+#   mkinitcpio 生成 initramfs 的工具。**它不在 archiso 的依赖里**
+#              （archiso 只依赖 arch-install-scripts、squashfs-tools、
+#               libisoburn、mtools、dosfstools、e2fsprogs、erofs-utils…），
+#              所以只装 archiso 永远不会带上它。
+#   arch-install-scripts  显式列出来，免得依赖变动后 pacstrap 悄悄不见了
+WANT_PKGS=(archiso mkinitcpio arch-install-scripts)
+
+echo "==> 安装构建工具链：${WANT_PKGS[*]}"
+pacman_install() {
+  # 失败不在这里 exit：下面统一报错，好把三种原因的提示一次给全。
+  if ! pacman -S --needed --noconfirm "${WANT_PKGS[@]}"; then
+    echo "    装包失败，刷新密钥环再试一次……"
+    # 依赖包换签名密钥、或密钥环是旧的，都会让装包以 PGP 错误失败；
+    # --populate 是幂等的，重来一次通常就过了。
+    pacman-key --populate archlinux || true
+    pacman -Sy --noconfirm || true
+    pacman -S --needed --noconfirm "${WANT_PKGS[@]}" || return 1
+  fi
+}
+if ! pacman_install; then
+  echo "错误：工具链没装上（见上面的 pacman 输出）。" >&2
+  echo "      容器缺的这几个包在 extra / core 仓库里，装不上通常是：" >&2
+  echo "        · 镜像无效或不通（看上面「DNS 解析」与「软件源」两段）" >&2
+  echo "        · 密钥环坏了：在容器里跑 pacman-key --init && pacman-key --populate archlinux" >&2
+  echo "        · 时间不对：date 差太多会让 PGP 校验失败" >&2
+  exit 1
+fi
+echo "    archiso    版本：$(pacman -Q archiso 2>/dev/null || echo 未知)"
+echo "    mkinitcpio 版本：$(pacman -Q mkinitcpio 2>/dev/null || echo 未知)"
+# 上面这两行是「profile/ 与 releng 零差异」这条验收的参照物：
+# profile/ 是照这个 archiso 版本拷的。不记下来，以后 diff 失败时分不清是
 # archiso 升级了，还是自己改坏了。
 
 echo "==> 工具链检查"
-for c in mkarchiso pacstrap arch-chroot mkinitcpio mksquashfs xorriso; do
-  printf '    %-14s ' "$c"
-  command -v "$c" >/dev/null 2>&1 && echo "OK" || { echo "缺失"; exit 1; }
+_missing_tools=()
+# 这份清单是有出处的，不是凭感觉列的：
+#   · mkarchiso / pacstrap / arch-chroot  —— 构建本体
+#   · mksquashfs / xorriso / mkfs.vfat / mkfs.ext4 / mkfs.erofs
+#                    —— mkarchiso 自己会 `command -v` 检查这几个（见它的
+#                       _validate_requirements_* 与各 iso 生成函数）
+#   · mmd / mcopy    —— mtools，做 EFI 的 FAT 镜像要用
+#   · gzip / bsdtar / awk / find / openssl —— mkarchiso 同样逐个检查
+#   · mkinitcpio     —— 生成 initramfs。**它不属于 archiso 的依赖**，
+#                       只装 archiso 不会有它
+#   · zstd           —— 压缩 airootfs 镜像（airootfs_image_tool_options 里用）
+#
+# 注意：mkinitcpio-archiso **不是命令**，它提供的是
+# /usr/lib/initcpio/{hooks,install}/archiso 这些 hook 文件，
+# 所以不能拿去 command -v（那样每次都会假报缺失）。
+INNER_TOOLS=(
+  mkarchiso pacstrap arch-chroot
+  mkinitcpio
+  mksquashfs xorriso zstd
+  mkfs.vfat mkfs.ext4 mkfs.erofs
+  mmd mcopy
+  gzip bsdtar awk find openssl
+)
+for c in "${INNER_TOOLS[@]}"; do
+  printf '    %-18s ' "$c"
+  if command -v "$c" >/dev/null 2>&1; then
+    echo OK
+  else
+    echo 缺失
+    _missing_tools+=("$c")
+  fi
 done
+
+# 命令在不在，和「包装没装上」是两件事：包在而命令不在，说明容器已经
+# 半坏（比如 /usr/bin 被改过）。一起报出来，省得下次再猜。
+_missing_pkgs=()
+for p in archiso mkinitcpio arch-install-scripts; do
+  pacman -Q "$p" >/dev/null 2>&1 || _missing_pkgs+=("$p")
+done
+
+if [[ ${#_missing_tools[@]} -gt 0 || ${#_missing_pkgs[@]} -gt 0 ]]; then
+  [[ ${#_missing_tools[@]} -gt 0 ]] \
+    && echo "错误：容器里缺这些命令：${_missing_tools[*]}" >&2
+  [[ ${#_missing_pkgs[@]} -gt 0 ]] \
+    && echo "错误：容器里缺这些包：${_missing_pkgs[*]}" >&2
+  echo "      它们由这些包装着（在容器里补装）：" >&2
+  echo "        archiso               → mkarchiso / pacstrap / arch-chroot" >&2
+  echo "        mkinitcpio            → mkinitcpio（**archiso 不依赖它**）" >&2
+  echo "        squashfs-tools        → mksquashfs" >&2
+  echo "        libisoburn            → xorriso" >&2
+  echo "        dosfstools            → mkfs.vfat" >&2
+  echo "        mtools                → mmd / mcopy" >&2
+  echo "        erofs-utils           → mkfs.erofs" >&2
+  echo "      一条命令补齐：" >&2
+  echo "        pacman -S --needed archiso mkinitcpio arch-install-scripts \\" >&2
+  echo "          squashfs-tools libisoburn dosfstools mtools erofs-utils zstd" >&2
+  exit 1
+fi
+echo "    全部到位。"
 
 echo "==> 开始构建"
 echo "    工作目录：${WORK_DIR}"
@@ -746,6 +1008,11 @@ write_inner_script() {
 step_enter() {
   info "准备输出目录: ${OUT_DIR}"
   run mkdir -p "${OUT_DIR}"
+
+  # 先把容器要用的「源」和「DNS」备好 —— 这两个文件是挂载源，
+  # build_nspawn_args 会把它们写进 nspawn 参数，所以顺序不能反。
+  generate_mirrorlist
+  generate_resolv_conf
 
   build_nspawn_args
 

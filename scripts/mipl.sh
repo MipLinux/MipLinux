@@ -102,6 +102,12 @@ TARGET_DISK_SIZE="${MIPL_DISK_SIZE:-40G}"
 # clean --bootstrap 要删它，两边必须说同一个路径。
 BOOTSTRAP_FILE="${MIPL_BOOTSTRAP_FILE:-/tmp/archlinux-bootstrap-x86_64.tar.zst}"
 BOOTSTRAP_CHECKSUMS_FILE="${MIPL_CHECKSUMS_FILE:-${BOOTSTRAP_FILE}.sha256sums.txt}"
+# 容器里的软件源与 DNS。构建时由 baseline-build.sh 生成、只读挂进容器 ——
+# 容器自带的 mirrorlist 可能只剩 Include 转发、resolv.conf 更是纯注释，
+# 两者都会让 pacman 静默失败、archiso / mkinitcpio 装不上 ——
+# 这是 Issue #32 那条链上的另一半：容器「看起来装上了」和「真的能用」是两回事。
+MIRROR_URL="${MIPL_MIRROR_URL:-https://mirrors.tuna.tsinghua.edu.cn/archlinux/\$repo/os/\$arch}"
+DNS_FALLBACK="${MIPL_DNS_FALLBACK:-223.5.5.5 119.29.29.29 1.1.1.1}"
 
 # ── 共用库（容器健康检查、颜色约定、提示里怎么称呼自己）──────────────
 MIPL_LIB="${SCRIPT_DIR}/mipl-lib.sh"
@@ -447,16 +453,23 @@ cmd_doctor() {
     local running=0
     machine_running && running=1
     report_container_health "$CONTAINER_DIR" "$running" || true
+    # 工具链：mkarchiso / pacstrap 来自 archiso，mkinitcpio 来自它自己的包 ——
+    # **archiso 不依赖 mkinitcpio**，所以只装 archiso 永远不会带上它。
+    # 缺哪几个要逐个点名，否则「pacman -S archiso 不就完了」会把 mkinitcpio
+    # 一直漏下去（那正是「容器里找不到 archiso 和 mkinitcpio」的来路）。
     local t missing_tools=()
-    for t in mkarchiso pacstrap mkinitcpio mksquashfs xorriso; do
+    for t in mkarchiso pacstrap arch-chroot mkinitcpio mksquashfs xorriso mkfs.vfat; do
       path_exists "${CONTAINER_DIR}/usr/bin/${t}" || missing_tools+=("$t")
     done
     if [[ ${#missing_tools[@]} -eq 0 ]]; then
-      _line "toolchain" "mkarchiso / pacstrap / mkinitcpio / mksquashfs / xorriso 齐全"
-    elif [[ -x "${CONTAINER_DIR}/usr/bin/pacman" ]]; then
-      _miss "toolchain" "缺：${missing_tools[*]}（进容器后 pacman -S archiso，见 Issue #5）"
-    else
+      _line "toolchain" "mkarchiso / pacstrap / mkinitcpio / mksquashfs / xorriso / mkfs.vfat 齐全"
+    elif [[ ! -x "${CONTAINER_DIR}/usr/bin/pacman" ]]; then
       _bad "toolchain" "容器不完整（连 pacman 都没有），先重建容器再说装包"
+    else
+      _miss "toolchain" "缺：${missing_tools[*]}"
+      note "     补齐（进容器后，或直接 ${MIPL_CMD} build 会自己装）："
+      note "       pacman -S --needed archiso mkinitcpio arch-install-scripts"
+      note "     mkinitcpio 单独列：archiso 不依赖它，只装 archiso 装不上它。"
     fi
     # 动态链接器单独列一行：它缺了同样是「execv ... No such file or directory」，
     # 报错长得和「容器里没有 bash」一模一样，不单独查就分不清（Issue #32）。
@@ -467,6 +480,15 @@ cmd_doctor() {
     fi
   else
     _miss "container" "${CONTAINER_DIR}（尚未创建 —— 先跑 ${MIPL_CMD} build）"
+  fi
+
+  # 容器里的源与 DNS —— 这两个是「装不上 archiso / mkinitcpio」的常见真凶，
+  # 所以在 doctor 里也要能看到。构建时宿主机生成好后只读挂进容器。
+  _line "pacman source" "${MIRROR_URL}"
+  if grep -qE '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null; then
+    _line "container DNS" "$(awk '/^[[:space:]]*nameserver[[:space:]]/ {printf "%s ", $2}' /etc/resolv.conf)"
+  else
+    _miss "container DNS" "宿主机 /etc/resolv.conf 里没有 nameserver —— 构建时会用兜底的 ${DNS_FALLBACK}"
   fi
 
   # bootstrap 缓存：它是不是「下好了」不能只看在不在 —— 截断的文件同样在，
@@ -996,6 +1018,11 @@ cmd_build() {
   )
   # 换镜像时把地址一起带过去，子脚本自己推 sha256sums.txt 的位置。
   [[ -n "${MIPL_BOOTSTRAP_URL:-}" ]] && env_args+=("MIPL_BOOTSTRAP_URL=${MIPL_BOOTSTRAP_URL}")
+  # 容器里的源与 DNS 同理：doctor 报的是这两个值，构建时就得用同两个值，
+  # 否则会出现「doctor 说源没问题、构建里却在用另一个源」。
+  env_args+=("MIPL_MIRROR_URL=${MIRROR_URL}")
+  [[ -n "${MIPL_DNS:-}" ]] && env_args+=("MIPL_DNS=${MIPL_DNS}")
+  [[ -n "${MIPL_MIRRORLIST:-}" ]] && env_args+=("MIPL_MIRRORLIST=${MIPL_MIRRORLIST}")
   # 试运行要一路传到底：否则 -n 只打印到这一步，容器里真正要跑的那条
   # mkarchiso 命令（以及 profile 挂在哪）就看不见了。
   [[ $DRY_RUN -eq 1 ]] && env_args+=("MIPL_DRY_RUN=1")
@@ -1222,6 +1249,9 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   stop [--force]      关闭构建容器（poweroff；--force 用 terminate）。
   build [选项]        跑 baseline-build.sh：下载 bootstrap → 解压 → 构建 ISO。
                       默认用仓库里的 profile/（只读挂进容器的 /profile）。
+                      进容器时会把「干净的镜像列表」和「可用的 resolv.conf」
+                      只读挂进去 —— 容器自带的那两份都不能用（前者可能只剩
+                      Include 转发，后者是纯注释），pacman 会静默失败。
       --baseline      改用容器内原版 releng 构建，即「基线」：
                       构建挂了时跑一次它，就能分开「环境坏了」和「自己改坏了」。
       --profile DIR   改用指定的 profile 目录（宿主机路径，相对仓库根解析）。
@@ -1263,6 +1293,12 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
   MIPL_BOOTSTRAP_FILE   bootstrap 缓存路径  默认：/tmp/archlinux-bootstrap-x86_64.tar.zst
   MIPL_BOOTSTRAP_URL    bootstrap 下载地址  默认：清华镜像；构建时可换镜像
   MIPL_CHECKSUMS_FILE   校验和清单缓存      默认：<bootstrap>.sha256sums.txt
+  MIPL_MIRROR_URL  容器内 pacman 的源   默认：清华 https://…/archlinux/\$repo/os/\$arch
+                   构建时生成一份干净的 mirrorlist 只读挂进容器（容器自带的那份
+                   可能只剩 Include 转发，pacman 会 failed to synchronize）
+  MIPL_DNS         容器内 /etc/resolv.conf 的 nameserver，空格或逗号分隔
+                   默认：抄宿主机 /etc/resolv.conf；抄不到时用内置兜底
+                   （bootstrap 自带的 resolv.conf 是纯注释，DNS 全废）
   MIPL_QEMU_EXTRA 追加给 qemu 的参数（按空格切分），如 "-display none"
   NO_COLOR        设了就不输出颜色
 

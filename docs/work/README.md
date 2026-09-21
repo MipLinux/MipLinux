@@ -61,6 +61,13 @@ scripts/
 `etc/os-release` 在不在 —— 它在归档里排第 630 条，`usr/bin/bash` 排第 5815 条，
 半途而废的解压恰好能骗过「文件在不在」式的检查（Issue #32）。
 
+进容器时还会挂两份宿主机生成的配置（容器里的原文件不动）：
+`<out>/mirrorlist` → `/etc/pacman.d/mirrorlist.mipl`（默认清华源），
+`<out>/resolv.conf` → `/etc/resolv.conf`（bootstrap 自带的那两份都不可用，
+是 `pacman` 静默失败、`archiso` / `mkinitcpio` 装不上的根源）。
+容器里装的是 `archiso + mkinitcpio + arch-install-scripts` ——
+**`archiso` 不依赖 `mkinitcpio`**，只装 `archiso` 永远不会带上它。
+
 三个设计约束：**一律 root 且不隐式提权**、**路径全部从脚本自身位置推导**
 （两台机器的仓库路径不同）、**固件路径靠探测**（不同发行版的 OVMF 路径不一样）。
 完整说明见 `sudo ./scripts/mipl.sh --help`。

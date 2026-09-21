@@ -32,6 +32,18 @@
 #   MIPL_MACHINE     容器机器名，默认 archbuild
 #   MIPL_OUT_DIR     产物目录，默认 <仓库根>/out
 #   MIPL_DRY_RUN     设 1（等价于 -n）只打印将执行的命令，不做任何改动
+#   MIPL_BOOTSTRAP_URL    bootstrap 的下载地址，默认清华镜像的 latest
+#   MIPL_BOOTSTRAP_FILE   bootstrap 的本地缓存，默认 /tmp/archlinux-bootstrap-x86_64.tar.zst
+#   MIPL_CHECKSUMS_URL    校验和清单地址，默认与 bootstrap 同目录的 sha256sums.txt
+#   MIPL_CHECKSUMS_FILE   校验和清单的本地缓存（默认 <bootstrap>.sha256sums.txt）
+#
+# 下载与解压都会验完整性（Issue #32）：
+#   1. 本地缓存先过 sha256（对照镜像的 sha256sums.txt）—— 对不上就删掉重下；
+#   2. 下完再过一遍 sha256 与 zstd 完整性，三次都不通过就报错退出，
+#      不会把半截文件留在缓存里冒充「已经下好了」；
+#   3. 解压完成后查容器是否真的能用（能执行的 shell / 动态链接器 / pacman），
+#      而不是只看 etc/os-release 在不在 —— 它在归档里排第 630 条，
+#      usr/bin/bash 排第 5815 条，半途而废的解压必然骗过那种检查。
 #
 # 文档：docs/work/tech/01-容器环境搭建.md
 #       docs/work/tech/02-构建与QEMU测试.md
@@ -40,10 +52,35 @@ set -euo pipefail
 # ── 配置 ────────────────────────────────────────────────────────────
 CONTAINER_DIR="${MIPL_CONTAINER:-/var/lib/machines/archbuild}"
 MACHINE_NAME="${MIPL_MACHINE:-archbuild}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 定位自身用的是 BASH_SOURCE 而不是 $0：$0 说不清软链和 . 调用的情况。
+SELF_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SELF_DIR}/.." && pwd)"
 OUT_DIR="${MIPL_OUT_DIR:-${REPO_ROOT}/out}"
 BOOTSTRAP_URL="${MIPL_BOOTSTRAP_URL:-https://mirrors.tuna.tsinghua.edu.cn/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.zst}"
 BOOTSTRAP_FILE="${MIPL_BOOTSTRAP_FILE:-/tmp/archlinux-bootstrap-x86_64.tar.zst}"
+# 校验和：镜像目录里的 sha256sums.txt。
+# 注意它盖的是「那台镜像现在提供的那一版」，所以缓存文件只在正好等于当前版本时
+# 才算「已验证」。镜像一升级，checksum_ok 立刻变「对不上 / 不在清单里」，
+# 于是重新下载 —— 这正是我们要的，缓存永远跟着镜像的最新版走。
+BOOTSTRAP_DIR="${BOOTSTRAP_URL%/*}"
+if [[ "$BOOTSTRAP_DIR" == "$BOOTSTRAP_URL" ]]; then
+  # 不用 die：这里在函数定义之前，消息得自己打（die 也还不存在）。
+  printf '[错误] MIPL_BOOTSTRAP_URL 里没有目录部分，推不出 sha256sums.txt 的位置：%s\n' \
+    "$BOOTSTRAP_URL" >&2
+  exit 1
+fi
+CHECKSUMS_URL="${MIPL_CHECKSUMS_URL:-${BOOTSTRAP_DIR}/sha256sums.txt}"
+# 校验和也缓存在本地：重跑时不为了一个 1 KB 的文件再打一次网络。
+CHECKSUMS_FILE="${MIPL_CHECKSUMS_FILE:-${BOOTSTRAP_FILE}.sha256sums.txt}"
+
+# ── 共用库（容器健康检查、颜色约定）──────────────────────────────────
+MIPL_LIB="${SELF_DIR}/mipl-lib.sh"
+if [[ ! -r "$MIPL_LIB" ]]; then
+  printf '[错误] 缺少共用库：%s —— 仓库不完整或脚本被单独拷走了\n' "$MIPL_LIB" >&2
+  exit 1
+fi
+# shellcheck source=scripts/mipl-lib.sh
+MIPL_LIB_COLORS=1 . "$MIPL_LIB"
 
 # 容器内原版 releng：由容器里的 archiso 包提供，是「基线」的定义。
 BASELINE_PROFILE="/usr/share/archiso/configs/releng"
@@ -111,6 +148,30 @@ run() {
 
 require_root() {
   [[ ${EUID} -eq 0 ]] || die "需要 root 权限。请用 sudo 运行。"
+}
+
+# 容器的体检报告。doctor / shell / build 三个入口说的是同一件事，
+# 免得一个说「已初始化」、另一个在 execv 上炸（Issue #32）。
+report_container_health() {
+  local root="$1" item label paths p found
+  if mipl_container_health "$root"; then
+    note "  容器完整，shell：${mipl_shell}"
+    return 0
+  fi
+  for item in "${MIPL_HEALTH_ITEMS[@]}"; do
+    label="${item%%|*}"
+    IFS='|' read -r -a paths <<< "${item#*|}"
+    found=""
+    for p in "${paths[@]}"; do
+      if [[ -e "${root}/${p}" || -L "${root}/${p}" ]]; then found="/${p}"; break; fi
+    done
+    if [[ -n "$found" ]]; then
+      note "  [ok] ${label}  ${found}"
+    else
+      wnote "  [缺] ${label}  （找过：${paths[*]/#//}）"
+    fi
+  done
+  return 1
 }
 
 # ── 构建报告（A7 要的数字：耗时 / 体积 / sha256）─────────────────────
@@ -224,6 +285,18 @@ profile 怎么进容器：
   MIPL_PROFILE     同 --profile          MIPL_PROFILE_RW  1 = profile 可写挂载
   MIPL_CONTAINER   容器目录              MIPL_MACHINE     容器机器名
   MIPL_OUT_DIR     产物目录              MIPL_DRY_RUN     1 = 同 -n
+  MIPL_BOOTSTRAP_URL     bootstrap 下载地址（换镜像用这个）
+  MIPL_BOOTSTRAP_FILE    bootstrap 本地缓存（默认 /tmp 下那个）
+  MIPL_CHECKSUMS_URL     校验和清单地址（默认与 bootstrap 同目录）
+  MIPL_CHECKSUMS_FILE    校验和清单的本地缓存
+
+bootstrap 的完整性：
+  本地缓存先按镜像的 sha256sums.txt 核对 sha256；对不上就删掉重下。
+  下载完成后再核对一遍 sha256 与 zstd 完整性，三次都不通过就报错退出，
+  半截文件不会留在缓存里冒充「已下好」。
+  解压完成后查容器真的能用（能执行的 shell / 动态链接器 / pacman），
+  而不是只看 etc/os-release —— 它在归档里排第 630 条、usr/bin/bash 排第
+  5815 条（共 33105 条），半途而废的解压恰好能骗过那种检查（Issue #32）。
 
 文档：docs/work/tech/02-构建与QEMU测试.md
 EOF
@@ -385,42 +458,206 @@ ensure_clean_work_dir() {
   [[ $DRY_RUN -eq 1 || ! -e "$host_work" ]] || die "删除失败：${host_work}"
 }
 
-# ── 步骤 1 · 下载 bootstrap ─────────────────────────────────────────
-step_download() {
-  if [[ -f "${BOOTSTRAP_FILE}" ]]; then
-    info "bootstrap 已存在，跳过下载: ${BOOTSTRAP_FILE}"
-    return
-  fi
-  info "下载 Arch bootstrap…"
-  note "${BOOTSTRAP_URL}"
-  run curl -L --progress-bar -o "${BOOTSTRAP_FILE}" "${BOOTSTRAP_URL}"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    note "（试运行，未真的下载）"
-    return 0
-  fi
-  info "下载完成: $(du -h "${BOOTSTRAP_FILE}" | cut -f1)"
+# ── 步骤 1 · 下载 bootstrap（带校验）────────────────────────────────
+# 原来这里只判断「文件在不在」，于是被截断的下载会被当成下载好了（缺 -f
+# 时 HTTP 错误页也一样算「下载完成」）；解压被中断留下的残缺容器又会被下一次
+# 运行当成「已初始化」。两条路都通向同一个现场，见 Issue #32。
+BOOTSTRAP_CACHE_DIR="$(dirname -- "${BOOTSTRAP_FILE}")"
+[[ -n "$BOOTSTRAP_CACHE_DIR" && "$BOOTSTRAP_CACHE_DIR" != "." ]] || BOOTSTRAP_CACHE_DIR="/tmp"
+
+# checksum_ok <文件>：0 = 与镜像的 sha256sums.txt 对得上，且 zstd 层完整。
+# 判断本身在共用库（mipl_bootstrap_cache_ok）—— doctor 报的和这里做的是同一套
+# 标准，不许有第二份实现（Issue #32 就是「两处判断不一致」长出来的）。
+checksum_ok() {
+  mipl_bootstrap_cache_ok "$1" "$CHECKSUMS_FILE"
 }
 
-# ── 步骤 2 · 解压成容器 ─────────────────────────────────────────────
-step_extract() {
-  if [[ -f "${CONTAINER_DIR}/etc/os-release" ]]; then
-    info "容器目录已存在且看起来有效，跳过解压"
-    return
-  fi
-  info "解压到 ${CONTAINER_DIR}…"
-  run mkdir -p "${CONTAINER_DIR}"
-  # --numeric-owner 保留 uid/gid；--strip-components=1 去掉顶层 root.x86_64/
-  run tar --numeric-owner -xpf "${BOOTSTRAP_FILE}" \
-      -C "${CONTAINER_DIR}" --strip-components=1
+# 校验没过的原因，用中文说一句。退出码 → 人话的映射也在共用库里。
+checksum_reason() {
+  mipl_checksum_reason "$1"
+}
 
+# 手上这份归档可信吗？不可信就删掉，让下载流程重来。
+#
+# 为什么解压前还要再问一次：容器完整时 step_extract 会直接跳过解压，而这中间
+# 缓存完全可能变坏或变旧（手动 cp 进来的、下到一半的、或者你在两次构建之间
+# 换了镜像）。直接 tar 一个坏归档，得到的正是 Issue #32 那份残缺容器 ——
+# 而这时候 step_download 已经跑过了，它只看了「容器在不在解压那一步」。
+ensure_usable_bootstrap() {
+  local rc=0
+  # 试运行不许有任何副作用 —— 包括「删掉坏缓存」这种听起来正确的动作。
+  # 这里只报告结论，真正的删除留给真跑。
   if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ -s "$CHECKSUMS_FILE" ]] && ! checksum_ok "$BOOTSTRAP_FILE"; then
+      note "（试运行：这份缓存的 sha256 与清单对不上，真跑时会删掉重下）"
+    fi
+    return 0
+  fi
+  # 清单在手里才做完整校验（哈希是唯一能证明「这份就是镜像那一版」的东西）。
+  if [[ -s "$CHECKSUMS_FILE" ]]; then
+    checksum_ok "$BOOTSTRAP_FILE" && return 0
+    rc=$MIPL_CHK_LAST
+    warn "手上的 bootstrap 不可用：$(checksum_reason "$rc")"
+    note "  文件：${BOOTSTRAP_FILE}"
+    run rm -f -- "$BOOTSTRAP_FILE"
+    step_download
+    return 0
+  fi
+  # 没有清单时只查 zstd 完整性。这一条挡不住「旧版本但完整」的文件，
+  # 但那种文件 tar 得动，后面解压后的容器体检还兜着 —— 不会像半截文件那样
+  # 无声无息地造出一个残缺容器。
+  mipl_zstd_complete "$BOOTSTRAP_FILE" && return 0
+  warn "手上的 bootstrap 是半截的（zstd 完整性检查没过）"
+  note "  文件：${BOOTSTRAP_FILE}"
+  run rm -f -- "$BOOTSTRAP_FILE"
+  step_download
+}
+
+step_download() {
+  local attempt verified=0 rc=0
+
+  if [[ -f "$BOOTSTRAP_FILE" ]]; then
+    info "已有 bootstrap 缓存：${BOOTSTRAP_FILE}  ($(file_size "$BOOTSTRAP_FILE"))"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      note "（试运行：不校验也不重下；真跑时会先核对 sha256 与 zstd 完整性）"
+      return 0
+    fi
+    if [[ ! -f "$CHECKSUMS_FILE" ]]; then
+      info "本地还没有校验和清单，取一份：${CHECKSUMS_URL}"
+      curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
+        -o "${CHECKSUMS_FILE}.part" "$CHECKSUMS_URL" \
+        || warn "校验和清单下载失败：${CHECKSUMS_URL}"
+      if [[ -s "${CHECKSUMS_FILE}.part" ]]; then
+        mv -f "${CHECKSUMS_FILE}.part" "$CHECKSUMS_FILE"
+      else
+        rm -f "${CHECKSUMS_FILE}.part"
+      fi
+    fi
+    if checksum_ok "$BOOTSTRAP_FILE"; then
+      ok "缓存校验通过（sha256 与镜像的 sha256sums.txt 一致，zstd 完整）"
+      return 0
+    fi
+    rc=$MIPL_CHK_LAST
+    warn "缓存不能用：$(checksum_reason "$rc")—— 删掉重下"
+    note "  缓存：  ${BOOTSTRAP_FILE}"
+    note "  清单：  ${CHECKSUMS_FILE}（镜像换版本时上一版就查不到了，这属正常）"
+    run rm -f -- "$BOOTSTRAP_FILE"
+  fi
+
+  info "下载 Arch bootstrap…"
+  note "${BOOTSTRAP_URL}"
+  note "  → ${BOOTSTRAP_FILE}"
+
+  for attempt in 1 2 3; do
+    if [[ $DRY_RUN -eq 1 ]]; then
+      dry "curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -C - \\"
+      dry "     -o ${BOOTSTRAP_FILE} ${BOOTSTRAP_URL}"
+      note "（试运行，未真的下载）"
+      return 0
+    fi
+
+    if [[ -f "$BOOTSTRAP_FILE" ]]; then
+      note "  接着上次下（-C -）"
+      curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 -C - \
+        --progress-bar -o "$BOOTSTRAP_FILE" "$BOOTSTRAP_URL" || true
+    else
+      curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
+        --progress-bar -o "$BOOTSTRAP_FILE" "$BOOTSTRAP_URL" || true
+    fi
+
+    # 校验和 zstd 完整性是同一个判断（共用库），所以这里只报一句原因。
+    if checksum_ok "$BOOTSTRAP_FILE"; then
+      verified=1
+      ok "下载完成并已校验：$(file_size "$BOOTSTRAP_FILE")"
+      break
+    fi
+    rc=$MIPL_CHK_LAST
+    warn "第 ${attempt}/3 次：$(checksum_reason "$rc")"
+
+    # 删掉重来：半截的文件留着只会让下一次继续下到同一个坏尾巴上。
+    run rm -f -- "$BOOTSTRAP_FILE"
+  done
+
+  if [[ $verified -eq 0 ]]; then
+    die "bootstrap 下载三次都没通过校验：${BOOTSTRAP_URL}
+     半截文件已经删掉了，不会留在 ${BOOTSTRAP_CACHE_DIR} 里冒充缓存。
+
+     换个镜像（现在是 ${BOOTSTRAP_DIR}）：
+       sudo MIPL_BOOTSTRAP_URL=<别的镜像>/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.zst \\
+         ${MIPL_CMD} build
+     官方与备用镜像见 docs/work/tech/01-容器环境搭建.md。
+
+     想确认本地缓存到底是什么状态：
+       ${MIPL_CMD} doctor
+       ${MIPL_CMD} clean --bootstrap      # 把缓存清干净，下次重头下"
+  fi
+}
+
+# ── 步骤 2 · 解压成容器（残缺就认出残缺）─────────────────────────────
+# 「跳过解压」的条件原来是 etc/os-release 存在 —— 它不是解压完成的标志：
+# bootstrap 里 os-release 排在第 630 条，而 usr/bin/bash 排在第 5815 条
+# （共 33105 条）。一次被 Ctrl-C / 断线 / 盘满打断的解压，留下的正是
+# 「有 os-release、没有 bash」这种谁也看不出来的残缺容器（Issue #32）。
+#
+# 所以解压前查健康，解压后**再查一遍**：后者才是真正的完成判据。
+step_extract() {
+  if [[ -d "$CONTAINER_DIR" ]]; then
+    if mipl_container_health "$CONTAINER_DIR"; then
+      info "容器已存在且完整，跳过解压（shell：${mipl_shell}）"
+      return
+    fi
+    if [[ -e "${CONTAINER_DIR}/etc/os-release" ]]; then
+      warn "容器目录在，但它是残缺的 —— 删掉重新解压"
+      report_container_health "$CONTAINER_DIR"
+    else
+      info "容器目录存在但没有文件系统，重新解压"
+    fi
+    run rm -rf -- "$CONTAINER_DIR"
+  fi
+
+  if [[ $DRY_RUN -eq 0 && ! -f "$BOOTSTRAP_FILE" ]]; then
+    die "bootstrap 不在：${BOOTSTRAP_FILE}（下载那一步没走完？）"
+  fi
+
+  # 解压之前再验一次缓存：tar 一个坏归档 = 造一个残缺容器。
+  ensure_usable_bootstrap
+
+  info "解压到 ${CONTAINER_DIR}…"
+  note "  tar --numeric-owner -xpf ${BOOTSTRAP_FILE} -C ${CONTAINER_DIR} --strip-components=1"
+  run mkdir -p "$CONTAINER_DIR"
+
+  # tar 自己的报错已经够具体了，但被 set -e 直接带走时人只看到一行；
+  # 这里包一层，好把「下载的归档是坏的」和「盘写不进去」分开说。
+  local rc=0
+  if [[ $DRY_RUN -eq 0 ]]; then
+    # --numeric-owner 保留 uid/gid；--strip-components=1 去掉顶层 root.x86_64/
+    tar --numeric-owner -xpf "$BOOTSTRAP_FILE" \
+        -C "$CONTAINER_DIR" --strip-components=1 || rc=$?
+    if [[ $rc -ne 0 ]]; then
+      run rm -rf -- "$CONTAINER_DIR"
+      die "解压失败（tar 退出码 ${rc}）：${BOOTSTRAP_FILE}
+     半截的容器目录已经删掉了 —— 留着它只会被下次运行当成「已初始化」。
+
+     最可能的原因是归档不完整或落盘失败。先看这两个：
+       df -h $(dirname -- "$CONTAINER_DIR")     # 空间还够吗（解压后约 576 MB）
+       ${MIPL_CMD} clean --bootstrap            # 清掉缓存，下次重下并重新校验"
+    fi
+  else
     note "（试运行，未真的解压；下面按容器已就绪继续演示）"
     return 0
   fi
 
   [[ -f "${CONTAINER_DIR}/etc/os-release" ]] \
     || die "解压结果异常：找不到 ${CONTAINER_DIR}/etc/os-release"
-  info "解压完成"
+
+  # 真正的完成判据。os-release 在第 630 条就有了，靠它判定必然误判（Issue #32）。
+  if ! mipl_container_health "$CONTAINER_DIR"; then
+    report_container_health "$CONTAINER_DIR"
+    die "解压出来的容器不完整（见上）。解压过程没报错却缺文件，通常是归档本身是坏的：
+       ${MIPL_CMD} clean --bootstrap    # 删掉缓存的 bootstrap
+       ${MIPL_CMD} build                # 重新下载（会校验）并重新解压"
+  fi
+  ok "解压完成，容器可用（shell：${mipl_shell}）"
 }
 
 # ── 容器内执行的脚本（构建过程本身）────────────────────────────────
@@ -511,6 +748,15 @@ step_enter() {
   run mkdir -p "${OUT_DIR}"
 
   build_nspawn_args
+
+  # 进容器之前最后拦一道。step_extract 已经查过，但「解压完 → 进容器」之间
+  # 人可能手动动过这个目录，而 nspawn 遇到残缺容器给出的是一句
+  # execv(...) failed: No such file or directory —— 那时候再解释就晚了
+  # （Issue #32）。这里停下，还能把「缺什么、怎么重建」说清楚。
+  # 试运行不拦：这时候容器可能压根还没建，而那正是 -n 要演示的正常起点。
+  if [[ $DRY_RUN -eq 0 ]] && ! mipl_container_guard "$CONTAINER_DIR" "${MIPL_CMD} build"; then
+    die "与其进去撞 execv，不如在这里停下。"
+  fi
 
   # profile 的挂载点先备好：老版本 systemd 不会自动创建 nspawn 的目的路径。
   if [[ -n "$PROFILE_HOST" ]]; then

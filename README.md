@@ -61,7 +61,7 @@
 | [baseline-build.sh](scripts/baseline-build.sh) | 构建本体，由 `mipl build` 调用；`--baseline` 走容器内原版 releng，`--profile` 指定其它 profile |
 | [check-identity.sh](scripts/check-identity.sh) | 品牌一致性检查（**不需要 root**）：`./scripts/check-identity.sh` 扫 profile，`--iso out/miplinux-*.iso` 扫产物 |
 
-常用几条（**都要 `sudo`**）：
+常用几条（**使用Root权限运行**）：
 
 ```bash
 sudo ./scripts/mipl.sh doctor                     # 换机器第一件事：环境自检
@@ -69,7 +69,7 @@ sudo ./scripts/mipl.sh build                      # 用仓库里的 profile/ 构
 sudo ./scripts/mipl.sh qemu                       # 启动 QEMU（只测 Live）
 sudo ./scripts/mipl.sh stop                       # 关闭构建容器（用完别忘了）
 
-# 装系统 / 验装后系统（线 B 的必需品）
+# 装系统 / 验装后系统
 sudo ./scripts/mipl.sh target                     # 建 out/target.qcow2
 sudo ./scripts/mipl.sh qemu --disk target.qcow2   # 装：ISO 优先 + 挂盘
 sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启动

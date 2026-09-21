@@ -61,7 +61,7 @@
 | [baseline-build.sh](scripts/baseline-build.sh) | 构建本体，由 `mipl build` 调用；`--baseline` 走容器内原版 releng，`--profile` 指定其它 profile |
 | [check-identity.sh](scripts/check-identity.sh) | 品牌一致性检查（**不需要 root**）：`./scripts/check-identity.sh` 扫 profile，`--iso out/miplinux-*.iso` 扫产物 |
 
-常用几条（**都要 `sudo`**）：
+常用几条（**使用Root权限运行**）：
 
 ```bash
 sudo ./scripts/mipl.sh doctor                     # 换机器第一件事：环境自检

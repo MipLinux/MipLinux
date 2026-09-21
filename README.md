@@ -5,24 +5,24 @@
 1. **NVIDIA 显卡驱动开箱可用** —— 大多数 Arch 系发行版不预装 N 卡驱动，装完还要自己折腾
 2. **对中文用户友好** —— 参考 CachyOS 的短板：中文输入法、字体、国内镜像源、中文本地化都缺默认配置
 
-> **文档范围说明**：本套文档覆盖到「制作安装程序之前」的全部内容。
-> 安装程序部分单独成篇，见后续文档。
+> **文档范围说明**：`docs/knowledge/` 覆盖到「开始写安装器之前」的全部内容。
+> 安装器的**计划**在 [docs/work/installer-roadmap.md](docs/work/installer-roadmap.md)，实现随代码进 `installer/`。
 
 ---
 
 ## 当前进度
 
-> 截至 **2026-09-19**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
+> 截至 **2026-09-21**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
 
 | 阶段 | 状态 |
 |---|---|
 | 构建环境与基线 | ✅ 未修改的 `releng` 构建出 ISO，QEMU（UEFI）引导到 `[root@archiso ~]#` |
 | 自有 profile | ✅ `profile/` 进仓库并改名 MipLinux，产物 `miplinux-<日期>-x86_64.iso`（1.5 GiB，构建 2 分 08 秒） |
 | 装系统链路 | ✅ `mipl target` + `mipl qemu --disk … --boot c`：装完能从盘重启（[05-测试方法](docs/knowledge/05-测试方法.md) 检查点 4） |
-| 国内源与中文本地化 | 🚧 已并入主线：国内源、`zh_CN.UTF-8`、CJK fallback 规则、终端字体；**字体与输入法的包**还没进 `packages.x86_64` |
-| NVIDIA 驱动 | 未开始（`packages.x86_64` 里还没有 `nvidia-open`） |
-| 安装程序 | 未开始（P6 未定，见 [06-待定事项.md](docs/knowledge/06-待定事项.md)） |
-| 桌面环境 / 品牌化 | 未开始 |
+| 国内源与中文本地化 | 🚧 已并入主线：国内源、`zh_CN.UTF-8`、CJK fallback 规则、终端字体；**字体与输入法的包已进 `packages.x86_64`**（09-19），还没在含这些包的清单上验到装后系统 |
+| NVIDIA 驱动 | 未开始（`packages.x86_64` 里还没有 `nvidia-open`）。**D11 之后驱动由安装器装进装后系统**，验证点随之移到「装完重启」之后 |
+| 安装程序 | 未开始。**P6 已定案**（D14）：Python + PySide6/Qt6 + `cage` kiosk + `python-pyparted`；里程碑见 [installer-roadmap.md](docs/work/installer-roadmap.md) |
+| 桌面环境 / 品牌化 | 未开始。**P5 已定 WM 路线**（不做 DE），niri / Hyprland 待定 |
 
 **「✅」表示本机实测过**，不代表用户拿到的成品已经具备该能力。每一阶段验到了第几个检查点，
 以 [05-测试方法.md](docs/knowledge/05-测试方法.md) 的六个检查点为准。
@@ -40,15 +40,17 @@
 | [03-项目结构.md](docs/knowledge/03-项目结构.md) | profile 的每个文件是什么、为什么必须这么组织 | 所有人 |
 | [04-架构决策.md](docs/knowledge/04-架构决策.md) | NVIDIA 与中文方案的具体技术决策 | 所有人 |
 | [05-测试方法.md](docs/knowledge/05-测试方法.md) | 怎么验证 ISO 和安装结果 | 所有人 |
-| [06-待定事项.md](docs/knowledge/06-待定事项.md) | 尚未决定的问题 | 所有人 |
+| [06-待定事项.md](docs/knowledge/06-待定事项.md) | 已定案的决策与仍在讨论的问题（P1–P10 状态总表） | 所有人 |
 
 ### 工作文档 `docs/work/`
 
 | 文档 | 内容 |
 |---|---|
 | [工作计划索引](docs/work/README.md) | 当前阶段与任务导航 |
+| [installer-roadmap.md](docs/work/installer-roadmap.md) | 安装器 ROADMAP：里程碑 M0–M5、验收标准、失败模式 |
 | [2026-09-18.md](docs/work/2026-09-18.md) | 基线构建：容器、构建、QEMU 引导 |
 | [2026-09-19.md](docs/work/2026-09-19.md) | 自有 profile 落地：构建管线、目标盘、改名 |
+| [2026-09-21.md](docs/work/2026-09-21.md) | P6 选型定案、文档规则 |
 | [tech/](docs/work/tech/) | 可复现的技术操作步骤 |
 | [tech/03-术语表.md](docs/work/tech/03-术语表.md) | 各工具是什么、彼此什么关系 |
 
@@ -100,7 +102,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 ## 三十秒版本
 
 ```
-【源码】profile/                    ← 两位长期开发者用 git 协作
+【源码】profile/                    ← 维护者用 git 协作
            │
 【构建】systemd-nspawn 里的纯 Arch   ← 必须是 Arch：需要 pacman / pacstrap / mkinitcpio
            │  跑 mkarchiso
@@ -135,17 +137,19 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 | D7 | 「可变」指滚动更新，交付形态为装到硬盘的传统发行版 | 已确认；安装器是必需组件 |
 | D8 | NVIDIA 只需覆盖 Turing 及更新架构（两位长期开发者的显卡 —— Blackwell / Ada Lovelace —— 都落在范围内） | `nvidia-open` 即可满足，无需 legacy 分支 |
 | D9 | 发行版名称定为 **MipLinux**；`iso_name="miplinux"`、`iso_label="MIPLINUX_<YYYYMM>"`、`iso_publisher` 带组织 URL、`iso_application="MipLinux Live/Install Medium"` | A6 改名落地。**引导项用的是构建时生成的时间戳 UUID**（`archisosearchuuid`），不是卷标 —— 所以改卷标不需要同步改引导配置 |
+| D10 | 目标范围：**对外发布** | 交付对象是任何下载 ISO 的中文用户 —— 签名、发布文档、升级路径、硬件覆盖、缺陷容忍度都按对外标准做（清单见 [06-待定事项.md](docs/knowledge/06-待定事项.md) P2） |
+| D11 | ISO 形态：**在线安装** —— ISO 只承载 Live 环境，包在安装时从国内源拉取 | ISO 小、迭代快，并把「默认国内源」从加分项变成前提。代价是安装必须联网 → **联网界面不能省**；Live 的联网后端定为 NetworkManager + `nmcli`（见 D14） |
+| D12 | Live 环境：**极简 kiosk**，开机直进安装器 | 路径最短；代价是 Live 不再兼作救援盘。D11 的联网要求仍必须由 Live 提供 —— 极简 ≠ 什么都不装 |
+| D13 | 版本号**双轨**：ISO 产物名用构建日期，语义版号只打在 GitHub Release（`v0.x.y`） | 滚动发行版里同一天重建的产物都不同，**日期才是产物的真实指纹**；语义号只用于对外说明开发进度，`profiledef.sh` 一行不用改 |
+| D14 | 安装器**技术栈**：Python 3 + PySide6/Qt6 图形界面；Live 用 `cage` 做 kiosk 合成器；分区用 `python-pyparted`；联网用 NetworkManager + `nmcli`；装后系统用 systemd-boot。v0.1 只做 **UEFI + 整盘擦除 + ext4 单根** | 选型全部落在官方源（`pyside6` / `qt6-wayland` / `cage` / `python-pyparted` 都在 extra，`qt6-base` 本就因 `fcitx5-qt` 在 Live 里）；整盘场景不需要无损 resize（[05-测试方法](docs/knowledge/05-测试方法.md) 第 8 节的红线）。里程碑见 [installer-roadmap.md](docs/work/installer-roadmap.md) |
 
 待定：（详见 [06-待定事项.md](docs/knowledge/06-待定事项.md)）
 
 | 编号 | 待定问题 |
 |---|---|
-| P2 | 目标范围：自用 / 还是对外发布 |
-| P3 | ISO 形态：在线安装 / 离线全量安装 |
-| P4 | Live 环境形态：全功能桌面 / 开机直弹安装器的极简形态 |
-| P5 | 桌面环境选型 |
-| P6 | 安装程序方案 |
-| P9 | 发行版本号制度：产物名沿用构建日期，是否改用语义版本 |
+| P5 | 桌面环境：**WM 路线已定**（不做 DE），niri / Hyprland 二选一 |
+| P10 | 包清单的组织方式：P3/P4 之后 Live 与装后系统不再共用一份清单，D6 怎么重述 |
+| P11 | 第三方仓库政策：`archlinuxcn` 现在以 `SigLevel = Optional TrustAll` 启用，对外发布前怎么收紧 |
 
 ---
 
@@ -160,7 +164,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 | ieer040126（[@ieer040126](https://github.com/ieer040126)） | Arch Linux | Ada Lovelace · RTX 40 系 |
 
 **宿主发行版与项目无关**：构建环境由 `systemd-nspawn` 提供，容器内是纯 Arch；
-测试环境是宿主机的 QEMU。两人唯一必须保持一致的接口是包清单
+测试环境是宿主机的 QEMU。唯一必须保持一致的接口是包清单
 [`profile/packages.x86_64`](profile/packages.x86_64)（见 [03-项目结构.md](docs/knowledge/03-项目结构.md)）。
 
 **合并权限是单点**：`main` 受保护，PR 必须包含 code owner
@@ -176,7 +180,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 - `mkarchiso` 的行为：逐段阅读其源码
 - 本机环境能力：在本机实际执行命令确认
 
-验证时的快照数据集中在 [02-环境与工具链.md](docs/knowledge/02-环境与工具链.md) 的附录。
+验证时的快照数据集中在 [02-环境与工具链.md](docs/knowledge/02-环境与工具链.md) 第 2 节。
 
 ---
 

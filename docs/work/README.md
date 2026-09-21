@@ -2,8 +2,14 @@
 
 按阶段组织的工作任务与技术细节。
 
-> `docs/knowledge/` 存放**已经确定的结论**（概念、决策、原理）。
-> `docs/work/` 存放**待执行与正在执行的工作**。
+> `docs/knowledge/` 存放**已经确定的结论**（概念、决策、原理），是给新手读的：
+> 只写结论 —— 不写「待解决」「以后再说」，改动也不留「某日修订」这类痕迹。
+> 没定的东西一律放 `docs/work/` 或 [06-待定事项](../knowledge/06-待定事项.md)。
+>
+> **提到人时用角色称呼**（维护者、贡献者），不写「朋友」「某某的分支」；人数会变，别把人数写进流程描述 ——
+> 长期维护者之外，还有预备维护者在参与。
+>
+> `docs/work/` 存放**待执行与正在执行的工作**：计划、ROADMAP、当日记录、实测步骤。
 
 ---
 
@@ -12,8 +18,10 @@
 ```
 docs/work/
 ├── README.md                本文件，索引
+├── installer-roadmap.md     安装器 ROADMAP：里程碑、验收标准、失败模式
 ├── 2026-09-18.md            当日任务清单：基线构建
 ├── 2026-09-19.md            当日任务清单：自有 profile 落地
+├── 2026-09-21.md            当日记录：P6 选型定案、文档规则
 └── tech/                    技术细节（可复现的操作步骤）
     ├── 01-容器环境搭建.md
     ├── 02-构建与QEMU测试.md
@@ -93,7 +101,7 @@ end
 | ② 自有 profile 落地 | [2026-09-19.md](2026-09-19.md) | ✅ `profile/` 进仓库、构建管线、目标盘挂载、改名 MipLinux |
 | ③ 国内源与中文本地化 | 见 9.19 线 C | 🚧 `airootfs` 的配置已并入主线；字体与输入法的**包**待补，装后系统的源继承待解（Issue #23） |
 | ④ NVIDIA 驱动 | — | 未开始。**真机验证是最高风险项，应尽早做** |
-| ⑤ 安装程序 | — | 未开始（P6 待定，见 [06-待定事项](../knowledge/06-待定事项.md)） |
+| ⑤ 安装程序 | [installer-roadmap.md](installer-roadmap.md) | 未开始。**P6 已定案（D14）**：Python + PySide6/Qt6 + `cage` kiosk + `python-pyparted`；从 M0 / M1 起 |
 
 **新手从这里开始：** [tech/01-容器环境搭建.md](tech/01-容器环境搭建.md) → [tech/02-构建与QEMU测试.md](tech/02-构建与QEMU测试.md)。
 工具不熟先看 [tech/03-术语表.md](tech/03-术语表.md)。
@@ -130,3 +138,4 @@ end
 | 架构决策 | [knowledge/04-架构决策.md](../knowledge/04-架构决策.md) |
 | 测试方法 | [knowledge/05-测试方法.md](../knowledge/05-测试方法.md) |
 | 待定事项 | [knowledge/06-待定事项.md](../knowledge/06-待定事项.md) |
+| 安装器 ROADMAP | [installer-roadmap.md](installer-roadmap.md) |

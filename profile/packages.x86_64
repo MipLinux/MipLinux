@@ -153,3 +153,10 @@ man-pages-zh_cn
 # ==> 网络 · NetworkManager ==>
 networkmanager
 # <== 网络 · NetworkManager <==
+
+# ==> 安装器 · M0 ==>
+cage
+qt6-wayland
+pyside6
+python-pyparted
+# <== 安装器 · M0 <==

@@ -42,7 +42,6 @@ hyperv
 intel-ucode
 irssi
 iw
-iwd
 jfsutils
 kitty-terminfo
 kmscon-terminfo
@@ -150,3 +149,7 @@ fcitx5-qt
 # ==> 中文支持 · 本地化 ==>
 man-pages-zh_cn
 # <== 中文支持 · 本地化 <==
+
+# ==> 网络 · NetworkManager ==>
+networkmanager
+# <== 网络 · NetworkManager <==

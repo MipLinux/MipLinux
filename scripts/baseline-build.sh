@@ -147,18 +147,7 @@ BUILD_START="$(date +%s)"
 NSPAWN_SECONDS=-1
 
 # ── 辅助函数 ────────────────────────────────────────────────────────
-# 颜色跟 mipl.sh 用同一套约定：非终端、或设了 NO_COLOR 就不上色。
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-  C_INFO=$'\033[1;34m'; C_WARN=$'\033[1;33m'; C_ERR=$'\033[1;31m'
-  C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
-else
-  C_INFO=''; C_WARN=''; C_ERR=''; C_DIM=''; C_OFF=''
-fi
-
-info() { printf '%s==>%s %s\n' "$C_INFO" "$C_OFF" "$*"; }
-warn() { printf '%s警告:%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
-die()  { printf '%s错误:%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
-note() { printf '%s    %s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+# 颜色与基础输出函数由 mipl-lib.sh 统一提供。
 # 告警的后续行：照样是 stderr —— 否则重定向时警告会被拆成两半。
 wnote() { printf '%s    %s%s\n' "$C_DIM" "$*" "$C_OFF" >&2; }
 dry()  { printf '%s[试运行]%s %s\n' "$C_DIM" "$C_OFF" "$*"; }
@@ -213,14 +202,6 @@ report_container_health() {
 # ── 构建报告（A7 要的数字：耗时 / 体积 / sha256）─────────────────────
 # 这些以前得事后从 journal 和 ls 里挖，现在构建完直接打在终端上，
 # 粘进文档就行。
-fmt_size() {
-  awk -v b="${1:-0}" 'BEGIN{
-    split("B KB MB GB TB", a, " "); i = 1
-    while (b >= 1024 && i < 5) { b /= 1024; i++ }
-    if (i == 1) printf "%d %s", b, a[i]; else printf "%.1f %s", b, a[i]
-  }'
-}
-
 fmt_duration() {
   local s="${1:-0}"
   if (( s < 60 )); then printf '%d 秒' "$s"
@@ -612,6 +593,21 @@ checksum_reason() {
   mipl_checksum_reason "$1"
 }
 
+# 先取清单，让冷缓存与热缓存走同一条校验路径（Issue #39）。
+download_checksums() {
+  [[ -s "$CHECKSUMS_FILE" ]] && return 0
+
+  info "本地还没有校验和清单，取一份：${CHECKSUMS_URL}"
+  curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
+    -o "${CHECKSUMS_FILE}.part" "$CHECKSUMS_URL" \
+    || warn "校验和清单下载失败：${CHECKSUMS_URL}"
+  if [[ -s "${CHECKSUMS_FILE}.part" ]]; then
+    mv -f "${CHECKSUMS_FILE}.part" "$CHECKSUMS_FILE"
+  else
+    rm -f "${CHECKSUMS_FILE}.part"
+  fi
+}
+
 # 手上这份归档可信吗？不可信就删掉，让下载流程重来。
 #
 # 为什么解压前还要再问一次：容器完整时 step_extract 会直接跳过解压，而这中间
@@ -651,22 +647,16 @@ ensure_usable_bootstrap() {
 step_download() {
   local attempt verified=0 rc=0
 
+  # 清单必须在下载循环之前取得，否则冷缓存无从核对新文件。
+  if [[ $DRY_RUN -eq 0 ]]; then
+    download_checksums
+  fi
+
   if [[ -f "$BOOTSTRAP_FILE" ]]; then
     info "已有 bootstrap 缓存：${BOOTSTRAP_FILE}  ($(file_size "$BOOTSTRAP_FILE"))"
     if [[ $DRY_RUN -eq 1 ]]; then
       note "（试运行：不校验也不重下；真跑时会先核对 sha256 与 zstd 完整性）"
       return 0
-    fi
-    if [[ ! -f "$CHECKSUMS_FILE" ]]; then
-      info "本地还没有校验和清单，取一份：${CHECKSUMS_URL}"
-      curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
-        -o "${CHECKSUMS_FILE}.part" "$CHECKSUMS_URL" \
-        || warn "校验和清单下载失败：${CHECKSUMS_URL}"
-      if [[ -s "${CHECKSUMS_FILE}.part" ]]; then
-        mv -f "${CHECKSUMS_FILE}.part" "$CHECKSUMS_FILE"
-      else
-        rm -f "${CHECKSUMS_FILE}.part"
-      fi
     fi
     if checksum_ok "$BOOTSTRAP_FILE"; then
       ok "缓存校验通过（sha256 与镜像的 sha256sums.txt 一致，zstd 完整）"

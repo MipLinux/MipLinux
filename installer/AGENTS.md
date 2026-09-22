@@ -48,7 +48,7 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c  # 3. 检查点 4：从
 
 **安装器直到它装出来的系统能启动之前，都不算被测过。**
 
-## 所有权
+## 两块的边界
 
-`installer/mipl_installer/**` 与 `installer/tests/**` 属**线 D · 安装器核心**；
-`installer/bin/**` 属**线 E · Live 环境与入口**。
+`mipl_installer/` 与 `tests/` 是安装器核心；`bin/mipl-installer` 是 Live 侧入口（由 `cage` 拉起、由构建脚本拷进 `airootfs`）。
+两块常由不同的人同时推进 —— 动手前先确认当日的分工（见根文件的「开工前置」）。

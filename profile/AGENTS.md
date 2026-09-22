@@ -39,7 +39,7 @@ tags: [profile, archiso, build, branding, pacman]
 | `airootfs/` | Live 环境的**出厂设置**，会被装后系统继承；「配置即事实」指的就是它进了 git |
 | `efiboot/` `syslinux/` `grub/` | 引导菜单与帮助文本，品牌文本的另一半 |
 
-## 所有权
+## 连带影响
 
-`profile/packages.x86_64` 与 `profile/airootfs/**` 属**线 E · Live 环境与入口**。
-移到装后系统的那部分（P10 定案后）会牵动 D6，先问再动。
+这里的改动同时影响 **Live 环境**与**装后系统**（`airootfs/` 会被继承）。
+包清单从 Live 挪到装后系统的那部分还挂在 P10，定案前先问 —— 它会牵动 D6。

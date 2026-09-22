@@ -3,18 +3,22 @@
 MipLinux 是基于 Arch Linux 的滚动发行版：**NVIDIA 显卡开箱可用**、**对中文用户友好**。
 发行版的「源代码」是一堆配置文件，构建过程是**装配**而不是编译 —— 改一个配置文件就等于改产品行为。
 
-本文是 AI 在本仓库的行为契约；技术结论以 `docs/` 为准，两者冲突时先问人，不自行裁决。
+本文是 AI 在本仓库的行为契约，只放**全项目通用**的规则。目录专属的规矩在下级文件里（见「仓库布局」），
+按 AGENTS.md 规范的**累积**语义，下级文件继承本文而不重复它。
+技术结论以 `docs/` 为准，两者冲突时先问人，不自行裁决。
 动手前按顺序读：[01-概念模型](docs/knowledge/01-概念模型.md) → [05-测试方法](docs/knowledge/05-测试方法.md) → [README 的 D 表](README.md) → 手上那条线的文档。
 
 ## 仓库布局
 
+每行末尾是该目录自己的 AGENTS.md —— 在里面干活就先读它。
+
 ```
-profile/     构建源：由 releng 改名的 archiso profile；airootfs/ 是 Live 的出厂配置
-installer/   安装器源码（M0/M1 起开写，布局见下文）
-scripts/     项目操作台：mipl.sh 及其调用的构建脚本
+profile/     构建源：由 releng 改名的 archiso profile      → profile/AGENTS.md
+installer/   安装器源码（M0/M1 起开写）                    → installer/AGENTS.md
+scripts/     项目操作台：mipl.sh 及其调用的构建脚本         → scripts/AGENTS.md
 docs/
   knowledge/ 已确定的结论，给新手读
-  work/      待执行与正在执行的工作：ROADMAP、当日记录、tech/ 实测步骤
+  work/      待执行与正在执行的工作：ROADMAP、当日记录、tech/ → docs/AGENTS.md
 out/         构建产物与测试资产（已 gitignore，不提交）
 .github/     CODEOWNERS、Issue 模板、workflow
 ```
@@ -52,38 +56,25 @@ out/         构建产物与测试资产（已 gitignore，不提交）
 | **E · Live 环境与入口** | `profile/packages.x86_64`、`profile/airootfs/**`、`scripts/**`、`installer/bin/**` |
 | **F · 真机与桌面** | `docs/work/tech/05-装后系统验证.md` + 真机记录 |
 
-**根级共享文件**（`README.md`、`AGENTS.md`、`CLAUDE.md`、`.github/**`）与紧邻的索引文档：改动前先问。
+**根级共享文件**（`README.md`、各级 `AGENTS.md`、`CLAUDE.md`、`.github/**`）与紧邻的索引文档：改动前先问。
 
-## 约定与红线
+## 通用红线
 
 - **命令一律走脚本**，不手抄、不直调 `mkarchiso` / `pacstrap` / `qemu`。Issue #7（文档写死家目录）、#8（`-file=` 被换行拆开）、#32 都是手抄抄出来的。
 
-- **需要 root 的命令不自己 `sudo`**：交给用户执行，或经 `pkexec` 执行（弹 polkit 图形授权框，用户点确认才跑）。
-
-  ```bash
-  sudo ./scripts/mipl.sh doctor                     # A. 默认：贴给用户，停下等结果
-  pkexec --keep-cwd "$PWD/scripts/mipl.sh" doctor   # B. 自己跑
-  ```
-
-  三个坑：① `pkexec` 清空环境，`MIPL_QEMU_EXTRA` / `MIPL_MEM` 这类变量必须经 `env` 传
-  （`pkexec --keep-cwd /usr/bin/env MIPL_QEMU_EXTRA="-display none" "$PWD/scripts/mipl.sh" qemu`）；
-  ② 默认丢弃 `DISPLAY` / `XAUTHORITY`，且不设 `SUDO_USER` —— 而 `scripts/mipl.sh:772` 那句图形会话提示的判据正是 `SUDO_USER`，
-  所以 `pkexec ... qemu` **开不出窗口**：用 `env` 显式传会话变量、走[无头路径](docs/work/tech/02-构建与QEMU测试.md)、或交给用户 `sudo` 跑；
-  ③ 退出码 `126` = 用户取消授权、`127` = 未授权或出错 —— **两者都停下问用户，不换 `sudo` 绕过**（被拒后换条路提权，正是本项目最反对的「隐式提权」）。
+- **需要 root 的命令不自己 `sudo`**：交给用户执行，或经 `pkexec` 执行。具体命令与三个坑见 [scripts/AGENTS.md](scripts/AGENTS.md)；
+  退出码 `126` = 用户取消授权、`127` = 未授权或出错，**两者都停下问用户，不换 `sudo` 绕过**（被拒后换条路提权，正是本项目最反对的「隐式提权」）。
 
 - **破坏性命令先问后做**：`build` / `qemu` / `target` / `clean` / `stop` / `--force` —— 它们动构建容器、OVMF 固件和 `out/` 里的产物。
 
 - **没有实测证据，不得声称「已验证」。** 本仓库口径：「✅」= 本机实测过。写 `未实测` / `仅静态检查` / `仅 dry-run` / `验到检查点 N/6`。
   `-n`（dry-run）不算实测；构建成功不算引导成功；安装器提示成功不算装完 —— 「安装器直到它装出来的系统能启动之前，都不算被测过」，真正的缺陷全部出现在重启之后。
 
-- **文档分层**：`knowledge/` 只放已确定的结论（不留「待解决」与修订痕迹）；`work/` 放待执行与正在执行的工作；
-  没定的进 [06 的 P 表](docs/knowledge/06-待定事项.md)，定案后写回 [README 的 D 表](README.md)，`06` 保留推导过程与排除表。
-  **不擅自新增或修改 D 编号**；排除表是「已否决」档案，不重复讨论、不移出。
-  提到人用角色称呼（维护者、贡献者），不写人数；**引用已有结论给链接，不重述** —— 重述会产生第二份会漂移的真相。
+- **文档分层**：结论进 `docs/knowledge/`、进行中的工作进 `docs/work/`、没定的进 06 的 P 表。判定细则见 [docs/AGENTS.md](docs/AGENTS.md)。
+  **不擅自新增或修改 D 编号** —— D1–D14 是决策史，`06` 末尾的排除表是「已否决」档案，不重复讨论、不移出。
 
 - **出界就提 issue，不夹带在 PR 里。** 构建失败 / 行为不对 → [Bug 模板](.github/ISSUE_TEMPLATE/bug-report.yml)（`[Bug] ` / `bug`）；
-  文档与实际不符 → [文档模板](.github/ISSUE_TEMPLATE/documentation.yml)（`[文档] ` / `documentation`）；
-  需要跨线改动 → [功能模板](.github/ISSUE_TEMPLATE/feature-request.yml)（`[功能] ` / `enhancement`）；
+  文档与实际不符 → [文档模板](.github/ISSUE_TEMPLATE/documentation.yml)（`[文档] ` / `documentation`）；需要跨线改动 → [功能模板](.github/ISSUE_TEMPLATE/feature-request.yml)（`[功能] ` / `enhancement`）；
   **安全漏洞走 `SECURITY.md` 的私下通道，不提公开 issue**。
   仓库设了 `blank_issues_enabled: false`，空白 issue 提不出去，必须按模板的必填字段写；依据文档操作出的问题用「文档问题」模板，不要当 Bug 提。
   流程：读模板 → 拼正文 → **给用户过目** → `gh issue create --title "<前缀>…" --body-file <文件> --label <label>`。
@@ -106,23 +97,6 @@ out/         构建产物与测试资产（已 gitignore，不提交）
 
 > **拿不准就停下问。** `out/` 里的东西可以重建，但一条写错的口径会跟着后面所有人走。
 
-## 代码约定
-
-`installer/` 开写后生效，布局照 [installer-roadmap](docs/work/installer-roadmap.md) 第 3 节：
-
-```
-installer/
-├── mipl_installer/      核心逻辑：不依赖 Qt，可被 CLI 与测试直接驱动
-├── mipl_installer_qt/   PySide6 前端：只画界面，不实现逻辑
-├── bin/mipl-installer   入口，由 cage 拉起
-└── tests/               无头测试：在 out/target.qcow2 上驱动 core
-```
-
-- **逻辑先于外壳**：先让「分区 → 装包 → 配置 → 写引导」在无界面状态下跑通，再套界面。
-- **包清单唯一来源**：不得在代码里另写一份「装什么包」的列表（D6；P10 定案后按新口径改）—— 两边各写各的，就会出现「Live 里中文能打字、装完不能」这类难以定位的问题。
-- 源码与镜像内容分开放：构建脚本把 `installer/` 拷进 `airootfs`，`profile/` 只放 systemd unit 与入口。
-- 注释与文案用简体中文，**写「为什么」，不写「做了什么」** —— 与本仓库现有脚本同风格。
-
 ## PR 说明
 
 - 走 [PR 模板](.github/pull_request_template.md)：「改了什么 / 为什么 / 验证方式」三节照填，填不出的写「未验证」，不留空。
@@ -131,5 +105,7 @@ installer/
 
 ## 编辑本文件
 
-改规则只改 `AGENTS.md`。`CLAUDE.md` 是指向它的符号链接（给只认这个文件名的工具用），**不要把它当第二份文本维护**。
-每条规则尽量一行，理由与细节给链接、不复制 —— 复制会产生第二份会漂移的真相。
+- **通用规则写这里，目录专属规则写下级文件** —— 下级 `AGENTS.md` 只写自己目录特有的东西，不重述本文（规范里叫累积语义）。
+- 下级文件带 YAML frontmatter 的 `description`（≤ 200 字符）与 `tags`，供 harness 建轻量索引做渐进加载。本文在根目录，位置本身已足够说明，不加。
+- 每条规则尽量一行，理由与细节给链接、不复制 —— 复制会产生第二份会漂移的真相。
+- `CLAUDE.md` 是指向 `AGENTS.md` 的符号链接（给只认这个文件名的工具用），**不要把它当第二份文本维护**。

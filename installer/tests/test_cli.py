@@ -18,7 +18,7 @@ from mipl_installer.util import EXIT_USAGE, InstallerError
 
 
 def _args(**overrides) -> argparse.Namespace:
-    base = dict(user="mipl", password_stdin=False, dry_run=False)
+    base = dict(user="mipl", password_stdin=False, root_password_stdin=False, dry_run=False)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -68,6 +68,37 @@ class TestPassword(unittest.TestCase):
         fake.isatty.return_value = False
         with mock.patch.object(sys, "stdin", fake):
             self.assertEqual(cli.read_password(_args(dry_run=True)), util.DRY)
+
+
+class TestPasswords(unittest.TestCase):
+    def test_user_then_root_in_that_order(self):
+        fake = mock.Mock()
+        fake.readline.side_effect = ["userpw\n", "rootpw\n"]
+        with mock.patch.object(sys, "stdin", fake):
+            args = _args(password_stdin=True, root_password_stdin=True)
+            self.assertEqual(cli.read_passwords(args), ("userpw", "rootpw"))
+
+    def test_root_is_optional(self):
+        fake = mock.Mock()
+        fake.readline.return_value = "userpw\n"
+        with mock.patch.object(sys, "stdin", fake):
+            self.assertEqual(cli.read_passwords(_args(password_stdin=True)), ("userpw", None))
+
+    def test_root_password_needs_password_stdin(self):
+        with self.assertRaises(InstallerError) as ctx:
+            cli.read_passwords(_args(root_password_stdin=True))
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_empty_root_password_is_refused(self):
+        fake = mock.Mock()
+        fake.readline.side_effect = ["userpw\n", "\n"]
+        with mock.patch.object(sys, "stdin", fake):
+            with self.assertRaises(InstallerError):
+                cli.read_passwords(_args(password_stdin=True, root_password_stdin=True))
+
+    def test_dry_run_returns_placeholders(self):
+        self.assertEqual(cli.read_passwords(_args(dry_run=True, root_password_stdin=True)),
+                         (util.DRY, util.DRY))
 
 
 class TestDryRun(unittest.TestCase):

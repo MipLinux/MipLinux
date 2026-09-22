@@ -214,8 +214,42 @@ def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uu
     runner.run(["ln", "-sf", f"/usr/share/zoneinfo/{cfg.timezone}", tz_target], exit_code=EXIT_CONFIGURE)
 
 
-def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str) -> None:
-    """必须在目标系统里跑的几条。顺序有讲究，别调换。"""
+def verify_password(runner: Runner, cfg: TargetConfig, user: str) -> str:
+    """确认某个账号的密码**真的**设上了，并返回 `passwd -S` 的状态行。
+
+    为什么要断言：`chpasswd` 读到空输入时会**什么都不做却退出 0** —— 装完一路绿灯，
+    重启之后谁也登不进去。这类失败必须在安装阶段就炸出来（M1 的验收判据是
+    「装出来的系统能启动」，而一个登不进去的系统，等于没装上）。
+    """
+    if runner.dry_run:
+        return "dry-run"
+    out = (runner.run(chroot_argv(cfg.target, ["passwd", "-S", user]),
+                      capture=True, exit_code=EXIT_CONFIGURE) or "").strip()
+    fields = out.split()
+    if len(fields) < 2 or fields[0] != user:
+        raise InstallerError(
+            f"读不出 {user} 的密码状态：{out or '（没有输出）'}",
+            EXIT_CONFIGURE,
+            hint="`passwd -S <用户>` 的输出形如 `mipl P 2026-09-22 0 99999 7 -1`",
+        )
+    state = fields[1]
+    if state != "P":
+        raise InstallerError(
+            f"{user} 的密码没设上：passwd -S 说 {state}"
+            "（P = 可用密码，L = 账号被锁，NP = 没有密码）",
+            EXIT_CONFIGURE,
+            hint=f"看目标盘 /etc/shadow 里 {user} 那一行的第二个字段：空或 `!` 就是没写进去",
+        )
+    return out
+
+
+def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
+                  root_password: str | None = None) -> None:
+    """必须在目标系统里跑的几条。顺序有讲究，别调换。
+
+    `root_password=None` 表示**保持 root 锁定**（只用 sudo 提权）—— 这是默认，
+    但安装器会把这件事**说出来**：一个登不进去的 root 不该让人自己发现。
+    """
     target = cfg.target
     validate_user(cfg.user)
 
@@ -223,18 +257,30 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str) -> None:
     runner.run(chroot_argv(target, ["useradd", "-m", "-G", "wheel", "-s", "/bin/bash", cfg.user]),
                exit_code=EXIT_CONFIGURE)
     runner.run(chroot_argv(target, ["chpasswd"]), input=f"{cfg.user}:{password}\n", exit_code=EXIT_CONFIGURE)
+    verify_password(runner, cfg, cfg.user)
 
-    # 2. locale：写在 /etc/locale.gen 里的是「要生成什么」，locale-gen 才真的生成
+    # 2. root：设了就验，没设就明说 —— 不许静默留一个登不进去的 root
+    if root_password is not None:
+        runner.run(chroot_argv(target, ["chpasswd"]), input=f"root:{root_password}\n", exit_code=EXIT_CONFIGURE)
+        verify_password(runner, cfg, "root")
+        runner.reporter.note("root 密码已设置（与用户密码同机制，走 stdin）")
+    else:
+        runner.reporter.note(
+            f"root 未设密码（账号保持锁定）：只能用 {cfg.user} + sudo 提权。"
+            "要设就在装完之后 `arch-chroot /mnt passwd root`，或重装时带上 --root-password-stdin"
+        )
+
+    # 3. locale：写在 /etc/locale.gen 里的是「要生成什么」，locale-gen 才真的生成
     runner.run(chroot_argv(target, ["locale-gen"]), exit_code=EXIT_CONFIGURE)
 
-    # 3. keyring 再 populate 一次（幂等）—— roadmap §M1 把它算在 configure 的职责里，
+    # 4. keyring 再 populate 一次（幂等）—— roadmap §M1 把它算在 configure 的职责里，
     #    也是检查点 6 的排查入口：这一步没做，装后系统的 pacman -Syu 必挂
     runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinux"]), exit_code=EXIT_CONFIGURE)
 
-    # 4. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
+    # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
     runner.run(chroot_argv(target, ["systemctl", "enable", "NetworkManager"]), exit_code=EXIT_CONFIGURE)
 
-    # 5. initramfs 放最后：它要往 /boot（= ESP）里写内核与 initramfs，
+    # 6. initramfs 放最后：它要往 /boot（= ESP）里写内核与 initramfs，
     #    所以必须在 ESP 挂好之后、boot.py 校验之前跑
     runner.run(chroot_argv(target, ["mkinitcpio", "-P"]), exit_code=EXIT_CONFIGURE)
 
@@ -246,7 +292,8 @@ def configure_system(
     root_uuid: str,
     esp_uuid: str,
     password: str,
+    root_password: str | None = None,
 ) -> None:
     copy_pacman_config(runner, cfg)
     write_static_files(runner, cfg, root_uuid, esp_uuid)
-    run_in_chroot(runner, cfg, password)
+    run_in_chroot(runner, cfg, password, root_password)

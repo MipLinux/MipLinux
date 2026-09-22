@@ -77,10 +77,22 @@ printf '\n== 跑安装器 / running the installer ==\n'
 printf '给装后系统的用户设密码（password for the new user, no echo）: '
 read -rsp '' PW
 printf '\n'
+printf '也给 root 设密码吗？不设就锁定，只能用 sudo（set a root password too? [y/N]）: '
+read -r want_root
+root_args=()
+if [[ "$want_root" == [yY]* ]]; then
+  printf 'root 密码（no echo）: '
+  read -rsp '' RPW
+  printf '\n'
+  root_args=(--root-password-stdin)
+  pw_input="$(printf '%s\n%s' "$PW" "$RPW")"
+else
+  pw_input="$PW"
+fi
 
 rc=0
-printf '%s\n' "$PW" | PYTHONPATH="${SRC}/installer" python3 -m mipl_installer \
-  --disk "$DISK" --yes --password-stdin --log "$LOG" "${@:2}" || rc=$?
+printf '%s\n' "$pw_input" | PYTHONPATH="${SRC}/installer" python3 -m mipl_installer \
+  --disk "$DISK" --yes --password-stdin "${root_args[@]}" --log "$LOG" "${@:2}" || rc=$?
 
 keep_log "$DISK" "$LOG"
 

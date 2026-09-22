@@ -57,6 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user", default="mipl", help="要创建的用户（wheel 组，能 sudo）")
     parser.add_argument("--password-stdin", action="store_true",
                         help="从标准输入读一行当密码（非交互环境必须用这个）")
+    parser.add_argument("--root-password-stdin", action="store_true",
+                        help="再读一行设 root 的密码；**不给就保持 root 锁定**（只能用 sudo 提权）")
     parser.add_argument("--locale", default="zh_CN.UTF-8", help="装后系统的 LANG")
     parser.add_argument("--timezone", default="Asia/Shanghai", help="装后系统的时区")
     parser.add_argument("--packages-file", default=packages.default_packages_file(),
@@ -90,6 +92,29 @@ def parse_steps(raw: str) -> tuple[str, ...]:
         raise InstallerError("一个阶段都没选", EXIT_USAGE, hint=f"例如 --steps {','.join(STEP_ORDER)}")
     # 按依赖顺序跑，不按人敲的顺序 —— "boot,disk" 不是一种意图
     return tuple(s for s in STEP_ORDER if s in requested)
+
+
+def read_passwords(args: argparse.Namespace) -> tuple[str, str | None]:
+    """读用户密码，以及（可选）root 密码。两行都从 stdin 读，**顺序固定**：用户在前。
+
+    密码只走 stdin，绝不进 argv —— argv 会留在进程列表与日志里。
+    """
+    password = read_password(args)
+    if not args.root_password_stdin:
+        return password, None
+    if args.dry_run:
+        return password, util.DRY
+    if not args.password_stdin:
+        raise InstallerError(
+            "--root-password-stdin 要和 --password-stdin 一起用",
+            EXIT_USAGE,
+            hint="两行密码按「用户在前、root 在后」的顺序从 stdin 读",
+        )
+    line = sys.stdin.readline().rstrip("\n")
+    if not line:
+        raise InstallerError("从标准输入读到的 root 密码是空的", EXIT_USAGE,
+                            hint="不想设 root 密码就别带 --root-password-stdin")
+    return password, line
 
 
 def read_password(args: argparse.Namespace) -> str:
@@ -159,12 +184,13 @@ def _step_packages(runner: Runner, args: argparse.Namespace, cfg: TargetConfig, 
 
 
 def _step_configure(runner: Runner, args: argparse.Namespace, cfg: TargetConfig, state: _State,
-                    password: str) -> None:
+                    password: str, root_password: str | None) -> None:
     configure.configure_system(
         runner, cfg,
         root_uuid=state.root_uuid,
         esp_uuid=state.esp_uuid,
         password=password,
+        root_password=root_password,
     )
 
 
@@ -173,7 +199,8 @@ def _step_boot(runner: Runner, args: argparse.Namespace, cfg: TargetConfig, stat
     boot.verify(runner, cfg, state.root_uuid)
 
 
-def run(args: argparse.Namespace, reporter: TextReporter, password: str) -> None:
+def run(args: argparse.Namespace, reporter: TextReporter, password: str,
+        root_password: str | None = None) -> None:
     runner = Runner(reporter, dry_run=args.dry_run)
     cfg = TargetConfig(
         target=args.target,
@@ -205,7 +232,7 @@ def run(args: argparse.Namespace, reporter: TextReporter, password: str) -> None
             elif step == "packages":
                 _step_packages(runner, args, cfg, state)
             elif step == "configure":
-                _step_configure(runner, args, cfg, state, password)
+                _step_configure(runner, args, cfg, state, password, root_password)
             elif step == "boot":
                 _step_boot(runner, args, cfg, state)
     except BaseException:
@@ -219,7 +246,10 @@ def run(args: argparse.Namespace, reporter: TextReporter, password: str) -> None
             reporter.note("卸载目标")
             disk.unmount_target(runner, cfg.target)
 
-    reporter.emit(Event("done", "装完了 —— 现在可以重启（Live 里 `poweroff`）", percent=100))
+    accounts = f"账号：{args.user}（密码已设，wheel 组，可 sudo）"
+    accounts += "、root（已设密码）" if root_password is not None else "、root（未设密码，保持锁定）"
+    reporter.emit(Event("done", "装完了 —— 现在可以重启（Live 里 `poweroff`）", percent=100,
+                        detail=accounts))
 
 
 def _layout(args: argparse.Namespace, runner: Runner, reporter: TextReporter) -> disk.Layout:
@@ -240,13 +270,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     reporter = TextReporter(log_path=args.log)
     try:
-        password = read_password(args)
+        password, root_password = read_passwords(args)
     except InstallerError as exc:
         print(f"[失败] {exc.render()}", file=sys.stderr)
         reporter.close()
         return exc.exit_code
     try:
-        run(args, reporter, password)
+        run(args, reporter, password, root_password)
     except InstallerError as exc:
         print(f"[失败] {exc.render()}", file=sys.stderr)
         return exc.exit_code

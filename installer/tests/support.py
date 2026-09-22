@@ -12,11 +12,32 @@ from mipl_installer.events import NullReporter
 from mipl_installer.util import InstallerError
 
 
+class RecordingReporter:
+    """把旁白记下来：有些行为（比如「root 没设密码要说出来」）只有笔记里看得到。"""
+
+    def __init__(self) -> None:
+        self.notes: list[str] = []
+        self.events: list = []
+
+    def emit(self, event) -> None:
+        self.events.append(event)
+
+    def note(self, message: str) -> None:
+        self.notes.append(message)
+
+    def command(self, argv) -> None:
+        pass
+
+    def text(self) -> str:
+        return "\n".join(self.notes)
+
+
 class FakeRunner:
     """记录命令的 Runner 替身。行为与 util.Runner 对齐（run/attempt/require/have）。"""
 
-    def __init__(self, *, dry_run: bool = False, outputs: dict[str, str] | None = None) -> None:
-        self.reporter = NullReporter()
+    def __init__(self, *, dry_run: bool = False, outputs: dict[str, str] | None = None,
+                 reporter=None) -> None:
+        self.reporter = reporter if reporter is not None else NullReporter()
         self.dry_run = dry_run
         self.history: list[list[str]] = []
         self.outputs = outputs or {}

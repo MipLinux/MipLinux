@@ -13,7 +13,7 @@ from pathlib import Path
 from mipl_installer import configure
 from mipl_installer.configure import TargetConfig
 from mipl_installer.util import EXIT_CONFIGURE, InstallerError
-from tests.support import FakeRunner
+from tests.support import FakeRunner, RecordingReporter
 
 ROOT_UUID = "11111111-1111-1111-1111-111111111111"
 ESP_UUID = "22222222-2222-2222-2222-222222222222"
@@ -106,23 +106,58 @@ class TestStaticFiles(unittest.TestCase):
 
 
 class TestChrootSteps(unittest.TestCase):
+    PASSWD_OK = {"passwd -S mipl": "mipl P 2026-09-22 0 99999 7 -1",
+                 "passwd -S root": "root P 2026-09-22 0 99999 7 -1"}
+
     def test_order_and_password_on_stdin(self):
-        runner = FakeRunner()
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
         configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
         commands = runner.commands()
 
         # 密码只能走 stdin，绝不能出现在 argv 里（进程列表与日志都会留档）
         self.assertTrue(all("s3cret" not in cmd for cmd in commands), commands)
 
-        expected = [
+        order = [
             "arch-chroot /mnt useradd -m -G wheel -s /bin/bash mipl",
             "arch-chroot /mnt chpasswd",
+            "arch-chroot /mnt passwd -S mipl",
             "arch-chroot /mnt locale-gen",
             "arch-chroot /mnt pacman-key --populate archlinux",
             "arch-chroot /mnt systemctl enable NetworkManager",
             "arch-chroot /mnt mkinitcpio -P",
         ]
-        self.assertEqual(commands, expected)
+        positions = [commands.index(cmd) for cmd in order]
+        self.assertEqual(positions, sorted(positions), commands)
+
+    def test_user_password_is_verified_not_assumed(self):
+        """`chpasswd` 空输入时什么都不做却退 0 —— 所以必须回头问一句「设上了吗」。"""
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
+        runner.assert_ran(self, "passwd -S mipl")
+
+    def test_rejects_when_the_password_did_not_stick(self):
+        runner = FakeRunner(outputs={"passwd -S mipl": "mipl L 2026-09-22 0 99999 7 -1"})
+        with self.assertRaises(InstallerError) as ctx:
+            configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
+        self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+        self.assertIn("密码没设上", str(ctx.exception))
+
+    def test_root_password_when_asked(self):
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret", "rootpw")
+        commands = runner.commands()
+        self.assertEqual(len([c for c in commands if c.endswith("chpasswd")]), 2)
+        runner.assert_ran(self, "passwd -S root")
+        self.assertTrue(all("rootpw" not in cmd for cmd in commands), commands)
+
+    def test_root_left_locked_is_said_out_loud(self):
+        """不设 root 密码可以，但**不许静默** —— 装完得让人知道 root 登不进去。"""
+        reporter = RecordingReporter()
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK), reporter=reporter)
+        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
+        self.assertNotIn("arch-chroot /mnt passwd -S root", runner.commands())
+        self.assertIn("root", reporter.text())
+        self.assertIn("锁定", reporter.text())
 
 
 if __name__ == "__main__":

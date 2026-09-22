@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest import mock
 
@@ -136,6 +137,39 @@ class TestWaitForPartitionNodes(unittest.TestCase):
             with self.assertRaises(InstallerError):
                 disk.wait_for_partition_nodes(runner, "/dev/vda")
         self.assertEqual(len([c for c in runner.commands() if c.startswith("sleep")]), 2)
+
+
+class TestFilesystemAndMount(unittest.TestCase):
+    def test_make_filesystems_labels_both(self):
+        runner = FakeRunner()
+        disk.make_filesystems(runner, "/dev/vda1", "/dev/vda2")
+        self.assertEqual(runner.commands(), [
+            "mkfs.vfat -F 32 -n MIPLINUX /dev/vda1",
+            "mkfs.ext4 -F -L MIPLINUX /dev/vda2",
+        ])
+
+    def test_mount_order_root_then_esp_on_boot(self):
+        """ESP 必须挂到 target/boot（systemd-boot 只认 FAT，内核得落在 ESP 上）。"""
+        runner = FakeRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            disk.mount_target(runner, "/dev/vda2", "/dev/vda1", tmp)
+        commands = runner.commands()
+        self.assertEqual(commands, [f"mount /dev/vda2 {tmp}", f"mount /dev/vda1 {tmp}/boot"])
+
+    def test_unmount_never_raises(self):
+        """收尾阶段再抛异常，只会盖掉真正的失败原因。"""
+        runner = FakeRunner()
+        runner.fail_patterns.add("umount")
+        disk.unmount_target(runner, "/mnt")          # 不该抛
+        self.assertIn("umount -R /mnt", runner.commands())
+
+    def test_settle_udev_triggers_then_settles(self):
+        runner = FakeRunner()
+        disk.settle_udev(runner)
+        self.assertEqual(runner.commands(), [
+            "udevadm trigger --subsystem-match=block",
+            "udevadm settle",
+        ])
 
 
 class TestUuidGuard(unittest.TestCase):

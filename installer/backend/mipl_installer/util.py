@@ -195,15 +195,21 @@ def chroot_argv(target: str, argv: list[str]) -> list[str]:
 
 
 # ── 文件 ──────────────────────────────────────────────────────────────
-def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None) -> None:
+def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
+               secret: bool = False) -> None:
     """写一个文件（含父目录）。dry-run 下只打印内容，不落盘。
 
     dry-run 把内容也打出来，是因为「将要生成的 fstab / 引导项长什么样」正是
     最值得先看一眼的东西 —— 分区表只是手段，这两个文件才决定它能不能起来。
+
+    `secret=True` 时**连预览都不打**：密码那类内容一旦进了日志，日志就会跟着进仓库、
+    进 issue、进别人的终端。要写的路径照旧说出来，内容一个字都不落。
     """
-    runner.reporter.note(f"写入 {path}" + (f"（mode {mode:04o}）" if mode is not None else ""))
+    runner.reporter.note(f"写入 {path}" + (f"（mode {mode:04o}）" if mode is not None else "")
+                         + ("（内容不打印）" if secret else ""))
     if runner.dry_run:
-        _preview(runner.reporter, text)
+        if not secret:
+            _preview(runner.reporter, text)
         return
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

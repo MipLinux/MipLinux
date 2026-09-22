@@ -18,6 +18,7 @@ class RecordingReporter:
     def __init__(self) -> None:
         self.notes: list[str] = []
         self.events: list = []
+        self.commands: list[str] = []
 
     def emit(self, event) -> None:
         self.events.append(event)
@@ -26,10 +27,10 @@ class RecordingReporter:
         self.notes.append(message)
 
     def command(self, argv) -> None:
-        pass
+        self.commands.append(" ".join(str(a) for a in argv))
 
     def text(self) -> str:
-        return "\n".join(self.notes)
+        return "\n".join(self.notes + ["$ " + c for c in self.commands])
 
 
 class FakeRunner:

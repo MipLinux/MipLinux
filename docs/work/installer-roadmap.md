@@ -97,9 +97,9 @@ installer/
 - `disk.py`：`wipefs` 擦盘 → GPT → ESP 512 MiB + root 剩余（**盘尾留 1 MiB 给 GPT 备份表头**，压上去内核会丢分区）
 - `packages.py`：`pacstrap` 到 `/mnt`；清单先读 `backend/mipl_installer/data/target-packages.x86_64`（临时，P10 落定后改指向唯一来源）
 - `configure.py`：`fstab`（按 UUID）、locale、时区、用户 + sudo、`pacman-key --init/--populate`、mirrorlist 写死国内源、chroot 内 `mkinitcpio -P`
-- `boot.py`：`bootctl install` + loader entry（`options` 带 `nvidia_drm.modeset=1`）+ `efibootmgr`
+- `boot.py`：`bootctl install` + loader entry（只写需要显式覆盖的内核参数）+ `efibootmgr`
 
-**验收：** `mipl qemu --disk target.qcow2 --boot c` 能从盘启动（检查点 4），进系统后 `pacman -Syu` 成功（检查点 6）；全程只在 `out/target.qcow2` 上做。
+**验收：** `mipl qemu --disk target.qcow2 --boot c` 能从盘启动（检查点 4），进系统后确认 `cat /sys/module/nvidia_drm/parameters/modeset` 输出 `Y`，并使 `pacman -Syu` 成功（检查点 6）；全程只在 `out/target.qcow2` 上做。
 **产出：** `docs/work/tech/04-安装逻辑与实测.md`
 
 ### M2 · Qt6 前端最小可用

@@ -120,15 +120,6 @@ MIPL_LIB_COLORS=1 . "$MIPL_LIB"
 
 DRY_RUN=0
 
-# ── 输出 ──────────────────────────────────────────────────────────────
-# 颜色由共用库按同一套约定定下（非终端或 NO_COLOR 就不上色），这里不再判断 ——
-# 两份判断迟早会漂移，而「两个入口对同一件事说法不同」正是 Issue #32 的形态。
-info() { printf '%s==>%s %s\n' "$C_INFO" "$C_OFF" "$*"; }
-ok()   { printf '%s[ok]%s %s\n' "$C_OK" "$C_OFF" "$*"; }
-warn() { printf '%s[!]%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
-die()  { printf '%s[错误]%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
-note() { printf '%s    %s%s\n' "$C_DIM" "$*" "$C_OFF"; }
-
 # ── 执行封装（--dry-run 只打印）───────────────────────────────────────
 # 只给「含空格」的参数加引号：直接 %q 会把 if=pflash,format=raw 也转义成
 # if=pflash\,format=raw —— 能跑，但没法读，而可读正是 dry-run 的全部意义。
@@ -181,16 +172,6 @@ require_root() {
 # 需要 root 的操作。脚本入口已经强制 root，所以这里就是直接跑 ——
 # 保留这个函数只是为了在调用点标明「这一步为什么需要特权」。
 run_root() { run "$@"; }
-
-fmt_size() {
-  awk -v b="${1:-0}" 'BEGIN{
-    split("B KB MB GB TB", a, " "); i = 1
-    while (b >= 1024 && i < 5) { b /= 1024; i++ }
-    if (i == 1) printf "%d %s\n", b, a[i]; else printf "%.1f %s\n", b, a[i]
-  }'
-}
-
-file_size() { fmt_size "$(stat -c %s "$1" 2>/dev/null || echo 0)"; }
 
 # ── 发行版判定 ────────────────────────────────────────────────────────
 os_field() {

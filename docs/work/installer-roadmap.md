@@ -42,16 +42,21 @@
 
 ```
 installer/
-├── mipl_installer/          核心逻辑：不依赖 Qt，可被 CLI 与测试直接驱动
+├── backend/mipl_installer/  核心逻辑：不依赖 Qt，可被 CLI 与测试直接驱动
 │   ├── disk.py              擦盘、建 GPT、ESP + root（pyparted）
 │   ├── packages.py          pacstrap 驱动 + 读目标包清单
 │   ├── configure.py         chroot 配置：locale / 用户 / fstab / keyring / mirrorlist
 │   ├── boot.py              bootctl install + loader entry + efibootmgr
-│   └── events.py            进度事件流（前端只订阅它）
-├── mipl_installer_qt/       PySide6 前端：只画界面，不实现逻辑
+│   ├── events.py            进度事件流（前端只订阅它）
+│   ├── util.py              外部命令与写文件的唯一出口（Runner，可注入替身）
+│   ├── cli.py / __main__.py 无界面入口：`python3 -m mipl_installer`
+│   └── data/                M1 的临时目标包清单（P10 定案后删）
+├── frontend/                PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
 ├── bin/mipl-installer       入口，由 cage 拉起
-└── tests/                   无头测试：在 out/target.qcow2 上驱动 core
+└── tests/                   单测 test_*.py + Live 内排练脚本（*.sh）
 ```
+
+**包名不跟目录名走**：目录按角色分，import 名一律是 `mipl_installer`。
 
 **构建集成：** 构建脚本把 `installer/` 拷进 Live 镜像的 `airootfs`，`airootfs` 里只放 systemd unit 与入口。**源码与镜像内容分开放** —— 改界面不需要动 `profile/`。
 
@@ -89,8 +94,8 @@ installer/
 
 最高风险的一段，且**与界面无关** —— 先做完它，界面才是「套壳」而不是「猜」。
 
-- `disk.py`：`wipefs` 擦盘 → GPT → ESP 512 MiB + root 剩余
-- `packages.py`：`pacstrap` 到 `/mnt`；清单先读 `installer/target-packages.x86_64`（临时，P10 落定后改指向唯一来源）
+- `disk.py`：`wipefs` 擦盘 → GPT → ESP 512 MiB + root 剩余（**盘尾留 1 MiB 给 GPT 备份表头**，压上去内核会丢分区）
+- `packages.py`：`pacstrap` 到 `/mnt`；清单先读 `backend/mipl_installer/data/target-packages.x86_64`（临时，P10 落定后改指向唯一来源）
 - `configure.py`：`fstab`（按 UUID）、locale、时区、用户 + sudo、`pacman-key --init/--populate`、mirrorlist 写死国内源、chroot 内 `mkinitcpio -P`
 - `boot.py`：`bootctl install` + loader entry（`options` 带 `nvidia_drm.modeset=1`）+ `efibootmgr`
 

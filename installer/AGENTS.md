@@ -1,5 +1,5 @@
 ---
-description: MipLinux 安装器约定：mipl_installer 与 Qt 前端的职责切分、无界面优先的推进顺序、包清单唯一来源。
+description: MipLinux 安装器约定：backend 与 frontend 的职责切分、无界面优先的推进顺序、包清单唯一来源、测试怎么跑。
 tags: [installer, python, pyside6, partitioning, uefi]
 ---
 
@@ -17,23 +17,39 @@ tags: [installer, python, pyside6, partitioning, uefi]
 
 ```
 installer/
-├── mipl_installer/      核心逻辑：不依赖 Qt，可被 CLI 与测试直接驱动
-├── mipl_installer_qt/   PySide6 前端：只画界面，不实现逻辑
-├── bin/mipl-installer   入口，由 cage 拉起
-└── tests/               无头测试：在 out/target.qcow2 上驱动 core
+├── backend/
+│   └── mipl_installer/   后端：不依赖 Qt，可被 CLI 与测试直接驱动
+│       └── data/         随包走的数据（M1 的临时目标包清单）
+├── frontend/             PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
+├── bin/mipl-installer    Live 侧入口，由 cage 拉起（线 E）
+└── tests/                单测（test_*.py）+ Live 内排练脚本（*.sh）
 ```
 
 （以 [installer-roadmap](../docs/work/installer-roadmap.md) 第 3 节为准，那里还写着构建集成。）
+
+**包名不跟目录名走**：目录按角色分（backend / frontend / tests），import 名一律是
+`mipl_installer`（前端将来是 `mipl_installer_qt`）—— 这样「往哪放」和「怎么 import」互不牵连。
 
 ## 四条约定
 
 - **逻辑先于外壳。** 先让「分区 → 装包 → 配置 → 写引导」在没有界面的情况下跑通，再套界面 ——
   这样界面方案的变更不会导致返工。`core` 必须能被 CLI 与测试直接驱动。
-- **`mipl_installer/` 不依赖 Qt。** 前端只订阅 `events.py` 的事件流，不实现逻辑；两边一起改就等于没有分层。
+- **后端不依赖 Qt。** `backend/mipl_installer/` 里出现 `PySide6`/`Qt` 的 import 就算破线；
+  前端只订阅 `events.py` 的事件流、不实现逻辑（接口见 [frontend/README.md](frontend/README.md)）。
 - **包清单唯一来源。** 不得在代码里另写一份「装什么包」的列表（D6）—— 两边各写各的，就会出现
   「Live 里中文能打字、装完不能」这类难以定位的问题。装后系统的清单放哪见 [P10](../docs/knowledge/06-待定事项.md)。
 - **源码与镜像内容分开放。** 构建脚本把 `installer/` 拷进 `airootfs`，`profile/` 里只放 systemd unit 与入口 ——
   改界面不需要动 `profile/`。
+
+## 怎么跑
+
+```bash
+# 单测：不需要 root、不需要 Live（后端在 sys.path 上由 tests/__init__.py 自己接好）
+python3 -m unittest discover -s installer/tests -t installer
+
+# 直接驱动 CLI（Live 里由 tests/live-rehearsal.sh 代劳）
+PYTHONPATH=installer/backend python3 -m mipl_installer --disk /dev/vda --dry-run
+```
 
 ## 测试
 
@@ -49,5 +65,5 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c  # 3. 检查点 4：从
 
 ## 两块的边界
 
-`mipl_installer/` 与 `tests/` 是安装器核心；`bin/mipl-installer` 是 Live 侧入口（由 `cage` 拉起、由构建脚本拷进 `airootfs`）。
+`backend/mipl_installer/` 与 `tests/` 是安装器核心；`bin/mipl-installer` 是 Live 侧入口（由 `cage` 拉起、由构建脚本拷进 `airootfs`）。
 两块常由不同的人同时推进 —— 动手前先确认当日的分工（见根文件的「开工前置」）。

@@ -48,6 +48,23 @@ mipl_refresh_output_mode() {
 }
 mipl_refresh_output_mode
 
+# 共用输出与尺寸格式：两个入口是不同进程，函数不会自动继承。
+info() { printf '%s==>%s %s\n' "$C_INFO" "$C_OFF" "$*"; }
+ok()   { printf '%s[ok]%s %s\n' "$C_OK" "$C_OFF" "$*"; }
+warn() { printf '%s[!]%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
+die()  { printf '%s[错误]%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+note() { printf '%s    %s%s\n' "$C_DIM" "$*" "$C_OFF"; }
+
+fmt_size() {
+  awk -v b="${1:-0}" 'BEGIN{
+    split("B KB MB GB TB", a, " "); i = 1
+    while (b >= 1024 && i < 5) { b /= 1024; i++ }
+    if (i == 1) printf "%d %s\n", b, a[i]; else printf "%.1f %s\n", b, a[i]
+  }'
+}
+
+file_size() { fmt_size "$(stat -c %s "$1" 2>/dev/null || echo 0)"; }
+
 # ── 提示里怎么称呼这个入口 ────────────────────────────────────────────
 # 在仓库根目录下写相对路径（好复制），在别处写绝对路径（照样能跑）。
 # 一律带 sudo —— 两个脚本都要求 root，提示里给一条不带 sudo 的命令没有意义。

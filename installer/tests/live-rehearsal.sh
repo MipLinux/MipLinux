@@ -27,19 +27,22 @@ die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
 # 把安装日志留一份在**目标盘**上：Live 是内存盘，poweroff 之后 /tmp 里的东西
 # 就没了，而失败现场恰恰是最需要留下来的。装完的系统里能直接 `cat /root/…`。
 keep_log() {
-  local disk="$1" log="$2" root_part
+  local disk="$1" log="$2" target="${3:-/mnt}" root_part
   [[ -f "$log" ]] || return 0
-  # 最后一个分区是 root（第一个是 ESP）
-  root_part="$(lsblk -pno NAME,TYPE "$disk" | awk '$2 == "part" { p = $1 } END { print p }')"
+  # 最后一个分区是 root（第一个是 ESP）。
+  # **必须带 `-l`（list 模式）**：`lsblk` 的树线（`└─`）在管道里也会输出，
+  # 不带 -l 取到的就是 `└─/dev/vda2` 这种路径，`mount` 会失败 —— 实测踩过。
+  root_part="$(lsblk -lpno NAME,TYPE "$disk" | awk '$2 == "part" { p = $1 } END { print p }')"
   [[ -n "$root_part" ]] || return 0
-  umount -R /mnt 2>/dev/null || true
-  mkdir -p /mnt || return 0
-  mount "$root_part" /mnt 2>/dev/null || return 0
-  mkdir -p /mnt/root && cp "$log" /mnt/root/ 2>/dev/null || true
+  umount -R "$target" 2>/dev/null || true
+  mkdir -p "$target" || return 0
+  mount "$root_part" "$target" 2>/dev/null || return 0
+  mkdir -p "$target/root" && cp "$log" "$target/root/" 2>/dev/null || true
   sync
-  umount /mnt 2>/dev/null || true
+  umount "$target" 2>/dev/null || true
 }
 
+main() {
 [[ $EUID -eq 0 ]] || die "这个脚本在 Live 里以 root 跑（Live 里本来就是 root）"
 [[ -n "$DISK" ]] || die "用法： live-rehearsal.sh /dev/vda"
 [[ -d "${SRC}/installer/backend/mipl_installer" ]] || die "${SRC} 下没有 installer/ —— 源码 ISO 挂了没？（见脚本头部注释）"
@@ -108,3 +111,13 @@ lsblk -f "$DISK"
 printf '\n日志：%s（也留了一份在装后系统的 /root/ 下）\n' "$LOG"
 printf '下一步在 Live 里执行： poweroff\n'
 printf '然后在宿主机上： sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c\n'
+}
+
+# 直接执行时跑主流程；被 `source` 进来（单测要单独调 keep_log）时只定义函数。
+#
+# 判据用环境变量而不是 BASH_SOURCE：Live 的 root shell 是 **zsh**，
+# 那里没有 BASH_SOURCE，而本脚本带 `set -u` —— 实测 sourcing 时报
+# `BASH_SOURCE[0]: parameter not set`。$0 也不行：zsh 在 source 时会把 $0 设成被 source 的文件。
+if [[ -z "${MIPL_REHEARSAL_SOURCED:-}" ]]; then
+  main "$@"
+fi

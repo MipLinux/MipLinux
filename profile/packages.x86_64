@@ -154,6 +154,12 @@ man-pages-zh_cn
 networkmanager
 # <== 网络 · NetworkManager <==
 
+# ==> NVIDIA 驱动 · Turing 及更新 ==>
+# 随 D6 的共用清单同时进 Live 与装后系统；覆盖范围与机制见 04-架构决策 第 1.6 / 1.7 节
+nvidia-open
+nvidia-utils
+# <== NVIDIA 驱动 · Turing 及更新 <==
+
 # ==> 安装器 · M0 ==>
 cage
 qt6-wayland

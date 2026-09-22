@@ -42,14 +42,14 @@ keep_log() {
 
 [[ $EUID -eq 0 ]] || die "这个脚本在 Live 里以 root 跑（Live 里本来就是 root）"
 [[ -n "$DISK" ]] || die "用法： live-rehearsal.sh /dev/vda"
-[[ -d "${SRC}/installer/mipl_installer" ]] || die "${SRC} 下没有 installer/ —— 源码 ISO 挂了没？（见脚本头部注释）"
+[[ -d "${SRC}/installer/backend/mipl_installer" ]] || die "${SRC} 下没有 installer/ —— 源码 ISO 挂了没？（见脚本头部注释）"
 [[ -b "$DISK" ]] || die "${DISK} 不是块设备"
 
 printf '== 目标盘 / target disk ==\n'
 lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS
 printf '\n== 核对 / check ==\n'
 printf '  待擦的盘（will be wiped）: %s\n' "$DISK"
-printf '  源码（source）: %s/installer\n' "$SRC"
+printf '  源码（source）: %s/installer/backend\n' "$SRC"
 printf '  按 Ctrl-C 中止；继续请**输入设备路径**（Ctrl-C aborts, type the path to continue）: '
 read -r typed
 [[ "$typed" == "$DISK" ]] || die "输入不匹配（收到 ${typed}），什么都没做"
@@ -91,7 +91,7 @@ else
 fi
 
 rc=0
-printf '%s\n' "$pw_input" | PYTHONPATH="${SRC}/installer" python3 -m mipl_installer \
+printf '%s\n' "$pw_input" | PYTHONPATH="${SRC}/installer/backend" python3 -m mipl_installer \
   --disk "$DISK" --yes --password-stdin "${root_args[@]}" --log "$LOG" "${@:2}" || rc=$?
 
 keep_log "$DISK" "$LOG"

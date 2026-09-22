@@ -32,7 +32,7 @@ class TestParsePackageList(unittest.TestCase):
 class TestReadPackageList(unittest.TestCase):
     def test_default_file_is_the_m1_list(self):
         path = packages.default_packages_file()
-        self.assertTrue(path.endswith("installer/target-packages.x86_64"), path)
+        self.assertTrue(path.endswith("mipl_installer/data/target-packages.x86_64"), path)
         listed = packages.read_package_list(path)
         # 检查点 4 要能启动、检查点 6 要能升级：内核与网络是最低要求
         for needed in ("base", "linux", "networkmanager", "sudo"):

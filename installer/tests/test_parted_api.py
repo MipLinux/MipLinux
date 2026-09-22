@@ -15,7 +15,7 @@ import re
 import unittest
 from pathlib import Path
 
-SOURCE = Path(__file__).resolve().parents[1] / "mipl_installer" / "disk.py"
+SOURCE = Path(__file__).resolve().parents[1] / "backend" / "mipl_installer" / "disk.py"
 
 #: 我们依赖的 pyparted 名字（全部照上游源码核对过）。
 #: 依据：pyparted master 的 `src/parted/{__init__,device,disk,partition,filesystem,geometry,constraint}.py`，

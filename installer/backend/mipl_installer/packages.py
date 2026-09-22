@@ -21,7 +21,7 @@ keyring。前者在 Live 里恰好是对的、在别的机器上就是静默引�
 
 包清单唯一来源（D6 / installer/AGENTS.md）：这里不写死任何包名，只读文件；
 `profile/packages.x86_64` 是 **Live** 的清单，不许拿它当装后系统的清单（P10 未定，
-M1 先读本目录下的 `target-packages.x86_64`）。
+M1 先读包内 `data/target-packages.x86_64`）。
 """
 
 from __future__ import annotations
@@ -37,15 +37,17 @@ from .util import (
 )
 
 #: M1 的临时目标清单。P10 定案后改指向唯一来源，这个文件届时删掉。
+#: 放在**包内**的 data/ 里：它跟着包走 —— 线 E 把 installer/ 拷进 airootfs 时不会漏掉它。
 PACKAGES_FILE_NAME = "target-packages.x86_64"
+PACKAGES_FILE_DIR = "data"
 
 #: Live 的清单：不是装后系统的清单，拿它来装会得到「Live 能跑、装完一堆用不上的东西」。
 LIVE_PACKAGES_FILE = "packages.x86_64"
 
 
 def default_packages_file() -> str:
-    """`installer/target-packages.x86_64`（相对本包定位，不依赖 cwd）。"""
-    return str(Path(__file__).resolve().parents[1] / PACKAGES_FILE_NAME)
+    """`mipl_installer/data/target-packages.x86_64`（相对本包定位，不依赖 cwd）。"""
+    return str(Path(__file__).resolve().parent / PACKAGES_FILE_DIR / PACKAGES_FILE_NAME)
 
 
 def parse_package_list(text: str) -> list[str]:
@@ -75,7 +77,7 @@ def read_package_list(path: str) -> list[str]:
         raise InstallerError(
             f"这是 Live 的包清单，不是装后系统的：{path}",
             EXIT_USAGE,
-            hint="两份清单的关系见 P10（docs/knowledge/06-待定事项.md）；M1 用 installer/target-packages.x86_64",
+            hint="两份清单的关系见 P10（docs/knowledge/06-待定事项.md）；M1 用 mipl_installer/data/target-packages.x86_64",
         )
 
     packages = parse_package_list(resolved.read_text(encoding="utf-8"))

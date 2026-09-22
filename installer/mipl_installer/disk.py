@@ -194,15 +194,35 @@ def _list_partitions(runner: Runner, device: str) -> list[str]:
     return [f[0] for line in tree.splitlines() if len(f := line.split()) >= 2 and f[1] == "part"]
 
 
+def settle_udev(runner: Runner) -> None:
+    """把 udev 追平到「这些块设备已经处理过」的状态。
+
+    **动任何设备节点之前都要先做这一下。** 实测（Live 里第一次真跑）：分区表在、
+    `/dev/vda1` 在、`/proc/partitions` 也认，但 `wipefs -a /dev/vda1` 报
+    `probing initialization failed: No such file or directory` —— 那是 libblkid 在
+    udev 还没处理完这块设备时的表现（同样的 wipefs，在同一对 udevadm 命令之后立刻成功）。
+    报错信息完全指不到 udev，所以这条得写进注释里，不然下次还会栽。
+    """
+    runner.run(["udevadm", "trigger", "--subsystem-match=block"], check=False)
+    runner.run(["udevadm", "settle"], check=False)
+
+
 def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str, str]:
     """擦盘、建 GPT、建两个分区，返回 (ESP, root) 的设备路径。
 
     幂等：先擦掉盘上原有的分区表与残留文件系统，再重建 —— 同一块盘重复跑，
     结果一致（ROADMAP 的 S1 就是要验这一条）。
     """
-    # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）
+    settle_udev(runner)
+
+    # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）。
+    # 只擦**设备节点真的在**的那些：sysfs 里有名字不等于 /dev 里有节点，
+    # 对不存在的节点 wipefs 只会得到一句看不懂的报错，然后整轮白跑。
     for old in _list_partitions(runner, device):
-        runner.run(["wipefs", "-a", old], exit_code=EXIT_GUARD)
+        if runner.dry_run or os.path.exists(old):
+            runner.run(["wipefs", "-a", old], exit_code=EXIT_GUARD)
+        else:
+            runner.reporter.note(f"{old} 还没有设备节点，跳过预擦（整盘 wipefs 会清掉分区表）")
     runner.run(["wipefs", "-a", device], exit_code=EXIT_GUARD)
 
     if runner.dry_run:
@@ -213,13 +233,9 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
 
     _parted_create(device, layout)
 
-    # 让内核与 udev 都跟上新分区表。**顺序要紧，踩过**：
-    # `lsblk` 是从 sysfs 读的，分区表一提交它就有名字；而 `/dev/vda1` 这个设备节点
-    # 要等 udev 处理完 uevent 才出现。Live 里第一次真跑就死在这中间：
-    # mkfs 报 `unable to open /dev/vda1: No such file or directory`。
+    # 分区表提交后同样要让内核与 udev 跟上，再等节点真的出现（理由见 wait_for_partition_nodes）
     runner.run(["partprobe", device], check=False)
-    runner.run(["udevadm", "trigger", "--subsystem-match=block"], check=False)
-    runner.run(["udevadm", "settle"], check=False)
+    settle_udev(runner)
     return wait_for_partition_nodes(runner, device)
 
 

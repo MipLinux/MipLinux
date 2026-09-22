@@ -27,7 +27,12 @@ def _index(commands: list[str], needle: str) -> int:
 
 
 class TestWipeOrder(unittest.TestCase):
-    """这条顺序是那次竞态的直接修复，别改回去。"""
+    """命令顺序是两次实测失败的直接修复，别改回去：
+
+    1. **先追平 udev**，再碰任何设备节点 —— 否则 `wipefs` 会报
+       `probing initialization failed: No such file or directory`（libblkid 探不到设备）。
+    2. 分区表提交后 `partprobe` → 再 settle → 再等节点出现。
+    """
 
     def setUp(self):
         self.runner = FakeRunner(outputs={"lsblk": "/dev/vda1 part\n/dev/vda2 part\n"})
@@ -39,21 +44,42 @@ class TestWipeOrder(unittest.TestCase):
         patch2.start()
         self.addCleanup(patch2.stop)
 
-    def test_partprobe_then_trigger_then_settle(self):
-        with self.assertRaises(InstallerError):
-            disk.wipe_and_partition(self.runner, "/dev/vda", LAYOUT)
-        commands = self.runner.commands()
-        self.assertLess(_index(commands, "partprobe"), _index(commands, "udevadm trigger"))
-        self.assertLess(_index(commands, "udevadm trigger"), _index(commands, "udevadm settle"))
+    def _run(self, *, nodes_exist: bool) -> list[str]:
+        """跑一遍并返回命令序列。`nodes_exist=False` 时会在「等节点」那步超时。"""
+        with mock.patch("mipl_installer.disk.os.path.exists", return_value=nodes_exist):
+            try:
+                disk.wipe_and_partition(self.runner, "/dev/vda", LAYOUT)
+            except InstallerError:
+                pass
+        return self.runner.commands()
 
-    def test_wipefs_runs_on_device_and_old_partitions(self):
-        self.runner.outputs["lsblk"] = "/dev/vda1 part\n/dev/vda disk\n/dev/vda2 part\n"
-        with self.assertRaises(InstallerError):
-            disk.wipe_and_partition(self.runner, "/dev/vda", LAYOUT)
-        commands = self.runner.commands()
+    def test_udev_is_settled_before_touching_any_node(self):
+        commands = self._run(nodes_exist=True)
+        trigger = _index(commands, "udevadm trigger")
+        settle = _index(commands, "udevadm settle")
+        first_wipe = _index(commands, "wipefs")
+        self.assertLess(trigger, settle)
+        self.assertLess(settle, first_wipe)
+
+    def test_partprobe_then_settle_after_partitioning(self):
+        commands = self._run(nodes_exist=True)
+        partprobe = _index(commands, "partprobe")
+        settle = commands.index("udevadm settle", partprobe)
+        self.assertLess(partprobe, settle)
+
+    def test_wipes_the_device_itself(self):
+        self.assertIn("wipefs -a /dev/vda", self._run(nodes_exist=True))
+
+    def test_skips_partitions_without_device_nodes(self):
+        """sysfs 里有名字、/dev 里没节点时，别对着不存在的路径 wipefs（那是整轮白跑）。"""
+        commands = self._run(nodes_exist=False)
+        self.assertNotIn("wipefs -a /dev/vda1", commands)
+        self.assertIn("wipefs -a /dev/vda", commands)
+
+    def test_wipes_partitions_when_their_nodes_exist(self):
+        commands = self._run(nodes_exist=True)
         self.assertIn("wipefs -a /dev/vda1", commands)
         self.assertIn("wipefs -a /dev/vda2", commands)
-        self.assertIn("wipefs -a /dev/vda", commands)
 
 
 class TestWaitForPartitionNodes(unittest.TestCase):

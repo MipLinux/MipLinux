@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from mipl_installer import disk
@@ -31,9 +33,22 @@ class TestPlanLayout(unittest.TestCase):
         self.assertLessEqual(layout.root_start + layout.root_size, 40 * GiB + 12345)
 
     def test_smallest_accepted(self):
-        total = disk.ALIGN + disk.ESP_SIZE + disk.MIN_ROOT_SIZE
+        total = disk.ALIGN + disk.ESP_SIZE + disk.MIN_ROOT_SIZE + disk.GPT_TAIL_RESERVE
         layout = disk.plan_layout(total)
         self.assertGreaterEqual(layout.root_size, disk.MIN_ROOT_SIZE)
+
+    def test_root_leaves_room_for_the_backup_gpt(self):
+        """**回归测试**：root 不许压到盘尾的 GPT 备份表头。
+
+        压上去的后果实测过：内核要么裁短、要么干脆不收下那个分区 ——
+        `/proc/partitions` 里少一个、`/dev` 里没有节点，而 `lsblk` 照样把盘上的表
+        列出来（它自己去读设备），于是报错完全指不到布局。
+        """
+        for total in (40 * GiB, 6 * GiB, 128 * GiB + 7):
+            with self.subTest(total=total):
+                layout = disk.plan_layout(total)
+                tail = total - (layout.root_start + layout.root_size)
+                self.assertGreaterEqual(tail, disk.GPT_TAIL_RESERVE)
 
     def test_too_small_is_refused(self):
         with self.assertRaises(InstallerError) as ctx:
@@ -129,24 +144,52 @@ class TestAssertUsable(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
 
 
-class TestPartitionPaths(unittest.TestCase):
-    VIRTIO = "/dev/vda disk\n/dev/vda1 part\n/dev/vda2 part\n"
-    NVME = "/dev/nvme0n1 disk\n/dev/nvme0n1p1 part\n/dev/nvme0n1p2 part\n"
-    LOOP = "/dev/loop0 disk\n/dev/loop0p1 part\n/dev/loop0p2 part\n"
+class TestKernelPartitions(unittest.TestCase):
+    """分区列表只能信内核（sysfs），不能信 `lsblk`。
 
-    def test_three_naming_schemes(self):
-        for tree, expected in (
-            (self.VIRTIO, ("/dev/vda1", "/dev/vda2")),
-            (self.NVME, ("/dev/nvme0n1p1", "/dev/nvme0n1p2")),
-            (self.LOOP, ("/dev/loop0p1", "/dev/loop0p2")),
-        ):
-            with self.subTest(tree=tree):
-                self.assertEqual(disk.partition_paths(tree), expected)
+    实测过：`lsblk` 会把「盘上的分区表里写着、但内核没收下」的分区也列出来，
+    照着它去 mkfs 只会得到一句 `No such file or directory`。
+    """
 
-    def test_refuses_when_partitions_are_missing(self):
-        with self.assertRaises(InstallerError) as ctx:
-            disk.partition_paths("/dev/vda disk\n")
-        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+    def _fake_sysfs(self, root: str, disk_name: str, parts: list[tuple[str, str, str]]) -> None:
+        base = Path(root) / "block" / disk_name
+        base.mkdir(parents=True)
+        for name, dev, number in parts:
+            child = base / name
+            child.mkdir()
+            (child / "dev").write_text(dev + "\n", encoding="utf-8")
+            (child / "partition").write_text(number + "\n", encoding="utf-8")
+
+    def test_reads_partitions_sorted_by_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # 故意乱序写入，返回值必须按分区号排
+            self._fake_sysfs(tmp, "vda", [("vda2", "254:2", "2"), ("vda1", "254:1", "1")])
+            self.assertEqual(
+                disk.kernel_partitions("/dev/vda", sysfs_root=tmp),
+                [("/dev/vda1", 254, 1), ("/dev/vda2", 254, 2)],
+            )
+
+    def test_handles_nvme_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fake_sysfs(tmp, "nvme0n1", [("nvme0n1p1", "259:1", "1"), ("nvme0n1p2", "259:2", "2")])
+            self.assertEqual(
+                [p for p, _, _ in disk.kernel_partitions("/dev/nvme0n1", sysfs_root=tmp)],
+                ["/dev/nvme0n1p1", "/dev/nvme0n1p2"],
+            )
+
+    def test_ignores_the_disk_itself_and_junk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "block" / "vda"
+            base.mkdir(parents=True)
+            (base / "vda").mkdir()                     # 整盘自己不是分区
+            (base / "vda1").mkdir()
+            (base / "vda1" / "dev").write_text("not-a-devnum\n", encoding="utf-8")
+            (base / "vda1" / "partition").write_text("1\n", encoding="utf-8")
+            self.assertEqual(disk.kernel_partitions("/dev/vda", sysfs_root=tmp), [])
+
+    def test_missing_device_is_empty_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(disk.kernel_partitions("/dev/nope", sysfs_root=tmp), [])
 
 
 if __name__ == "__main__":

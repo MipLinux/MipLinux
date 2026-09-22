@@ -2,7 +2,7 @@
 
 这是整条链里**唯一会摧毁数据**的一段，所以它被拆成两半：
 
-* 纯函数（`plan_layout`、`partition_paths`、`mount_sources`、`assert_usable`）
+* 纯函数（`plan_layout`、`kernel_partitions`、`mount_sources`、`assert_usable`）
   负责「算布局」和「该不该动手」，单测全覆盖，不用 root、不碰盘；
 * 副作用（`wipe_and_partition`、`make_filesystems`、`mount_target`）只做
   「把算好的东西落到盘上」，命令一条条经 `Runner`。
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import util
 from .util import (
@@ -40,6 +41,11 @@ GiB = 1024 ** 3
 #: 顺带把 4Kn 盘的对齐要求一起满足了。
 ALIGN = 1 * MiB
 ESP_SIZE = 512 * MiB
+#: **盘尾要留给 GPT 的备份表头**（最后 33 个扇区，按 1 MiB 对齐留）。
+#: 不留会怎样：分区压上去之后，内核要么把它裁短、要么干脆不收下 ——
+#: 表现为 `/proc/partitions` 里少一个分区、`/dev` 里没有节点，
+#: 而 `lsblk` 照样把盘上的表列出来（它自己去读设备），于是报错完全指不到这里。
+GPT_TAIL_RESERVE = 1 * MiB
 #: root 的下限。留 5 GiB 是因为 base + linux + linux-firmware 装完约 1.5 GiB，
 #: 再算上 pacman 缓存与将来的桌面环境。
 MIN_ROOT_SIZE = 5 * GiB
@@ -63,11 +69,14 @@ class Layout:
 
 
 def plan_layout(total_bytes: int) -> Layout:
-    """按盘的大小算布局。太小就拒绝 —— 装到一半才失败比一开始就拒绝贵得多。"""
+    """按盘的大小算布局。太小就拒绝 —— 装到一半才失败比一开始就拒绝贵得多。
+
+    root 不占到最后：**盘尾 1 MiB 留给 GPT 的备份表头**（见 `GPT_TAIL_RESERVE`）。
+    """
     esp_start = ALIGN
     esp_size = ESP_SIZE
     root_start = _align_up(esp_start + esp_size, ALIGN)
-    root_size = _align_down(total_bytes - root_start, ALIGN)
+    root_size = _align_down(total_bytes - root_start - GPT_TAIL_RESERVE, ALIGN)
 
     if root_size < MIN_ROOT_SIZE:
         raise InstallerError(
@@ -162,46 +171,57 @@ def is_mountpoint(path: str) -> bool:
 
 
 # ── 落到盘上 ──────────────────────────────────────────────────────────
-def partition_paths(lsblk_tree: str) -> tuple[str, str]:
-    """从 `lsblk -p -n -o NAME,TYPE` 的输出里取出两个分区。
+def kernel_partitions(device: str, sysfs_root: str = "/sys") -> list[tuple[str, int, int]]:
+    """**内核已经收下**的分区：[(设备路径, major, minor), ...]，按分区号排序。
 
-    不拼字符串（`/dev/vda` + `1`）：virtio 是 `vda1`、nvme 是 `nvme0n1p1`、
-    loop 是 `loop0p1`，拼法有三套，让内核告诉我们更省事。
+    判据必须是 sysfs（`/sys/block/<盘>/<分区>/partition`），**不是 `lsblk` 的列表**。
+    实测：`lsblk` 会把「盘上的分区表里写着、但内核没收下」的分区也列出来
+    （它自己去读设备上的表），照着它去 mkfs 只会得到一句 ENOENT。
+
+    sysfs_root 可注入，测试里拿假的目录就能验（不需要真盘）。
     """
-    parts = []
-    for line in lsblk_tree.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[1] == "part":
-            parts.append(fields[0])
-    if len(parts) < 2:
-        raise InstallerError(
-            f"分区建完之后只看到 {len(parts)} 个分区，预期 2 个",
-            EXIT_GUARD,
-            hint="看 `lsblk -p` 的实际输出；内核没重读分区表时 `partprobe <盘>` 一下",
-        )
-    # lsblk 按设备号排序，p1 在前
-    return parts[0], parts[1]
-
-
-def _list_partitions(runner: Runner, device: str) -> list[str]:
-    """`lsblk` 列出的分区路径（不判断数量，等节点时要用）。
-
-    **注意 `lsblk` 是从 sysfs 读的**：它列出名字，不代表 `/dev` 里已经有节点。
-    """
-    tree = runner.run(["lsblk", "-p", "-n", "-o", "NAME,TYPE", device], capture=True, exit_code=EXIT_GUARD)
-    if tree is util.DRY:
+    name = os.path.basename(os.path.realpath(device))
+    base = Path(sysfs_root) / "block" / name
+    try:
+        children = sorted(base.iterdir())
+    except OSError:
         return []
-    return [f[0] for line in tree.splitlines() if len(f := line.split()) >= 2 and f[1] == "part"]
+
+    found: list[tuple[str, int, int, int]] = []
+    for child in children:
+        if not (child / "partition").is_file():
+            continue
+        try:
+            major, minor = (child / "dev").read_text(encoding="utf-8").strip().split(":")
+            number = int((child / "partition").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        # 设备路径用 sysfs 的子目录名：udev 与内核用的就是同一个名字（vda1 / nvme0n1p1）
+        found.append((f"/dev/{child.name}", int(major), int(minor), number))
+
+    found.sort(key=lambda item: item[3])
+    return [(path, major, minor) for path, major, minor, _ in found]
+
+
+def _ensure_node(runner: Runner, path: str, major: int, minor: int) -> bool:
+    """内核已经收下这个分区、`/dev` 里却没有节点时，自己补一个。
+
+    `mknod` 正是 udev 会做的事（同名、同 major:minor，不会打架）。等下去是没有尽头的：
+    实测里 5 秒、几十秒都不出现，而设备本身一直是可用的。
+    """
+    runner.run(["mknod", path, "b", str(major), str(minor)], check=False)
+    runner.run(["chown", "root:disk", path], check=False)   # 与 udev 的默认一致：brw-rw----
+    runner.run(["chmod", "660", path], check=False)
+    return os.path.exists(path)
 
 
 def settle_udev(runner: Runner) -> None:
     """把 udev 追平到「这些块设备已经处理过」的状态。
 
-    **动任何设备节点之前都要先做这一下。** 实测（Live 里第一次真跑）：分区表在、
-    `/dev/vda1` 在、`/proc/partitions` 也认，但 `wipefs -a /dev/vda1` 报
+    **动任何设备节点之前都要先做这一下。** 实测：分区表在、`/dev/vda1` 在、
+    `/proc/partitions` 也认，但 `wipefs -a /dev/vda1` 报
     `probing initialization failed: No such file or directory` —— 那是 libblkid 在
-    udev 还没处理完这块设备时的表现（同样的 wipefs，在同一对 udevadm 命令之后立刻成功）。
-    报错信息完全指不到 udev，所以这条得写进注释里，不然下次还会栽。
+    udev 还没处理完这块设备时的表现（同一对 udevadm 命令之后，同样的 wipefs 立刻成功）。
     """
     runner.run(["udevadm", "trigger", "--subsystem-match=block"], check=False)
     runner.run(["udevadm", "settle"], check=False)
@@ -216,9 +236,8 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
     settle_udev(runner)
 
     # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）。
-    # 只擦**设备节点真的在**的那些：sysfs 里有名字不等于 /dev 里有节点，
-    # 对不存在的节点 wipefs 只会得到一句看不懂的报错，然后整轮白跑。
-    for old in _list_partitions(runner, device):
+    # 只擦**内核收下、节点也在**的那些：盘上的表里有名字不代表设备存在。
+    for old, _, _ in kernel_partitions(device):
         if runner.dry_run or os.path.exists(old):
             runner.run(["wipefs", "-a", old], exit_code=EXIT_GUARD)
         else:
@@ -233,7 +252,7 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
 
     _parted_create(device, layout)
 
-    # 分区表提交后同样要让内核与 udev 跟上，再等节点真的出现（理由见 wait_for_partition_nodes）
+    # 分区表提交后让内核与 udev 跟上，再等节点出现（理由见 wait_for_partition_nodes）
     runner.run(["partprobe", device], check=False)
     settle_udev(runner)
     return wait_for_partition_nodes(runner, device)
@@ -245,23 +264,35 @@ WAIT_INTERVAL = "0.2"
 
 
 def wait_for_partition_nodes(runner: Runner, device: str) -> tuple[str, str]:
-    """等到两个分区的**设备节点**真的在 `/dev` 里出现。
+    """等两个分区**在内核里出现**，并且在 `/dev` 里有节点。
 
-    判据是 `os.path.exists`，不是「lsblk 有没有列出来」—— 这条区别就是上面那个 bug。
+    两次实测的教训都在这里：
+    * 判据是 sysfs 与 `os.path.exists`，**不是 `lsblk`** —— 它会把内核没收下的分区也列出来；
+    * 内核收下了、`/dev` 里没有节点，就自己 `mknod` 补（等 udev 是等不到的）。
     """
     seen: list[str] = []
     for attempt in range(WAIT_ATTEMPTS):
-        seen = _list_partitions(runner, device)
-        if len(seen) >= 2 and all(os.path.exists(p) for p in seen[:2]):
-            return seen[0], seen[1]
+        parts = kernel_partitions(device)
+        seen = [path for path, _, _ in parts]
+
+        if len(parts) >= 2:
+            for path, major, minor in parts[:2]:
+                if not os.path.exists(path):
+                    _ensure_node(runner, path, major, minor)
+            if all(os.path.exists(path) for path, _, _ in parts[:2]):
+                return parts[0][0], parts[1][0]
+
         if attempt + 1 < WAIT_ATTEMPTS:
             runner.run(["sleep", WAIT_INTERVAL], check=False)
 
     raise InstallerError(
-        f"分区表建好了，但设备节点一直没出现（等了 {int(float(WAIT_INTERVAL) * WAIT_ATTEMPTS)} 秒）："
-        f"{'、'.join(seen) if seen else '一个分区都没看到'}",
+        f"内核只收下了 {len(seen)} 个分区（预期 2 个）：{'、'.join(seen) if seen else '一个都没有'}",
         EXIT_GUARD,
-        hint="udev 没在跑就会这样：先看 `systemctl status systemd-udevd`，再看 `ls -l /dev/vda*`",
+        hint=(
+            "分区表没被内核接受。最常见的原因是分区压到了 GPT 备份表头（盘尾 33 个扇区），"
+            "布局里已经留了 1 MiB；仍出现就看 `dmesg | tail` 里 GPT 那几行，"
+            "并确认分区范围与 `lsblk` 报的不一样"
+        ),
     )
 
 

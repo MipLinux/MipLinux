@@ -17,6 +17,8 @@ from mipl_installer.util import EXIT_CONFIGURE, EXIT_GUARD, InstallerError
 from tests.support import FakeRunner
 
 LAYOUT = disk.plan_layout(40 * disk.GiB)
+#: 内核收下的两个分区（测试里不去读真的 sysfs）
+FAKE_PARTS = [("/dev/vda1", 254, 1), ("/dev/vda2", 254, 2)]
 
 
 def _index(commands: list[str], needle: str) -> int:
@@ -35,7 +37,7 @@ class TestWipeOrder(unittest.TestCase):
     """
 
     def setUp(self):
-        self.runner = FakeRunner(outputs={"lsblk": "/dev/vda1 part\n/dev/vda2 part\n"})
+        self.runner = FakeRunner()
         # 让「等节点」这一步马上失败，好观察命令顺序
         patch = mock.patch.object(disk, "WAIT_ATTEMPTS", 1)
         patch.start()
@@ -46,7 +48,8 @@ class TestWipeOrder(unittest.TestCase):
 
     def _run(self, *, nodes_exist: bool) -> list[str]:
         """跑一遍并返回命令序列。`nodes_exist=False` 时会在「等节点」那步超时。"""
-        with mock.patch("mipl_installer.disk.os.path.exists", return_value=nodes_exist):
+        with mock.patch("mipl_installer.disk.kernel_partitions", return_value=FAKE_PARTS), \
+             mock.patch("mipl_installer.disk.os.path.exists", return_value=nodes_exist):
             try:
                 disk.wipe_and_partition(self.runner, "/dev/vda", LAYOUT)
             except InstallerError:
@@ -83,30 +86,56 @@ class TestWipeOrder(unittest.TestCase):
 
 
 class TestWaitForPartitionNodes(unittest.TestCase):
-    def test_returns_when_both_nodes_exist(self):
-        runner = FakeRunner(outputs={"lsblk": "/dev/vda1 part\n/dev/vda2 part\n"})
-        with mock.patch("mipl_installer.disk.os.path.exists", return_value=True):
+    def test_returns_when_the_kernel_has_both_and_nodes_exist(self):
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.disk.kernel_partitions", return_value=FAKE_PARTS), \
+             mock.patch("mipl_installer.disk.os.path.exists", return_value=True):
             self.assertEqual(disk.wait_for_partition_nodes(runner, "/dev/vda"), ("/dev/vda1", "/dev/vda2"))
 
-    def test_keeps_waiting_while_nodes_are_missing(self):
-        """sysfs 里有名字、/dev 里没节点 —— 就是那次失败的样子。"""
-        runner = FakeRunner(outputs={"lsblk": "/dev/vda1 part\n/dev/vda2 part\n"})
-        with mock.patch.object(disk, "WAIT_ATTEMPTS", 3), \
-             mock.patch("mipl_installer.disk.os.path.exists", return_value=False), \
-             self.assertRaises(InstallerError) as ctx:
-            disk.wait_for_partition_nodes(runner, "/dev/vda")
-        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
-        self.assertIn("设备节点", str(ctx.exception))
-        self.assertEqual(len([c for c in runner.commands() if c.startswith("sleep")]), 2)  # 最后一次不再睡
+    def test_creates_the_node_when_the_kernel_has_it_but_dev_does_not(self):
+        """内核收下了、`/dev` 里没有 —— 自己 `mknod` 补，别等下去。"""
+        runner = FakeRunner()
+        probes = {"n": 0}
 
-    def test_reports_how_long_it_waited(self):
-        runner = FakeRunner(outputs={"lsblk": "/dev/vda1 part\n/dev/vda2 part\n"})
-        with mock.patch.object(disk, "WAIT_ATTEMPTS", 2), \
-             mock.patch.object(disk, "WAIT_INTERVAL", "0.5"), \
-             mock.patch("mipl_installer.disk.os.path.exists", return_value=False), \
+        def exists(path):
+            # 第一轮的两下探测说「不在」，补完节点之后就都在了
+            probes["n"] += 1
+            return probes["n"] > 2
+
+        with mock.patch("mipl_installer.disk.kernel_partitions", return_value=FAKE_PARTS), \
+             mock.patch("mipl_installer.disk.os.path.exists", side_effect=exists), \
+             mock.patch.object(disk, "WAIT_ATTEMPTS", 3):
+            self.assertEqual(disk.wait_for_partition_nodes(runner, "/dev/vda"), ("/dev/vda1", "/dev/vda2"))
+        commands = runner.commands()
+        self.assertIn("mknod /dev/vda1 b 254 1", commands)
+        self.assertIn("chown root:disk /dev/vda1", commands)
+
+    def test_reports_the_kernels_view_when_the_last_partition_is_missing(self):
+        """**回归测试**：root 压到 GPT 备份表头时，内核只收下第一个分区。
+
+        这时报错必须说「内核只收下了 1 个」—— 而不是含糊的「等了 N 秒」，
+        更不能让人以为是 udev 的问题。
+        """
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.disk.kernel_partitions",
+                        return_value=[("/dev/vda1", 254, 1)]), \
+             mock.patch("mipl_installer.disk.os.path.exists", return_value=True), \
+             mock.patch.object(disk, "WAIT_ATTEMPTS", 2), \
              self.assertRaises(InstallerError) as ctx:
             disk.wait_for_partition_nodes(runner, "/dev/vda")
-        self.assertIn("1 秒", str(ctx.exception))
+        message = ctx.exception.render()          # render() 里带 hint
+        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+        self.assertIn("只收下了 1 个分区", message)
+        self.assertIn("GPT 备份表头", message)
+
+    def test_keeps_quiet_when_there_is_nothing_to_wait_for(self):
+        """一次次 sleep 是有的，但次数要跟着 WAIT_ATTEMPTS 走（最后一次不睡）。"""
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.disk.kernel_partitions", return_value=[]), \
+             mock.patch.object(disk, "WAIT_ATTEMPTS", 3):
+            with self.assertRaises(InstallerError):
+                disk.wait_for_partition_nodes(runner, "/dev/vda")
+        self.assertEqual(len([c for c in runner.commands() if c.startswith("sleep")]), 2)
 
 
 class TestUuidGuard(unittest.TestCase):

@@ -151,8 +151,10 @@ TOOL_PACKAGES = {
     "parted": "parted",
     "partprobe": "parted",
     "wipefs": "util-linux",
+    "mknod": "coreutils",
+    "chown": "coreutils",
+    "chmod": "coreutils",
     "blkid": "util-linux",
-    "lsblk": "util-linux",
     "mount": "util-linux",
     "umount": "util-linux",
     "udevadm": "systemd",
@@ -168,7 +170,8 @@ TOOL_PACKAGES = {
 
 #: 每个阶段需要哪些工具（开跑前一次性检查，别跑到一半才炸）
 STEP_TOOLS = {
-    "disk": ["parted", "partprobe", "wipefs", "lsblk", "udevadm", "mkfs.vfat", "mkfs.ext4", "mount", "umount", "blkid"],
+    "disk": ["parted", "partprobe", "wipefs", "udevadm", "mkfs.vfat", "mkfs.ext4",
+             "mount", "umount", "blkid", "mknod", "chown", "chmod"],
     "packages": ["pacstrap", "pacman-key", "pacman"],
     "configure": ["arch-chroot"],
     "boot": ["bootctl", "efibootmgr"],

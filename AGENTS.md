@@ -19,6 +19,7 @@ scripts/     项目操作台：mipl.sh 及其调用的构建脚本
 docs/
   knowledge/ 已确定的结论，给新手读
   work/      待执行与正在执行的工作：ROADMAP、当日记录、tech/
+  archive/   已归档的问题记录：症状、根因、修法、排错方法
 out/         构建产物与测试资产（已 gitignore，不提交）
 .github/     CODEOWNERS、Issue 模板、workflow
 ```
@@ -66,7 +67,7 @@ out/         构建产物与测试资产（已 gitignore，不提交）
 - **没有实测证据，不得声称「已验证」。** 本仓库口径：「✅」= 本机实测过。写 `未实测` / `仅静态检查` / `仅 dry-run` / `验到检查点 N/6`。
   `-n`（dry-run）不算实测；构建成功不算引导成功；安装器提示成功不算装完 —— 「安装器直到它装出来的系统能启动之前，都不算被测过」，真正的缺陷全部出现在重启之后。
 
-- **文档分层**：结论进 `docs/knowledge/`、进行中的工作进 `docs/work/`、没定的进 06 的 P 表。判定细则见 [docs/AGENTS.md](docs/AGENTS.md)。
+- **文档分层**：结论进 `docs/knowledge/`、进行中的工作进 `docs/work/`、没定的进 06 的 P 表、已经解决完的问题记录进 `docs/archive/`。判定细则见 [docs/AGENTS.md](docs/AGENTS.md)。
   **不擅自新增或修改 D 编号** —— D 编号是决策史，`06` 末尾的排除表是「已否决」档案，不重复讨论、不移出。
 
 - **出界就提 issue，不夹带在 PR 里。** 构建失败 / 行为不对 → [Bug 模板](.github/ISSUE_TEMPLATE/bug-report.yml)（`[Bug] ` / `bug`）；

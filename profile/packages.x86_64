@@ -153,3 +153,8 @@ man-pages-zh_cn
 # ==> 网络 · NetworkManager ==>
 networkmanager
 # <== 网络 · NetworkManager <==
+
+# ==> NVIDIA 驱动 · Turing 及更新 ==>
+nvidia-open
+nvidia-utils
+# <== NVIDIA 驱动 · Turing 及更新 <==

@@ -12,7 +12,7 @@
 
 ## 当前进度
 
-> 截至 **2026-09-21**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
+> 截至 **2026-09-22**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
 
 | 阶段 | 状态 |
 |---|---|
@@ -20,7 +20,7 @@
 | 自有 profile | ✅ `profile/` 进仓库并改名 MipLinux，产物 `miplinux-<日期>-x86_64.iso`（1.5 GiB，构建 2 分 08 秒） |
 | 装系统链路 | ✅ `mipl target` + `mipl qemu --disk … --boot c`：装完能从盘重启（[05-测试方法](docs/knowledge/05-测试方法.md) 检查点 4） |
 | 国内源与中文本地化 | 🚧 已并入主线：国内源、`zh_CN.UTF-8`、CJK fallback 规则、终端字体；**字体与输入法的包已进 `packages.x86_64`**（09-19），还没在含这些包的清单上验到装后系统 |
-| NVIDIA 驱动 | 未开始（`packages.x86_64` 里还没有 `nvidia-open`）。**D11 之后驱动由安装器装进装后系统**，验证点随之移到「装完重启」之后 |
+| NVIDIA 驱动 | 🚧 Live 清单已加 `nvidia-open` / `nvidia-utils`。**真机第一次验证 ✅**（09-22，独显模式下 RTX 5060 Max-Q）：驱动加载、`nvidia-smi` 正常、内屏正常点亮、`nmcli` 联网通畅（原始输出未留存，见 [tech/05](docs/work/tech/05-装后系统验证.md) §2.5）；**第二次（装完重启后能用）未做**，那半段由安装器的装包阶段带（M3）。桌面试跑（niri / Hyprland）因 Live 可写层只有 256 MiB 未进行（§2.6） |
 | 安装程序 | 未开始。**P6 已定案**（D14）：Python + PySide6/Qt6 + `cage` kiosk + `python-pyparted`；里程碑见 [installer-roadmap.md](docs/work/installer-roadmap.md) |
 | 桌面环境 / 品牌化 | 未开始。**P5 已定 WM 路线**（不做 DE），niri / Hyprland 待定 |
 

@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from . import util
 from .util import (
+    EXIT_CONFIGURE,
     EXIT_GUARD,
     EXIT_USAGE,
     InstallerError,
@@ -182,11 +183,15 @@ def partition_paths(lsblk_tree: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _read_partitions(runner: Runner, device: str) -> list[str]:
+def _list_partitions(runner: Runner, device: str) -> list[str]:
+    """`lsblk` 列出的分区路径（不判断数量，等节点时要用）。
+
+    **注意 `lsblk` 是从 sysfs 读的**：它列出名字，不代表 `/dev` 里已经有节点。
+    """
     tree = runner.run(["lsblk", "-p", "-n", "-o", "NAME,TYPE", device], capture=True, exit_code=EXIT_GUARD)
     if tree is util.DRY:
         return []
-    return [line.split()[0] for line in tree.splitlines() if len(line.split()) >= 2 and line.split()[1] == "part"]
+    return [f[0] for line in tree.splitlines() if len(f := line.split()) >= 2 and f[1] == "part"]
 
 
 def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str, str]:
@@ -196,7 +201,7 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
     结果一致（ROADMAP 的 S1 就是要验这一条）。
     """
     # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）
-    for old in _read_partitions(runner, device):
+    for old in _list_partitions(runner, device):
         runner.run(["wipefs", "-a", old], exit_code=EXIT_GUARD)
     runner.run(["wipefs", "-a", device], exit_code=EXIT_GUARD)
 
@@ -204,21 +209,44 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
         # dry-run 不碰盘，也就没必要真的去建分区表（顺带让没装 pyparted 的机器
         # 也能跑 dry-run —— 那正是「先看命令再动手」的用途）
         runner.reporter.note("dry-run：跳过 pyparted 建分区表与重读分区")
-    else:
-        _parted_create(device, layout)
+        return f"{device}1", f"{device}2"
 
-    # 让内核与新分区互相看见：udev 事件落定 + 显式重读分区表（后者在 QEMU 里
-    # 有时比 udev 更可靠）
-    runner.run(["udevadm", "settle"], check=False)
+    _parted_create(device, layout)
+
+    # 让内核与 udev 都跟上新分区表。**顺序要紧，踩过**：
+    # `lsblk` 是从 sysfs 读的，分区表一提交它就有名字；而 `/dev/vda1` 这个设备节点
+    # 要等 udev 处理完 uevent 才出现。Live 里第一次真跑就死在这中间：
+    # mkfs 报 `unable to open /dev/vda1: No such file or directory`。
     runner.run(["partprobe", device], check=False)
+    runner.run(["udevadm", "trigger", "--subsystem-match=block"], check=False)
+    runner.run(["udevadm", "settle"], check=False)
+    return wait_for_partition_nodes(runner, device)
 
-    if runner.dry_run:
-        esp, root = f"{device}1", f"{device}2"
-    else:
-        esp, root = partition_paths(
-            runner.run(["lsblk", "-p", "-n", "-o", "NAME,TYPE", device], capture=True, exit_code=EXIT_GUARD)
-        )
-    return esp, root
+
+#: 等设备节点：25 × 0.2s = 5 秒。慢磁盘上写分区表可能要一两秒才出节点。
+WAIT_ATTEMPTS = 25
+WAIT_INTERVAL = "0.2"
+
+
+def wait_for_partition_nodes(runner: Runner, device: str) -> tuple[str, str]:
+    """等到两个分区的**设备节点**真的在 `/dev` 里出现。
+
+    判据是 `os.path.exists`，不是「lsblk 有没有列出来」—— 这条区别就是上面那个 bug。
+    """
+    seen: list[str] = []
+    for attempt in range(WAIT_ATTEMPTS):
+        seen = _list_partitions(runner, device)
+        if len(seen) >= 2 and all(os.path.exists(p) for p in seen[:2]):
+            return seen[0], seen[1]
+        if attempt + 1 < WAIT_ATTEMPTS:
+            runner.run(["sleep", WAIT_INTERVAL], check=False)
+
+    raise InstallerError(
+        f"分区表建好了，但设备节点一直没出现（等了 {int(float(WAIT_INTERVAL) * WAIT_ATTEMPTS)} 秒）："
+        f"{'、'.join(seen) if seen else '一个分区都没看到'}",
+        EXIT_GUARD,
+        hint="udev 没在跑就会这样：先看 `systemctl status systemd-udevd`，再看 `ls -l /dev/vda*`",
+    )
 
 
 def _esp_flag(parted):
@@ -316,4 +344,20 @@ def unmount_target(runner: Runner, target: str = "/mnt") -> None:
 
 
 def uuid_of(runner: Runner, device: str) -> str:
-    return runner.run(["blkid", "-s", "UUID", "-o", "value", device], capture=True, exit_code=EXIT_GUARD) or util.DRY
+    """读分区的 UUID。
+
+    **读不到就报错，不返回空串。** 空串会被 fstab 与引导项写成 `UUID=`，
+    而那种系统重启之后是起不来的 —— 与其让它悄悄装出一个不能启动的系统，
+    不如在这里停下（这正是「安装器直到装出来的系统能启动才算被测过」的反面）。
+    """
+    value = runner.run(["blkid", "-s", "UUID", "-o", "value", device], capture=True, exit_code=EXIT_GUARD)
+    if value is util.DRY:
+        return util.DRY
+    value = (value or "").strip()
+    if not value:
+        raise InstallerError(
+            f"读不到 {device} 的 UUID（blkid 没有输出）",
+            EXIT_CONFIGURE,
+            hint=f"mkfs 之后立刻 blkid 偶尔要重试：手工跑 `blkid {device}` 看一眼",
+        )
+    return value

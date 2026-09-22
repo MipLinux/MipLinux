@@ -388,6 +388,38 @@ resolve_profile() {
   PROFILE_DESC="宿主机 ${PROFILE_HOST} → 容器内 ${PROFILE_INNER}"
 }
 
+# ── 装配：installer/ 注入 profile 副本 ─────────────────────────────────
+stage_profile() {
+    [[ "$MODE" == "repo" ]] || return 0
+    [[ $AUTO_BUILD -eq 1 ]] || return 0   # 交互 shell 是排查用途，用仓库原样 profile
+    [[ -d "${REPO_ROOT}/installer" ]] || die "找不到 installer/ 源码目录：${REPO_ROOT}/installer"
+# 宁可构建失败，也不让 ISO 里躺一个启动不了的 kiosk
+    [[ -x "${REPO_ROOT}/installer/bin/mipl-installer" ]] \
+      || die "installer/bin/mipl-installer 不存在或不可执行"
+    [[ -x "${REPO_ROOT}/installer/bin/mipl-kiosk" ]] \
+      || die "installer/bin/mipl-kiosk 不存在或不可执行"
+
+local src="$PROFILE_HOST" staged="${OUT_DIR}/profile-staged"
+run rm -rf -- "$staged"
+run mkdir -p -- "$staged"
+run cp -aT -- "$src" "$staged"
+run mkdir -p -- "$staged/airootfs/usr/local/lib/mipl-installer"
+run cp -aT -- "${REPO_ROOT}/installer" "$staged/airootfs/usr/local/lib/mipl-installer"
+# 别把开发机的 __pycache__ / .pyc 带进 ISO
+run find "$staged/airootfs/usr/local/lib/mipl-installer"\
+      \( -type d -name __pycache__ -prune -exec rm -rf -- {}+ \) \
+      -o \( -name '*.pyc' -exec rm -f -- {} + \)
+# 产物归 root：cp -a 会保留宿主 uid，带进 ISO 说不清是谁的文件
+run chown -R root:root -- "$staged/airootfs/usr/local/lib/mipl-installer"
+# 入口软链：kiosk unit 里 ExecStart 用的固定路径
+run ln -s ../lib/mipl-installer/bin/mipl-installer \
+      "$staged/airootfs/usr/local/bin/mipl-installer"
+run ln -s ../lib/mipl-installer/bin/mipl-kiosk \
+      "$staged/airootfs/usr/local/bin/mipl-kiosk"
+
+PROFILE_HOST="$staged"
+PROFILE_DESC="装配副本 ${staged}（profile/ + installer/）→ 容器内 ${PROFILE_INNER}"
+}
 # ── nspawn 参数（profile 与 /out 的挂载都在这里定）──────────────────
 # ── 容器里的源与 DNS：宿主机生成，只读挂进容器 ───────────────────────
 # 生成物都放在 $OUT_DIR 里（整个 out/ 都被 .gitignore 忽略，会被挂到容器
@@ -1077,6 +1109,7 @@ main() {
   fi
 
   resolve_profile
+  stage_profile
   info "构建 profile： ${PROFILE_DESC}"
   if [[ "$MODE" == "baseline" ]]; then
     note "基线构建：用它分开「环境坏了」和「自己改坏了」"

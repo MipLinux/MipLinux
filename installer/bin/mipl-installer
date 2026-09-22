@@ -1,0 +1,22 @@
+import sys
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+
+
+def main() -> int:
+      app = QApplication(sys.argv)
+      window = QWidget()
+      window.setWindowTitle("MipLinux 安装器")
+      layout = QVBoxLayout(window)
+      label = QLabel("MipLinux 安装器\n\nM0 · 占位界面（真界面 M2）")
+      label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+      label.setFont(QFont("Noto Sans CJK SC", 26))
+      layout.addWidget(label)
+      window.showFullScreen()
+      return app.exec()
+
+
+if __name__ == "__main__":
+sys.exit(main())

@@ -1,9 +1,13 @@
+"""MipLinux 安装器 —— M0 占位窗口。
+
+  只验启动链：cage 全屏拉起本进程、中文渲染、被 kill 后能落 TTY。
+  真界面是 M2（等线 D 的事件流）；届时本文件退化为薄入口。
+"""
 import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
-
 
 def main() -> int:
       app = QApplication(sys.argv)
@@ -16,7 +20,6 @@ def main() -> int:
       layout.addWidget(label)
       window.showFullScreen()
       return app.exec()
-
 
 if __name__ == "__main__":
 sys.exit(main())

@@ -406,9 +406,10 @@ run cp -aT -- "$src" "$staged"
 run mkdir -p -- "$staged/airootfs/usr/local/lib/mipl-installer"
 run cp -aT -- "${REPO_ROOT}/installer" "$staged/airootfs/usr/local/lib/mipl-installer"
 # 别把开发机的 __pycache__ / .pyc 带进 ISO
-run find "$staged/airootfs/usr/local/lib/mipl-installer"\
-      \( -type d -name __pycache__ -prune -exec rm -rf -- {}+ \) \
-      -o \( -name '*.pyc' -exec rm -f -- {} + \)
+run find "$staged/airootfs/usr/local/lib/mipl-installer" \
+    -type d -name __pycache__ -exec rm -rf -- {} +
+run find "$staged/airootfs/usr/local/lib/mipl-installer" \
+    -name '*.pyc' -delete
 # 产物归 root：cp -a 会保留宿主 uid，带进 ISO 说不清是谁的文件
 run chown -R root:root -- "$staged/airootfs/usr/local/lib/mipl-installer"
 # 入口软链：kiosk unit 里 ExecStart 用的固定路径

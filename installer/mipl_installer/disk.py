@@ -221,10 +221,32 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
     return esp, root
 
 
+def _esp_flag(parted):
+    """ESP 的标志常量。
+
+    pyparted 是按 libparted 的能力**条件导入**它的（`if hasattr(_ped, "PARTITION_ESP")`），
+    所以不能假定它一定在。缺了它分区就没有 ESP 类型 GUID，`bootctl install`
+    后面会以「找不到 ESP」的口气报错 —— 在这里先说清楚，代价低得多。
+    """
+    flag = getattr(parted, "PARTITION_ESP", None)
+    if flag is None:
+        raise InstallerError(
+            "这个 pyparted/libparted 没有 PARTITION_ESP（ESP 标志）",
+            EXIT_USAGE,
+            hint="parted ≥ 3.2 才有；先看 `pacman -Q parted python-pyparted`",
+        )
+    return flag
+
+
 def _parted_create(device: str, layout: Layout) -> None:
     """pyparted：clobber → 新 GPT → ESP + root。
 
-    **这一段只能在与 pyparted 同在的环境里验**（Live 里 `python-pyparted`）。
+    API 名字照 pyparted 的**当前**写法（与 archinstall 的用法一致）：
+    建新表是模块级 `freshDisk(dev, "gpt")`（不是 `Device.disk_new_fresh`），
+    落盘是 `Disk.commit()`（不是 `commitToOS()`），`Constraint` 只认关键字参数。
+    这几处都验证过源码，别按记忆改回去。
+
+    **这一段只能在装了 pyparted 的环境里验**（Live 里 `python-pyparted`）。
     导入放在函数里，是为了让本模块在没装 pyparted 的机器上也能被导入和单测。
     """
     try:
@@ -238,17 +260,17 @@ def _parted_create(device: str, layout: Layout) -> None:
 
     try:
         dev = parted.get_device(device)
-        dev.clobber()                                    # 抹掉旧分区表与签名
-        disk = dev.disk_new_fresh(parted.DISK_TYPE_GPT)  # 新 GPT
+        dev.clobber()                                     # 抹掉旧分区表与签名
+        disk = parted.freshDisk(dev, "gpt")               # 新 GPT
         sector = dev.sectorSize
-        constraint = parted.Constraint(dev)              # 按设备的最优对齐
+        constraint = dev.optimalAlignedConstraint         # 按设备的最优对齐（通常 1 MiB）
 
         for start, size, fstype in (
             (layout.esp_start, layout.esp_size, "fat32"),
             (layout.root_start, layout.root_size, "ext4"),
         ):
-            geometry = parted.Geometry(dev, start=start // sector, length=size // sector)
-            filesystem = parted.FileSystem(fstype, geometry)
+            geometry = parted.Geometry(device=dev, start=start // sector, length=size // sector)
+            filesystem = parted.FileSystem(type=fstype, geometry=geometry)
             partition = parted.Partition(
                 disk=disk,
                 type=parted.PARTITION_NORMAL,
@@ -259,9 +281,9 @@ def _parted_create(device: str, layout: Layout) -> None:
             if fstype == "fat32":
                 # ESP 类型 GUID。**不**顺手加 boot 标志：那是 GPT 里的
                 # legacy-BIOS-可引导属性，与 UEFI 无关，加了只会让分区表更难看懂。
-                partition.setFlag(parted.PARTITION_ESP)
+                partition.setFlag(_esp_flag(parted))
 
-        disk.commit_to_os()                              # 写盘 + 通知内核重读
+        disk.commit()                                     # 写盘 + 通知内核重读
     except InstallerError:
         raise
     except Exception as exc:  # parted 的异常层级随版本变，统一收口成一句话

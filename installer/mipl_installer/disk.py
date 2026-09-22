@@ -259,7 +259,7 @@ def _parted_create(device: str, layout: Layout) -> None:
         ) from exc
 
     try:
-        dev = parted.get_device(device)
+        dev = parted.getDevice(device)                    # 注意是 camelCase：getDevice
         dev.clobber()                                     # 抹掉旧分区表与签名
         disk = parted.freshDisk(dev, "gpt")               # 新 GPT
         sector = dev.sectorSize

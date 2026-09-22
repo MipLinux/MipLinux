@@ -3,11 +3,12 @@
 # Live 内的排练跑：在真实的 Live 环境里驱动一次安装，验检查点 4 / 6。
 #
 # 这个脚本**在 Live 里跑**（它是从只读源码 ISO 上读出来的），不是在宿主机上。
-# 宿主机的 `/run/mipl-src` 挂载要先做好：
+# 宿主机的 `/run/mipl-src` 挂载要先做好 —— 盘号别猜，用 `lsblk` 按**容量**认：
+# 源码盘是那张几百 K 的 rom，启动用的 ISO 是 2.2G 那张（挂在 /run/archiso/bootmnt）：
 #
-#     lsblk                                   # 确认第二个光驱是 /dev/sr1
+#     lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS
 #     mkdir -p /run/mipl-src
-#     mount -o ro /dev/sr1 /run/mipl-src
+#     mount -o ro /dev/sr0 /run/mipl-src      # ← 实测源码盘是 sr0
 #     bash /run/mipl-src/installer/tests/live-rehearsal.sh /dev/vda
 #
 # 源码挂在 /run/mipl-src 而不是 /mnt —— /mnt 是**安装器要用的**目标挂载点，
@@ -23,17 +24,33 @@ DISK="${1:-}"
 
 die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
 
+# 把安装日志留一份在**目标盘**上：Live 是内存盘，poweroff 之后 /tmp 里的东西
+# 就没了，而失败现场恰恰是最需要留下来的。装完的系统里能直接 `cat /root/…`。
+keep_log() {
+  local disk="$1" log="$2" root_part
+  [[ -f "$log" ]] || return 0
+  # 最后一个分区是 root（第一个是 ESP）
+  root_part="$(lsblk -pno NAME,TYPE "$disk" | awk '$2 == "part" { p = $1 } END { print p }')"
+  [[ -n "$root_part" ]] || return 0
+  umount -R /mnt 2>/dev/null || true
+  mkdir -p /mnt || return 0
+  mount "$root_part" /mnt 2>/dev/null || return 0
+  mkdir -p /mnt/root && cp "$log" /mnt/root/ 2>/dev/null || true
+  sync
+  umount /mnt 2>/dev/null || true
+}
+
 [[ $EUID -eq 0 ]] || die "这个脚本在 Live 里以 root 跑（Live 里本来就是 root）"
 [[ -n "$DISK" ]] || die "用法： live-rehearsal.sh /dev/vda"
 [[ -d "${SRC}/installer/mipl_installer" ]] || die "${SRC} 下没有 installer/ —— 源码 ISO 挂了没？（见脚本头部注释）"
 [[ -b "$DISK" ]] || die "${DISK} 不是块设备"
 
-printf '== 目标盘 ==\n'
+printf '== 目标盘 / target disk ==\n'
 lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS
-printf '\n== 核对 ==\n'
-printf '  待擦的盘：%s\n' "$DISK"
-printf '  源码：    %s/installer\n' "$SRC"
-printf '  按 Ctrl-C 中止；继续请输入设备路径：'
+printf '\n== 核对 / check ==\n'
+printf '  待擦的盘（will be wiped）: %s\n' "$DISK"
+printf '  源码（source）: %s/installer\n' "$SRC"
+printf '  按 Ctrl-C 中止；继续请**输入设备路径**（Ctrl-C aborts, type the path to continue）: '
 read -r typed
 [[ "$typed" == "$DISK" ]] || die "输入不匹配（收到 ${typed}），什么都没做"
 
@@ -42,15 +59,40 @@ if ! python3 -c 'import parted' 2>/dev/null; then
   pacman -S --noconfirm python-pyparted
 fi
 
-printf '\n== 跑安装器 ==\n'
-printf '给装后系统的用户设密码（不回显）：'
+# 动手擦盘之前先把 API 名字对一遍：pyparted 是 camelCase，而 _ped 那层是 snake_case，
+# 写错名字的代价是「盘已经擦了、装到一半才炸」—— 那一轮就白跑了。
+printf '\n== 检查 pyparted API 名字 ==\n'
+missing="$(python3 - <<'PY'
+import parted
+names = ["getDevice", "freshDisk", "Geometry", "FileSystem", "Partition",
+         "PARTITION_NORMAL", "PARTITION_ESP"]
+print(" ".join(n for n in names if not hasattr(parted, n)))
+PY
+)"
+[[ -z "$missing" ]] || die "这个 pyparted 少了：${missing} —— 先核对上游 API（见 installer/tests/test_parted_api.py），别猜"
+printf '  API 齐了：%s\n' "getDevice freshDisk Geometry FileSystem Partition PARTITION_*"
+
+LOG=/tmp/mipl-m1-rehearsal.log
+printf '\n== 跑安装器 / running the installer ==\n'
+printf '给装后系统的用户设密码（password for the new user, no echo）: '
 read -rsp '' PW
 printf '\n'
-printf '%s\n' "$PW" | PYTHONPATH="${SRC}/installer" python3 -m mipl_installer \
-  --disk "$DISK" --yes --password-stdin --log /tmp/mipl-m1-rehearsal.log "${@:2}"
 
-printf '\n== 装完了，盘上的样子 ==\n'
+rc=0
+printf '%s\n' "$PW" | PYTHONPATH="${SRC}/installer" python3 -m mipl_installer \
+  --disk "$DISK" --yes --password-stdin --log "$LOG" "${@:2}" || rc=$?
+
+keep_log "$DISK" "$LOG"
+
+if (( rc != 0 )); then
+  printf '\n[FAIL] 安装器退出码 %d / installer exit code %d\n' "$rc" "$rc"
+  printf '  日志已留一份在目标盘 /root/mipl-m1-rehearsal.log；这里也有一份：%s\n' "$LOG"
+  printf '  （Live 的 TTY 显示不了中文是 Issue #36，日志本身是 UTF-8，不影响内容）\n'
+  exit "$rc"
+fi
+
+printf '\n[OK] 装完了，盘上的样子 / done, disk layout:\n'
 lsblk -f "$DISK"
-printf '\n日志：/tmp/mipl-m1-rehearsal.log（重启前可 rsync 出去，或直接抄进 tech/04）\n'
+printf '\n日志：%s（也留了一份在装后系统的 /root/ 下）\n' "$LOG"
 printf '下一步在 Live 里执行： poweroff\n'
 printf '然后在宿主机上： sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c\n'

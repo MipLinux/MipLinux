@@ -11,8 +11,12 @@
 # 不需要 root：产物落在 /tmp，不进 out/（out/ 是构建产物目录，别混进来）。
 #
 # 用法：  ./installer/tests/make-src-iso.sh [输出路径]
-# 之后：  sudo MIPL_QEMU_EXTRA="-drive file=/tmp/mipl-installer-src.iso,media=cdrom,readonly=on,if=virtio" \
+# 之后：  sudo MIPL_QEMU_EXTRA="-drive file=/tmp/mipl-installer-src.iso,media=cdrom,readonly=on" \
 #           ./scripts/mipl.sh qemu --disk target.qcow2
+#
+# **Live 里按容量认盘，别按 sr 号猜**：实测第二张光驱是 `sr0`（约 490K 的源码盘），
+# 启动用的 ISO 反而是 `sr1`（2.2G，挂在 /run/archiso/bootmnt）。
+# 认法：`lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS` 里那张几百 K 的 rom 就是它。
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

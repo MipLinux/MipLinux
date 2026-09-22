@@ -641,10 +641,10 @@ cmd_qemu() {
       --fresh-vars) want_fresh=1; shift ;;
       --keep-vars)  want_keep=1;  shift ;;
       --serial)
-          [[ -n "${2:-}" ]] || die "--serial 后面要跟 file  console"
+          [[ -n "${2:-}" ]] || die "--serial 后面要跟 file 或 console"
           serial="$2"; shift 2 ;;
       --vga)
-          [[ -n "${2:-}" ]] || die "--vga 后面要跟 virtio 或std"
+          [[ -n "${2:-}" ]] || die "--vga 后面要跟 virtio 或 std"
           vga="$2"; shift 2 ;;
       -*) die "未知选项：$1（用 --help 看用法）" ;;
       *)
@@ -868,8 +868,10 @@ cmd_target() {
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --disk)
-          [[ -n "${2:-}" ]] 后面要跟文件名（裸文件名按 $
-          [[ -n "${2:-}" ]] || die "--size 后面要跟大小，例 40G"
+          [[ -n "${2:-}" ]] || die "--disk 后面要跟文件名（裸文件名按 ${OUT_DIR} 解析）"
+          disk="$2"; shift 2 ;;
+        --size)         
+	  [[ -n "${2:-}" ]] || die "--size 后面要跟大小，例 40G"
           size="$2"; shift 2 ;;
         --boot)
           [[ -n "${2:-}" ]] || die "--boot 后面要跟 d 或 c"
@@ -882,8 +884,6 @@ cmd_target() {
       esac
     done
     [[ "$boot" == d || "$boot" == c ]] || die "--boot 只接受d 或 c，收到：${boot}"
-    [[ "$serial" == file || "$serial" == console ]] \
-      || die "--serial 只接受 file 或 d 或 c，收到：${boot}"
     [[ "$serial" == file || "$serial" == console ]] \
       || die "--serial 只接受 file 或 console，收到：${serial}"
 
@@ -1417,6 +1417,7 @@ main() {
     vars)    cmd_vars "$@" ;;
     qemu)    cmd_qemu "$@" ;;
     target)  cmd_target "$@" ;;
+    installer) cmd_installer "$@" ;;
     shell)   cmd_shell "$@" ;;
     stop)    cmd_stop "$@" ;;
     build)   cmd_build "$@" ;;

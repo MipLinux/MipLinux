@@ -1,0 +1,20 @@
+# M1 的**临时**目标清单：装后系统装哪些包。
+#
+# 为什么不是 profile/packages.x86_64：那是 **Live** 的清单。D6 要的是
+# 「唯一来源、禁止手写第二份」，不是「只能有一个文件」—— 这里不抄它，
+# 只列装后系统的最小集。两份清单的关系见 P10（docs/knowledge/06-待定事项.md），
+# 定案后本文件删除，改为指向唯一来源。
+#
+# 为什么这么短：检查点 4 只要求「能启动」，检查点 6 要求「能 pacman -Syu」——
+# 所以内核、firmware、网络、sudo 必须在；桌面、输入法、N 卡驱动属 M3。
+# 每加一个包都会拉长 Live 里的安装时间（在线安装，包从国内源现拉）。
+
+base
+linux
+linux-firmware
+mkinitcpio
+networkmanager
+sudo
+efibootmgr
+nano
+vim

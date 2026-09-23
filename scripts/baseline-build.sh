@@ -28,6 +28,8 @@
 #   MIPL_KEEP_WORK   设 1 保留工作目录，等价于 --keep-work
 #   MIPL_PROFILE     宿主机上的 profile 目录（等价于 --profile；--baseline 时忽略）
 #   MIPL_PROFILE_RW  设 1 则 profile 可写挂载（默认只读）
+#   MIPL_INSTALLER_ENTRY_DIR  入口脚本在 installer/ 里的目录，默认 frontend
+#                    （逃生舱：布局再变时先改它试一次，见 stage_profile）
 #   MIPL_CONTAINER   容器目录，默认 /var/lib/machines/archbuild
 #   MIPL_MACHINE     容器机器名，默认 archbuild
 #   MIPL_OUT_DIR     产物目录，默认 <仓库根>/out
@@ -108,6 +110,12 @@ BASELINE_PROFILE="/usr/share/archiso/configs/releng"
 DEFAULT_PROFILE="${REPO_ROOT}/profile"
 # 挂进容器的固定路径。容器内的命令、文档、脚本都只认这一个位置。
 PROFILE_INNER="/profile"
+# 入口脚本（mipl-installer / mipl-kiosk）在 installer/ 里的目录，**相对 installer/ 本身**：
+# 它要一起被拷进 ISO，所以必须写成相对路径，不能是宿主机绝对路径。
+# 被搬走过一次（bin/ → frontend/，Issue #50），所以搬回来只需改这一行 ——
+# 找不到时报错会把这一个值原样打出来，不会只丢一句「某个路径不存在」。
+# 另留 MIPL_INSTALLER_ENTRY_DIR 作逃生舱：布局再变时可以不改脚本先试一次。
+INSTALLER_ENTRY_DIR="${MIPL_INSTALLER_ENTRY_DIR:-frontend}"
 
 # ── 容器里的软件源与 DNS ─────────────────────────────────────────────
 # 这两样都不改容器里的原文件，而是宿主机生成好后只读挂进去 —— 于是
@@ -389,15 +397,45 @@ resolve_profile() {
 }
 
 # ── 装配：installer/ 注入 profile 副本 ─────────────────────────────────
+# 入口脚本在哪：**别写死**。写死过一次，`installer/bin/` → `installer/frontend/`
+# 之后断言就再也过不去，`mipl build` 在装配阶段直接 die（Issue #50）。
+# 这里解析出错也要报错退出，不静默跳过 —— 宁可构建失败，也不让 ISO 里躺一个
+# 启动不了的 kiosk（它只表现为开机后 203/EXEC，比构建失败难查得多）。
+#
+# 判据分两层：`-f` 认「是不是普通文件」、`-x` 认「能不能执行」。
+# 少了 `-f` 的话，`-x` 对**目录**也成立 —— 软链悬空时它正好会漏过去。
+# 返回值是**相对 installer/ 的路径**，调用方拼绝对路径或软链目标都在它前面接前缀。
+resolve_installer_entry() {
+  # 两行不是啰嗦：`local a=.. b=..` 的多赋值链在 set -u 下不保证 a 先于 b 生效，
+  # 写成一行会在 `${name}` 上报「未绑定的变量」。
+  local name="$1"
+  local rel="${INSTALLER_ENTRY_DIR:+${INSTALLER_ENTRY_DIR}/}${name}"
+  if [[ -f "${REPO_ROOT}/installer/${rel}" && -x "${REPO_ROOT}/installer/${rel}" ]]; then
+    printf '%s' "$rel"
+    return 0
+  fi
+  die "installer/ 里找不到可执行的入口：${name}
+    找过：installer/${rel}（在 ${REPO_ROOT}/ 下）
+    入口被搬了目录？把 INSTALLER_ENTRY_DIR 改成它现在所在的目录
+    （环境变量 MIPL_INSTALLER_ENTRY_DIR 可以临时覆盖）。"
+}
+
 stage_profile() {
     [[ "$MODE" == "repo" ]] || return 0
     [[ $AUTO_BUILD -eq 1 ]] || return 0   # 交互 shell 是排查用途，用仓库原样 profile
     [[ -d "${REPO_ROOT}/installer" ]] || die "找不到 installer/ 源码目录：${REPO_ROOT}/installer"
 # 宁可构建失败，也不让 ISO 里躺一个启动不了的 kiosk
-    [[ -x "${REPO_ROOT}/installer/bin/mipl-installer" ]] \
-      || die "installer/bin/mipl-installer 不存在或不可执行"
-    [[ -x "${REPO_ROOT}/installer/bin/mipl-kiosk" ]] \
-      || die "installer/bin/mipl-kiosk 不存在或不可执行"
+    local entry_installer entry_kiosk entry_dir
+    entry_installer="$(resolve_installer_entry mipl-installer)"
+    entry_kiosk="$(resolve_installer_entry mipl-kiosk)"
+    entry_dir="$(dirname -- "$entry_installer")"
+    # 两个入口必须在同一个目录（软链目标共用同一个前缀）。真不一致说明
+    # installer/ 里出现了两份入口，那种状态不能猜 —— 报出来让人看。
+    [[ "$(dirname -- "$entry_kiosk")" == "$entry_dir" ]] || die "两个入口不在同一个目录：
+    mipl-installer → installer/${entry_installer}
+    mipl-kiosk     → installer/${entry_kiosk}
+    软链目标没法共用一个前缀，先确认哪一份是多余的。"
+    note "installer 入口：installer/${entry_dir}/（mipl-installer、mipl-kiosk）"
 
 local src="$PROFILE_HOST" staged="${OUT_DIR}/profile-staged"
 run rm -rf -- "$staged"
@@ -412,10 +450,12 @@ run find "$staged/airootfs/usr/local/lib/mipl-installer" \
     -name '*.pyc' -delete
 # 产物归 root：cp -a 会保留宿主 uid，带进 ISO 说不清是谁的文件
 run chown -R root:root -- "$staged/airootfs/usr/local/lib/mipl-installer"
-# 入口软链：kiosk unit 里 ExecStart 用的固定路径
-run ln -s ../lib/mipl-installer/bin/mipl-installer \
+# 入口软链：kiosk unit 里 ExecStart 用的固定路径。目标跟着上面解析出来的目录走 ——
+# 写死 ../lib/mipl-installer/bin/mipl-* 的话，入口一搬就成悬空软链，
+# ISO 里的 kiosk 照样起不来（Issue #51 的硬伤二）。
+run ln -s "../lib/mipl-installer/${entry_installer}" \
       "$staged/airootfs/usr/local/bin/mipl-installer"
-run ln -s ../lib/mipl-installer/bin/mipl-kiosk \
+run ln -s "../lib/mipl-installer/${entry_kiosk}" \
       "$staged/airootfs/usr/local/bin/mipl-kiosk"
 
 PROFILE_HOST="$staged"

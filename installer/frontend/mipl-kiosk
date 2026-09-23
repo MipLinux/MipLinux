@@ -1,4 +1,26 @@
+#!/bin/bash
+# Live 侧 kiosk 入口：cage 全屏拉起安装器界面。
+# 由 mipl-installer.service 的 ExecStart 直接 execve —— 没有 shebang 时
+# 内核返回 ENOEXEC，systemd 一律记成 203/EXEC，窗口不会出现（Issue #51）。
 if systemd-detect-virt -q; then
       export WLR_RENDERER=pixman
 fi
-exec /usr/bin/cage -- /usr/local/bin/mipl-installer
+
+# 必须先过 seatd-launch，不能直接 exec cage。
+#
+# cage 基于 wlroots，起 DRM 会话要经 libseat 拿一个 seat。实测（Live 串口日志）
+# libseat 两条路都不通，它自己的原话：
+#   Could not connect to socket /run/seatd.sock: No such file or directory
+#   [backend/logind.c:638] Could not get primary session for user: No data available
+#   No backend was able to open a seat → Unable to create seat
+#   → [cage] Unable to create the wlroots backend（每次都在 0.000 秒就死）
+# seatd 没起，而 logind 那条要求调用方有登录会话 —— systemd 服务没有，
+# 所以每一次尝试都必然失败、由 Restart=on-failure 反复重来。
+#
+# seatd-launch 就是为这个场景准备的（man seatd-launch）：它起一个专用 seatd、
+# **等它就绪**，再把命令跑起来（设好 SEATD_SOCK，命令结束就收掉 seatd）。
+# 用它就不依赖「开机时守护进程有没有就绪」这个时序。
+#
+# 代价：seatd 成了硬依赖。它在 Live 里由 wlroots0.20 间接拉进来（cage 的依赖），
+# 不用往 packages.x86_64 里加；但如果以后有人把 seatd 裁掉，这里会立刻起不来。
+exec /usr/bin/seatd-launch -- /usr/bin/cage -- /usr/local/bin/mipl-installer

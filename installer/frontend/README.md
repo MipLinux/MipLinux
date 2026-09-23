@@ -30,5 +30,5 @@ frontend/
 └── mipl_installer_qt/      与 backend/mipl_installer 对称的包名
 ```
 
-界面怎么被拉起来（`cage` kiosk、`bin/mipl-installer` 入口）属线 E 的活，
+界面怎么被拉起来（`cage` kiosk、`frontend/mipl-installer` 入口）属线 E 的活，
 见 [installer/AGENTS.md](../AGENTS.md) 与 [installer-roadmap.md](../../docs/work/installer-roadmap.md) §4 的 M0 / M2。

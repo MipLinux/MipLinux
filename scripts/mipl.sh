@@ -629,7 +629,7 @@ cmd_vars() {
 cmd_qemu() {
   have qemu-system-x86_64 || die "找不到 qemu-system-x86_64。先跑： ${MIPL_CMD} deps"
 
-  local iso="" disk="" boot="d" want_fresh=0 want_keep=0
+  local iso="" disk="" boot="d" want_fresh=0 want_keep=0 serial="" vga=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --disk)
@@ -640,6 +640,12 @@ cmd_qemu() {
         boot="$2"; shift 2 ;;
       --fresh-vars) want_fresh=1; shift ;;
       --keep-vars)  want_keep=1;  shift ;;
+      --serial)
+          [[ -n "${2:-}" ]] || die "--serial 后面要跟 file 或 console"
+          serial="$2"; shift 2 ;;
+      --vga)
+          [[ -n "${2:-}" ]] || die "--vga 后面要跟 virtio 或 std"
+          vga="$2"; shift 2 ;;
       -*) die "未知选项：$1（用 --help 看用法）" ;;
       *)
         [[ -z "$iso" ]] || die "ISO 参数只能给一个，多出来的是：$1"
@@ -651,7 +657,10 @@ cmd_qemu() {
     || die "--boot 只接受 d（光驱优先，装系统用）或 c（从盘启动），收到：${boot}"
   [[ $want_fresh -eq 0 || $want_keep -eq 0 ]] \
     || die "--fresh-vars 与 --keep-vars 只能选一个"
-
+  [[ -z "$serial" || "$serial" == file || "$serial" == console ]] \
+      || die "--serial 只接受 file（日志落 out/）或 console（可交互 socket），收到：${serial}"
+  [[ -z "$vga" || "$vga" == virtio || "$vga" == std ]] \
+      || die "--vga 只接受 virtio 或 std，收到：${vga}"
   # ── 目标盘 ──
   local disk_fmt="" vars_file="$VARS_DST"
   if [[ -n "$disk" ]]; then
@@ -703,7 +712,9 @@ cmd_qemu() {
     info "目标盘：   $(basename "$disk")  ($(file_size "$disk") 占用，虚拟 $(disk_virtual_size "$disk")，${disk_fmt})"
     note "           客机里是 /dev/vda（virtio）—— 分区前先 lsblk 确认"
   fi
-
+  if [[ "$serial" == console ]]; then
+    note "串口交互：socat -,raw,echo=0,escape=0x0f UNIX-CONNECT:${OUT_DIR}/installer-serial.sock"
+  fi
   # 参数逐条放进数组：file= 永远和它所属的 -drive 在同一个元素里，
   # 换行/缩进都不可能把它们拆开 —— Issue #8 就是这么来的。
   local -a q=(
@@ -732,6 +743,20 @@ cmd_qemu() {
     -netdev user,id=n0
     -device virtio-net,netdev=n0
   )
+
+  # ── 串口（M0 安装器测试的现场证据 / 交互通道）──
+  if [[ -n "$serial" ]]; then
+      if [[ "$serial" == file ]]; then
+        q+=(-serial "file:${OUT_DIR}/installer-serial.log")
+      else
+        q+=(-serial "unix:${OUT_DIR}/installer-serial.sock,server,nowait")
+    fi
+  fi
+
+  # ── 显卡 ──
+  if [[ -n "$vga" ]]; then
+      q+=(-vga "$vga")
+  fi
 
   # 临时加参数（按空格切分，不支持引号）：MIPL_QEMU_EXTRA="-display none -S"
   if [[ -n "${MIPL_QEMU_EXTRA:-}" ]]; then
@@ -835,6 +860,56 @@ cmd_target() {
   note "       ${MIPL_CMD} qemu --disk $(basename -- "$path") --boot c"
   note "  在 Live 里它应该是 /dev/vda —— 动手分区之前先 lsblk 确认。"
 }
+
+# ── 命令：installer ────────────────────────────────────────────────────
+  # M0：装系统测试一条龙 —— 目标盘（缺了才建）+ Live 启动 + 串口日志/控制台。
+    cmd_installer() {
+    local disk="$TARGET_DISK_NAME" size="$TARGET_DISK_SIZE" boot="d" serial="file"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --disk)
+          [[ -n "${2:-}" ]] || die "--disk 后面要跟文件名（裸文件名按 ${OUT_DIR} 解析）"
+          disk="$2"; shift 2 ;;
+        --size)         
+	  [[ -n "${2:-}" ]] || die "--size 后面要跟大小，例 40G"
+          size="$2"; shift 2 ;;
+        --boot)
+          [[ -n "${2:-}" ]] || die "--boot 后面要跟 d 或 c"
+          boot="$2"; shift 2 ;;
+        --serial)
+          [[ -n "${2:-}" ]] || die "--serial 后面要跟 file  console"
+          serial="$2"; shift 2 ;;
+        -*) die "未知选项：$1（用 --help 看用法）" ;;
+        *)  die "installer 不接受位置参数：$1" ;;
+      esac
+    done
+    [[ "$boot" == d || "$boot" == c ]] || die "--boot 只接受d 或 c，收到：${boot}"
+    [[ "$serial" == file || "$serial" == console ]] \
+      || die "--serial 只接受 file 或 console，收到：${serial}"
+
+    ensure_out_dir
+
+    # 目标盘：缺了才建（路径约定同 cmd_target：裸文件名按 out/ 解析）
+    local path="$disk"
+    [[ "$path" == */* ]] || path="${OUT_DIR}/${path}"
+    if [[ ! -e "$path" ]]; then
+      have qemu-img || die "找不到 qemu-img。装它： sudo pacman -S qemu-img（Arch）"
+      info "目标盘不存在，新建：$(basename -- "$path")  虚拟大小 ${size}"
+      run qemu-img create -f qcow2 -- "$path" "$size"
+      [[ $DRY_RUN -eq 1 || -f "$path" ]] || die "qemu-img 没有产出 ${path}，看上面的报错"
+    else
+      note "目标盘已存在，直接复用：${path}（重造请走 ${MIPL_CMD} target --force）"
+    fi
+
+    # 试运行里盘还不存在（真跑会先建盘），cmd_qemu 会因「目标盘不存在」拒掉 ——
+    # 按不挂盘演示 qemu 参数，并把真跑的差别说清楚。
+    local -a qemu_args=(--disk "$disk" --boot "$boot" --serial "$serial" --vga virtio)
+    if [[ $DRY_RUN -eq 1 && ! -e "$path" ]]; then
+      note "（试运行：盘不存在，真跑会先 qemu-img create 再挂上；下面按不挂盘演示）"
+      qemu_args=(--boot "$boot" --serial "$serial" --vga virtio)
+    fi
+    cmd_qemu "${qemu_args[@]}"
+  }
 
 # ── 命令：shell / stop ────────────────────────────────────────────────
 cmd_shell() {
@@ -1220,10 +1295,22 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                       那是诚实的失败，不会安静地回落到 Live 环境骗过你。
       --fresh-vars    重置变量文件（NVRAM 清空，从头来一遍）。
       --keep-vars     不重置（ISO 测试时想复现「上次的引导项」才用）。
+      --serial MODE   串口：file=日志落 out/installer-serial.log；
+                        console=unix socket，socat 连上即客 root shell
+                        （要引导项里的 console=ttyS0，M0 已加）。
+      --vga virtio|std  显卡。virtio 提供 KMS，kiosk（cage）测试用它；
+                        不给 = qemu 默认（std），老行为不变
   target [--name F] [--size 40G] [--force]
                       建一块空的目标盘（默认 out/target.qcow2）给安装器用。
                       已存在就拒绝：它上面可能装着一个系统。
                       --force 覆盖，并连同它的 NVRAM 一起换新。
+  installer [--boot d|c] [--serial file|console] [--disk FILE] [--size 40G]
+                      装系统测试一条龙：目标盘缺了才建（已有就复用），
+                      然后以 -vga virtio 启动 Live（cage  KMS，std VGA 起不来）。
+     --serial file     串口日志落 out/installer-serial.log（默认）
+     --serial console  串口换成可交互 socket（socat 连上即root shell）
+     --boot c          从盘启动验安装结果（同 qemu 语义）
+
   vars                只复制 OVMF 变量文件（out/OVMF_VARS.fd），不启动 QEMU。
   shell [--restart]   进入 nspawn 构建容器（自动挂好 /out 与只读的 /profile）。
                       旧容器还开着时会拦住你，--restart 会先关掉它。
@@ -1330,6 +1417,7 @@ main() {
     vars)    cmd_vars "$@" ;;
     qemu)    cmd_qemu "$@" ;;
     target)  cmd_target "$@" ;;
+    installer) cmd_installer "$@" ;;
     shell)   cmd_shell "$@" ;;
     stop)    cmd_stop "$@" ;;
     build)   cmd_build "$@" ;;

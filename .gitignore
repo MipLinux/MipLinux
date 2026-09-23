@@ -15,3 +15,7 @@ OVMF_VARS*.fd
 
 # IDE
 .idea/
+
+# Python
+__pycache__/
+*.py[cod]

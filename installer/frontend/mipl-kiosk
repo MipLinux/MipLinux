@@ -1,0 +1,4 @@
+if systemd-detect-virt -q; then
+      export WLR_RENDERER=pixman
+fi
+exec /usr/bin/cage -- /usr/local/bin/mipl-installer

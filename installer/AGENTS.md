@@ -21,8 +21,8 @@ installer/
 │   └── mipl_installer/   后端：不依赖 Qt，可被 CLI 与测试直接驱动
 │       └── data/         随包走的数据（M1 的临时目标包清单）
 ├── frontend/             PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
-├── bin/mipl-installer    Live 侧入口，由 cage 拉起（线 E）
-└── tests/                单测（test_*.py）+ Live 内排练脚本（*.sh）
+│   └── mipl-installer    Live 侧入口，由 cage 拉起（线 E）
+├── tests/                单测（test_*.py）+ Live 内排练脚本（*.sh）
 ```
 
 （以 [installer-roadmap](../docs/work/installer-roadmap.md) 第 3 节为准，那里还写着构建集成。）
@@ -65,5 +65,5 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c  # 3. 检查点 4：从
 
 ## 两块的边界
 
-`backend/mipl_installer/` 与 `tests/` 是安装器核心；`bin/mipl-installer` 是 Live 侧入口（由 `cage` 拉起、由构建脚本拷进 `airootfs`）。
+`backend/mipl_installer/` 与 `tests/` 是安装器核心；`frontend/mipl-installer` 是 Live 侧入口（由 `cage` 拉起、由构建脚本拷进 `airootfs`）。
 两块常由不同的人同时推进 —— 动手前先确认当日的分工（见根文件的「开工前置」）。

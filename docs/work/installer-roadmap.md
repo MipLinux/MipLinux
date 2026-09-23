@@ -52,8 +52,9 @@ installer/
 │   ├── cli.py / __main__.py 无界面入口：`python3 -m mipl_installer`
 │   └── data/                M1 的临时目标包清单（P10 定案后删）
 ├── frontend/                PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
-├── bin/mipl-installer       入口，由 cage 拉起
-└── tests/                   单测 test_*.py + Live 内排练脚本（*.sh）
+│   ├── mipl-installer       入口，由 cage 拉起
+│   └── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage）
+├── tests/                   单测 test_*.py + Live 内排练脚本（*.sh）
 ```
 
 **包名不跟目录名走**：目录按角色分，import 名一律是 `mipl_installer`。
@@ -82,7 +83,7 @@ installer/
 
 先把「能起来、能测」这条路铺平，**不写任何真功能**。
 
-- 建 `installer/`（§3 的布局）与入口 `bin/mipl-installer`
+- 建 `installer/`（§3 的布局）与入口 `frontend/mipl-installer`
 - Live 包清单加 `networkmanager`、`cage`、`qt6-wayland`、`pyside6`、`python-pyparted`
 - `airootfs`：kiosk unit（`cage` + 安装器，`Restart=on-failure`）、NetworkManager 的无 GUI 配置；`getty` autologin **保留为兜底**
 - `baseline-build.sh` 把 `installer/` 拷进 airootfs；`mipl.sh` 加 `installer` 子命令（建盘 + 启动 + 串口日志落 `out/`）

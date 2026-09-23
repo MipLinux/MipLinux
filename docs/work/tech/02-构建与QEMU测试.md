@@ -347,6 +347,17 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2            # 装：ISO 优先启
 sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：不挂 ISO，从盘启动
 ```
 
+**测安装器可以少敲两条**：`mipl installer` 把「建盘 + 挂盘 + 串口日志」合成一条
+（盘缺了才建、已有就复用；`--serial file` 是默认，日志落 `out/installer-serial.log`）：
+
+```bash
+sudo ./scripts/mipl.sh installer                           # = 上面前两条
+sudo ./scripts/mipl.sh installer --boot c                  # = 上面第三条
+```
+
+三条命令的差别、以及 `installer` 与 `qemu` 在 `--vga` 上的已知差异，
+见 [04-安装逻辑与实测](04-安装逻辑与实测.md) §2。
+
 `mipl target` 产出两个文件：
 
 | 文件 | 是什么 |

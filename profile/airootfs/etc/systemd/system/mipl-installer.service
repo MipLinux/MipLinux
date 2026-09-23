@@ -1,5 +1,5 @@
 [Unit]
-Description=MipLinux 安装器界面（cage 全屏 kiosk）
+Description=MipLinux 安装器界面
 After=getty@tty1.service
 Conflicts=getty@tty1.service
 

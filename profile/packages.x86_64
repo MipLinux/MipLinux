@@ -154,21 +154,14 @@ man-pages-zh_cn
 networkmanager
 # <== 网络 · NetworkManager <==
 
-# ==> 安装器 · M0 ==>
+# ==> 安装器 ==>
 cage
 qt6-wayland
 pyside6
 python-pyparted
-# <== 安装器 · M0 <==
+# <== 安装器 <==
 
 # ==> NVIDIA 驱动 · Turing 及更新 ==>
 nvidia-open
 nvidia-utils
 # <== NVIDIA 驱动 · Turing 及更新 <==
-
-# ==> 安装器 · M0 ==>
-cage
-qt6-wayland
-pyside6
-python-pyparted
-# <== 安装器 · M0 <==

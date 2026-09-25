@@ -53,7 +53,6 @@ class TestLocales(unittest.TestCase):
         self.assertTrue(out.endswith("\n"))
 
     def test_locale_conf_matches_live_factory_settings(self):
-        # 与 profile/airootfs/etc/locale.conf 同一份真相（LANG + LANGUAGE）
         self.assertEqual(
             configure.locale_conf("zh_CN.UTF-8"),
             "LANG=zh_CN.UTF-8\nLANGUAGE=zh_CN:zh:en_US:en\n",
@@ -63,7 +62,6 @@ class TestLocales(unittest.TestCase):
         self.assertEqual(configure.locale_conf("en_US.UTF-8"), "LANG=en_US.UTF-8\n")
 
     def test_environment_matches_live_factory_settings(self):
-        # 与 profile/airootfs/etc/environment 同一份真相（fcitx5 的三个变量）
         self.assertEqual(
             configure.environment_text(),
             "GTK_IM_MODULE=fcitx\nQT_IM_MODULE=fcitx\nXMODIFIERS=@im=fcitx\n",
@@ -141,7 +139,6 @@ class TestFontsConf(unittest.TestCase):
             self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
 
     def test_missing_source_tolerated_in_dry_run(self):
-        # 宿主排练机上没有 Live 的出厂设置 —— dry-run 容忍并说出来，真跑才硬失败
         with tempfile.TemporaryDirectory() as dst:
             configure.copy_fonts_conf(
                 FakeRunner(dry_run=True),

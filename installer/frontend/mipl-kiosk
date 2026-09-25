@@ -38,4 +38,20 @@ if [[ -S /run/seatd.sock ]] && ! fuser -s /run/seatd.sock 2>/dev/null; then
       rm -f /run/seatd.sock
 fi
 
-exec /usr/bin/seatd-launch -- /usr/bin/cage -- /usr/local/bin/mipl-installer
+# cage 必须带 -s，否则 tty 切不出去（2026-09-25 实测 + 源码）。
+#
+# cage 把 Ctrl+Alt+F1..F12 当自己的 keybinding 处理，在 seat.c:handle_key_event 里
+# 先按 Alt 修饰键拦下来交给 handle_keybinding —— 它在 !allow_vt_switch 时直接
+# return false（既不切也不放行给内核 VT 层），只有 allow_vt_switch 为真才调
+# wlr_session_change_vt 去切。而 allow_vt_switch 就是命令行的 -s：
+#   cage(1)  -s  Allow VT switching
+# 少了它，屏幕永远停在 kiosk 上：Ctrl+Alt+F2 毫无反应、窗口不消失、不闪屏。
+#
+# 实测对照（2026-09-25，QEMU）：不带 -s → 切不动；
+# systemctl stop mipl-installer.service（合成器退出）后再按 → 能切。
+# 也就是说内核那条路本来是通的，是合成器把键吞了。
+#
+# 这一条不只关乎方便：tty1 是 Live 唯一的维护入口，mipl-installer.service 的
+# 兜底单元（mipl-installer-tty.service）要把 tty1 交回 root —— 切不了 tty 时，
+# 「面挂了还有 tty1」这句话在实机上不成立。
+exec /usr/bin/seatd-launch -- /usr/bin/cage -s -- /usr/local/bin/mipl-installer

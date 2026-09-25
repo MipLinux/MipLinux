@@ -2,15 +2,34 @@
 
 这里放 PySide6 的图形界面。
 
-> **状态：** G3 已完成**设计语言 + 全部页面可跑原型**（2026-09-25，逐页过审）。
+> **状态：** G3 已完成**设计语言 + 全部页面 + 流程接线**（2026-09-25，逐页过审）。
 > 原型是 QML，能单独取图、也是 M2 真实现的雏形 —— **不做静态稿**，
 > 免得设计语言出现两份会漂移的真相。设计规格与实测状态见
 > [docs/work/tech/07-M2界面设计.md](../../docs/work/tech/07-M2界面设计.md)。
 >
-> 页面按流程串起来是（`qml/pages/`，`shots.py --list` 可看全部）：
-> 加载 → 欢迎 → 语言 → 键盘 → 时区 → 网络 → 系统磁盘 → 磁盘分区 → 确认擦除 →
-> 主机名 → 账户 → 安装详情 → 安装（含失败）→ 结束。
-> 另有 `GalleryPage.qml`（控件与状态总览）、`AdvancedPanel.qml`（高级模式面板）。
+> 流程与状态在 `qml/Main.qml`（唯一的 Window，页面是它里面换进换出的 Item）：
+>
+> ```
+> 加载 → 欢迎 → 网络 → 系统磁盘 → 磁盘分区 → 确认擦除 → 账户 → 安装详情 → 安装 → 结束
+> 分支：欢迎「高级安装」→ 语言 / 键盘 / 时区 / 主机名
+> ```
+>
+> **现在这一版不接后端**（G3 口径）：安装页那一段由 `Main.qml` 里的假脚本演出来。
+> 另有 `GalleryPage.qml`（控件与状态总览）与 `pages/AdvancedPage.qml`（高级安装）。
+
+## 怎么把流程跑起来
+
+```bash
+# 在开发机上直接看（有显示环境）
+python3 installer/frontend/mipl-installer
+
+# 无显示环境 / CI：把整条链走一遍并断言每一跳（不需要后端、约 2 秒；
+# 加 --demo 会等假安装演完，约 12 秒）
+python3 installer/frontend/tools/flow-check.py --demo
+
+# 取图（每屏一张 PNG，落 out/m2-prototype/）
+python3 installer/frontend/tools/shots.py --page flow --set page=welcome
+```
 
 ## 一条规则
 
@@ -39,18 +58,20 @@ class QtReporter:                       # 前端侧
 
 ```
 frontend/
-├── mipl-installer          Live 侧入口（cage 拉起）
+├── mipl-installer          Live 侧入口（cage 拉起；只负责起引擎，不含逻辑）
 ├── mipl-kiosk              kiosk 启动脚本（过 seatd-launch 起 cage）
 ├── assets/                 LOGO 资产（PNG 进仓库，理由见 assets/README.md）
 ├── icons/lucide/           Lucide 图标，**只放界面用到的那些**（见 icons/README.md）
 ├── qml/
+│   ├── Main.qml            流程壳：唯一的 Window、路由、状态、假安装驱动
 │   ├── theme/              设计令牌（Tokens.qml）—— 全项目唯一的视觉真相
 │   ├── components/         控件：PageShell / Button / Card / Field / Alert / Badge / …
-│   ├── pages/              流程各页（欢迎 → … → 结束，见上）+ 失败态 + 高级模式面板
+│   ├── pages/              流程各页（欢迎 → … → 结束，见上）+ 高级安装 + 失败态
 │   └── GalleryPage.qml     控件与状态同屏总览（评审看它）
-├── bridge/                 前后端接线层（G3 只留说明，见 bridge/README.md）
+├── bridge/                 前后端接线层（G3：图标 provider + 说明，见 bridge/README.md）
 └── tools/
-    ├── shots.py            把页面渲染成 PNG（本机迭代与评审取图）
+    ├── shots.py            把页面渲染成 PNG + 量高（--measure / --set 取交互态）
+    ├── flow-check.py       流程烟测：无头走一遍整条链并断言每一跳
     └── build-assets.sh     从 LOGO 源图生成界面用的小图
 ```
 
@@ -69,6 +90,10 @@ python3 installer/frontend/tools/shots.py --page welcome        # 只看一页
 python3 installer/frontend/tools/shots.py --list                # 有哪些页面
 python3 installer/frontend/tools/shots.py --size 1024x600       # 验小屏降级
 python3 installer/frontend/tools/shots.py --out /tmp/m2-shots   # out/ 属 root 时用它
+
+# 流程壳：某一屏 / 某个交互态
+python3 installer/frontend/tools/shots.py --page flow --set page=welcome
+python3 installer/frontend/tools/shots.py --page account --set submitted=true
 
 # 在真实 kiosk 里看（要重建 ISO）
 sudo ./scripts/mipl.sh build

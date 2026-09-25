@@ -33,11 +33,17 @@
 // QQuickItem::polish() 循环（实测刷屏）。内部宽度一律从 pageWidth 往下走。
 
 import QtQuick
-import QtQuick.Window
 import QtQuick.Layouts
 import "../theme"
 
-Window {
+// ⚠️ 根是 **Item，不是 Window**（2026-09-25 改）。
+// 以前每个页面各自是一个 Window，于是「翻页」等于开关窗口 —— 在 cage 这种
+// 单窗口 kiosk 合成器上不成立（它一次只认一个顶层窗口）。现在由 `qml/Main.qml`
+// 那个唯一的 Window 承载，页面是它里面换进换出的 Item：
+//   Main.qml 的 Loader → 页面（本组件）→ 尺寸由 Loader 给
+// 所以这里不再自己定 1280×800，也不再 `visible`；底色以前是 Window 的 `color`，
+// 现在自己画一层 Rectangle（Item 没有 color）。
+Item {
     id: shell
 
     // ── 接口 ──────────────────────────────────────────────────────────
@@ -69,10 +75,16 @@ Window {
     signal secondaryClicked()
     signal headerLinkClicked()
 
+    // 尺寸：外面给（Main.qml 里由 Loader 铺满窗口；取图时由 shots.py 定）。
+    // 这两个默认值只是让单独打开一个页面时也不是 0×0。
     width: 1280
     height: 800
-    visible: true
-    color: Tokens.pageBg
+
+    // 页面底。以前是 Window 的 color，现在是这一层自己画的 —— 必须是第一个子项
+    Rectangle {
+        anchors.fill: parent
+        color: Tokens.pageBg
+    }
 
     /// 内容列宽度上限。默认 880；内容少的页面（网络列表）可以调窄 ——
     /// 一列 880px 的表单在 1280 的屏上其实难读，窄一点更像设置面板。

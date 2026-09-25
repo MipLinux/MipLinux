@@ -40,7 +40,9 @@ PageShell {
     // 一列短表单：宽度按内容定，不是全站一个数
     contentWidth: 660
 
-    primaryText: "继续"
+    // 这一页现在是**高级安装的分支**（语言 / 键盘 / 时区 / 主机名 四项之一），
+    // 不是主流程里的下一步 —— 所以是「完成」，不是「继续」（2026-09-25 评审）。
+    primaryText: "完成"
 
     signal hostnameChosen(string hostname)
     signal backRequested()

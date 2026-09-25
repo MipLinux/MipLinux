@@ -133,7 +133,9 @@ PageShell {
         filteredZones.length * page.rowHeight
         + Math.max(0, filteredZones.length - 1) * page.rowSpacing
 
-    primaryText: "继续"
+    // 这一页现在是**高级安装的分支**（语言 / 键盘 / 时区 / 主机名 四项之一），
+    // 不是主流程里的下一步 —— 所以是「完成」，不是「继续」（2026-09-25 评审）。
+    primaryText: "完成"
 
     signal chosen(string zone)
     signal backRequested()

@@ -26,7 +26,12 @@
 // **没有「跳过」**：MipLinux 是在线安装镜像，装包全程要走网络，
 // 所以「先跳过网、回头再连」不是一条真出路 —— 放一个走得通但不该走的出口，
 // 只会把人送进装到一半才发现没网的境地。网络是这一步的前提条件，不是可选项。
-// 这一页因此**只在未联网时出现**：进来时就是断网的样子（没插网线就没那张子卡）。
+//
+// **这一页永远出现在流程里**（2026-09-25 评审定的）：无论插没插网线都展示，
+// 让人亲眼看到「网络是什么状态」—— 直接跳过这一步会留下不安。
+// 于是主按钮跟着状态走：
+//   · 没通 → 「连接」（缺密码时点了当场说清，见下）
+//   · 通了 → 「继续」（这一页的活儿干完了，往前走）
 //
 // **「连接」不置灰**：没了「跳过」，置灰就是这个页面上唯一的出路点不动 ——
 // 用户只会卡在这儿猜。所以按钮永远可点，缺密码时点了当场说清缺什么
@@ -38,6 +43,7 @@
 //
 // ⚠️ 后端没有列网能力（`nmcli` 是现成的，但没人调用它）——
 // 这里的 networks 是原型注入值。要真连网需要一条后端 issue，见 tech/07 §6。
+// 流程壳（`qml/Main.qml`）现在靠注入 `wiredConnected` 模拟「已连接有线」。
 
 import QtQuick
 import QtQuick.Layouts
@@ -100,15 +106,22 @@ PageShell {
     /// 「点了连接但还缺密码」—— 不给按钮置灰，改成点完当场说清（见文件头）。
     property bool passwordMissing: false
 
-    primaryText: "连接"
+    // 通了就往前走，没通就连接 —— 这一页永远在流程里（见文件头）
+    primaryText: page.online ? "继续" : "连接"
 
     signal refreshRequested()
     signal connectRequested(string ssid, string password)
     signal manualEntryRequested()
+    signal continueRequested()
     signal backRequested()
 
-    /// 主按钮的唯一出口：缺什么就在缺的地方说，不靠置灰暗示。
+    /// 主按钮的唯一出口：通了就是「继续」；没通则缺什么就在缺的地方说，
+    /// 不靠置灰暗示。
     function submit() {
+        if (page.online) {
+            page.continueRequested();
+            return;
+        }
         if (page.needsPassword && page.password.length === 0) {
             page.passwordMissing = true;
             return;

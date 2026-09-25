@@ -157,6 +157,11 @@ networkmanager
 # ==> 安装器 ==>
 cage
 qt6-wayland
+# qt6-svg：界面里的图标是 Lucide 的 SVG，由 bridge/icons.py 用 QSvgRenderer 染色后画出来。
+# **它只是 pyside6 的可选依赖**（Arch 包元数据：optional - QtSvg bindings），不加这一行
+# Live 里就没有 libQt6Svg.so.6，`from PySide6.QtSvg import …` 直接失败 —— 而那个 import
+# 在 bridge/icons.py 的模块级，等于整个前端起不来（2026-09-25 静态依赖分析发现）。
+qt6-svg
 pyside6
 python-pyparted
 # <== 安装器 <==

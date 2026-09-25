@@ -6,19 +6,25 @@
 //
 // 根因不在本线，这里不试图修它。要点只有一条：
 // **窗口一显示就画**，不等任何后端调用（不查网络、不列盘、不读配置）。
+//
+// 根是 Item：整个流程只有一个 Window（`qml/Main.qml`），这一页是它里面的第一屏
+// （cage 是单窗口 kiosk 合成器，多开顶层窗口不成立 —— 见 PageShell 文件头）。
 
 import QtQuick
 import "../theme"
 
-Window {
+Item {
     id: loading
     width: 1280
     height: 800
-    visible: true
-    color: Tokens.pageBg
 
     property string message: "正在准备安装环境…"
     property url logoSource: Qt.resolvedUrl("../../assets/mipl-logo-hero.png")
+
+    Rectangle {
+        anchors.fill: parent
+        color: Tokens.pageBg
+    }
 
     Column {
         anchors.centerIn: parent

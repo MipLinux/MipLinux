@@ -43,23 +43,25 @@ TALL_SIZE = (1280, 2100)
 PAGES: dict[str, tuple[str, int, int]] = {
     "tokens": ("theme/TokensPage.qml", *TALL_SIZE),
     "gallery": ("GalleryPage.qml", 1280, 3260),
+    # 流程壳（唯一的 Window）。默认停在加载页；想看别的屏用
+    # `--set page=welcome`（页面名见 qml/Main.qml 的 pageFiles）。
+    "flow": ("Main.qml", *DEFAULT_SIZE),
     "loading": ("pages/LoadingPage.qml", *DEFAULT_SIZE),
     "welcome": ("pages/WelcomePage.qml", *DEFAULT_SIZE),
+    "advanced": ("pages/AdvancedPage.qml", *DEFAULT_SIZE),
     "language": ("pages/LanguagePage.qml", *DEFAULT_SIZE),
     "keyboard": ("pages/KeyboardPage.qml", *DEFAULT_SIZE),
     "timezone": ("pages/TimezonePage.qml", *DEFAULT_SIZE),
-    "plan": ("pages/PlanPage.qml", *DEFAULT_SIZE),
-    "network": ("pages/NetworkPage.qml", *DEFAULT_SIZE),
-    "partition": ("pages/PartitionPage.qml", *DEFAULT_SIZE),
-    "disk": ("pages/DiskPage.qml", *DEFAULT_SIZE),
-    "erase-confirm": ("pages/EraseConfirmPage.qml", *DEFAULT_SIZE),
     "hostname": ("pages/HostnamePage.qml", *DEFAULT_SIZE),
+    "network": ("pages/NetworkPage.qml", *DEFAULT_SIZE),
+    "disk": ("pages/DiskPage.qml", *DEFAULT_SIZE),
+    "partition": ("pages/PartitionPage.qml", *DEFAULT_SIZE),
+    "erase-confirm": ("pages/EraseConfirmPage.qml", *DEFAULT_SIZE),
     "account": ("pages/AccountPage.qml", *DEFAULT_SIZE),
+    "install-details": ("pages/InstallDetailsPage.qml", *DEFAULT_SIZE),
     "install": ("pages/InstallPage.qml", *DEFAULT_SIZE),
     "install-failed": ("pages/InstallFailedPage.qml", *DEFAULT_SIZE),
     "done": ("pages/DonePage.qml", *DEFAULT_SIZE),
-    "install-details": ("pages/InstallDetailsPage.qml", *DEFAULT_SIZE),
-    "advanced": ("pages/AdvancedPanel.qml", *DEFAULT_SIZE),
 }
 
 
@@ -199,9 +201,25 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(name)
             continue
 
-        win = roots[0]
-        win.setWidth(width)
-        win.setHeight(height)
+        item = roots[0]
+
+        # 页面根有两类（2026-09-25 之后）：
+        #   · **Item** —— 绝大多数页面（PageShell 的根）。Item 自己不是窗口，
+        #     取不了图，所以现造一个 QQuickWindow 把它装进去、按需要的尺寸铺开；
+        #   · **Window** —— 加载页、`Main.qml`（流程壳）这些自己就是窗口的。
+        # 两种都在这里归一到 `win`（真正被 grabWindow 的那个窗口）。
+        if isinstance(item, QQuickWindow):
+            win = item
+            win.setWidth(width)
+            win.setHeight(height)
+        else:
+            win = QQuickWindow()
+            win.setWidth(width)
+            win.setHeight(height)
+            item.setParentItem(win.contentItem())
+            item.setWidth(width)
+            item.setHeight(height)
+            win.show()
 
         # 属性注入要在**取图之前**设完：这些是「点过按钮才会出现」的状态
         # （错误态、选中态），没有它就只能靠改默认值取图，取完还得改回来。
@@ -209,17 +227,12 @@ def main(argv: list[str] | None = None) -> int:
             prop, sep, raw = assignment.partition("=")
             if not sep or not prop:
                 raise SystemExit(f"--set 要写成 属性=值：{assignment!r}")
-            if not win.setProperty(prop, coerce(raw)):
+            if not item.setProperty(prop, coerce(raw)):
                 print(f"[{name}] 根对象上没有属性 {prop!r}", file=sys.stderr)
 
         # 一个页面一个引擎：上一页的组件缓存不会串味。
-        # engine 必须活到取完图 —— 用闭包持有它，别用局部变量名绕。
-        def save(w=win, n=name, e=engine) -> None:
-            if not isinstance(w, QQuickWindow):
-                print(f"[{n}] 根对象不是 QQuickWindow，取不了图", file=sys.stderr)
-                failures.append(n)
-                app.quit()
-                return
+        # engine 与（可能现造的）窗口都必须活到取完图 —— 用闭包持有它们。
+        def save(w=win, it=item, n=name, e=engine) -> None:
             image = w.grabWindow()
             path = out_dir / f"{n}.png"
             if not image.save(str(path)):
@@ -227,11 +240,11 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(n)
             else:
                 print(f"  {n:<14} {image.width()}×{image.height()}  {path}")
-                if args.measure and hasattr(w, "contentHeight"):
+                if args.measure and hasattr(it, "contentHeight"):
                     # 量的是**排完版之后**的值，所以必须在 settle 之后调
                     # （抛光阶段直接读会停在很早的一次测量上，PageShell 文件头有记录）
-                    content = w.contentHeight()
-                    avail = w.property("contentAvailableHeight")
+                    content = it.contentHeight()
+                    avail = it.property("contentAvailableHeight")
                     verdict = "需要滚动" if content > avail else "一屏放得下"
                     print(f"  {'':<14} 内容高 {content:.0f} / 可用高 {avail:.0f} → {verdict}")
             app.quit()

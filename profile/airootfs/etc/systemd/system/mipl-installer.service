@@ -2,12 +2,20 @@
 Description=MipLinux 安装器界面
 After=getty@tty1.service
 Conflicts=getty@tty1.service
+# Conflicts= 把 tty1 上的 autologin getty 停掉，而 getty@.service 的 Restart=always
+# 对「显式停止」不生效 —— 没人把它拉回来，安装器一走 tty1 就是空白，只能手动切 VT
+# （2026-09-25 实测：kill 之后 unit inactive、getty@tty1 inactive、/dev/vcs1 全空）。
+# tty1 是 Live 唯一的维护入口，所以走的每一条路都得有人兜底。
+OnSuccess=mipl-installer-tty.service
+OnFailure=mipl-installer-tty.service
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/mipl-kiosk
-Restart=on-failure
-RestartSec=3
+# 不写 Restart=：一是 systemctl kill 发的是 SIGTERM，在 systemd 里算干净退出，
+# Restart=on-failure 对它根本不触发（2026-09-25 实测 NRestarts=0）；
+# 二是「崩了就自动再来一次」和「崩了就把 tty1 交回用户」互斥 —— 实测两者同时配上
+# 会互相抢作业。M0 的验收要的是后者。要重开界面：systemctl start mipl-installer。
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes

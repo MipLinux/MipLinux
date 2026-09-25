@@ -52,8 +52,22 @@ class TestLocales(unittest.TestCase):
         self.assertIn("#ja_JP.UTF-8 UTF-8", out)
         self.assertTrue(out.endswith("\n"))
 
-    def test_locale_conf_sets_lang(self):
-        self.assertEqual(configure.locale_conf("zh_CN.UTF-8"), "LANG=zh_CN.UTF-8\n")
+    def test_locale_conf_matches_live_factory_settings(self):
+        # 与 profile/airootfs/etc/locale.conf 同一份真相（LANG + LANGUAGE）
+        self.assertEqual(
+            configure.locale_conf("zh_CN.UTF-8"),
+            "LANG=zh_CN.UTF-8\nLANGUAGE=zh_CN:zh:en_US:en\n",
+        )
+
+    def test_locale_conf_other_locales_have_no_language(self):
+        self.assertEqual(configure.locale_conf("en_US.UTF-8"), "LANG=en_US.UTF-8\n")
+
+    def test_environment_matches_live_factory_settings(self):
+        # 与 profile/airootfs/etc/environment 同一份真相（fcitx5 的三个变量）
+        self.assertEqual(
+            configure.environment_text(),
+            "GTK_IM_MODULE=fcitx\nQT_IM_MODULE=fcitx\nXMODIFIERS=@im=fcitx\n",
+        )
 
 
 class TestUserAndHost(unittest.TestCase):
@@ -89,7 +103,10 @@ class TestStaticFiles(unittest.TestCase):
             configure.write_static_files(runner, cfg, ROOT_UUID, ESP_UUID)
 
             self.assertIn(f"UUID={ROOT_UUID}", (Path(tmp) / "etc/fstab").read_text(encoding="utf-8"))
-            self.assertEqual((Path(tmp) / "etc/locale.conf").read_text(encoding="utf-8"), "LANG=zh_CN.UTF-8\n")
+            self.assertEqual((Path(tmp) / "etc/locale.conf").read_text(encoding="utf-8"),
+                             configure.locale_conf("zh_CN.UTF-8"))
+            self.assertEqual((Path(tmp) / "etc/environment").read_text(encoding="utf-8"),
+                             configure.environment_text())
             self.assertEqual((Path(tmp) / "etc/hostname").read_text(encoding="utf-8"), "mipl\n")
             self.assertIn("zh_CN.UTF-8 UTF-8", (Path(tmp) / "etc/locale.gen").read_text(encoding="utf-8"))
             self.assertEqual((Path(tmp) / "etc/sudoers.d/10-wheel").read_text(encoding="utf-8"),
@@ -103,6 +120,54 @@ class TestStaticFiles(unittest.TestCase):
             with self.assertRaises(InstallerError) as ctx:
                 configure.write_static_files(runner, TargetConfig(target=tmp), ROOT_UUID, ESP_UUID)
             self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+
+
+class TestFontsConf(unittest.TestCase):
+    FALLBACK = """<?xml version="1.0"?>\n<fontconfig>\n</fontconfig>\n"""
+
+    def test_copies_from_running_system(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            (Path(src) / "local.conf").write_text(self.FALLBACK, encoding="utf-8")
+            cfg = TargetConfig(target=dst, fonts_conf=str(Path(src) / "local.conf"))
+            configure.copy_fonts_conf(FakeRunner(), cfg)
+            self.assertEqual((Path(dst) / "etc/fonts/local.conf").read_text(encoding="utf-8"),
+                             self.FALLBACK)
+
+    def test_missing_source_is_an_error(self):
+        with tempfile.TemporaryDirectory() as dst:
+            with self.assertRaises(InstallerError) as ctx:
+                configure.copy_fonts_conf(
+                    FakeRunner(), TargetConfig(target=dst, fonts_conf="/nonexistent/local.conf"))
+            self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+
+    def test_missing_source_tolerated_in_dry_run(self):
+        # 宿主排练机上没有 Live 的出厂设置 —— dry-run 容忍并说出来，真跑才硬失败
+        with tempfile.TemporaryDirectory() as dst:
+            configure.copy_fonts_conf(
+                FakeRunner(dry_run=True),
+                TargetConfig(target=dst, fonts_conf="/nonexistent/local.conf"))
+
+
+class TestReflectorGuard(unittest.TestCase):
+    PASSWD_OK = {"passwd -S mipl": "mipl P 2026-09-22 0 99999 7 -1"}
+
+    def test_guard_lists_disable_only_when_present(self):
+        self.assertEqual(configure.reflector_guard(True),
+                         ["systemctl", "disable", "reflector.timer", "reflector.service"])
+        self.assertEqual(configure.reflector_guard(False), [])
+
+    def test_target_has_reflector_detects_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(configure.target_has_reflector(tmp))
+            unit = Path(tmp) / "usr/lib/systemd/system/reflector.timer"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("", encoding="utf-8")
+            self.assertTrue(configure.target_has_reflector(tmp))
+
+    def test_run_in_chroot_without_reflector_adds_no_command(self):
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
+        self.assertTrue(all("reflector" not in cmd for cmd in runner.commands()), runner.commands())
 
 
 class TestChrootSteps(unittest.TestCase):

@@ -162,9 +162,10 @@ class TestReflectorGuard(unittest.TestCase):
             self.assertTrue(configure.target_has_reflector(tmp))
 
     def test_run_in_chroot_without_reflector_adds_no_command(self):
-        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
-        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
-        self.assertTrue(all("reflector" not in cmd for cmd in runner.commands()), runner.commands())
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
+            self.assertTrue(all("reflector" not in cmd for cmd in runner.commands()), runner.commands())
 
 
 class TestChrootSteps(unittest.TestCase):

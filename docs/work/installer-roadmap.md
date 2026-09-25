@@ -85,10 +85,10 @@ installer/
 
 - 建 `installer/`（§3 的布局）与入口 `frontend/mipl-installer`
 - Live 包清单加 `networkmanager`、`cage`、`qt6-wayland`、`pyside6`、`python-pyparted`
-- `airootfs`：kiosk unit（`cage` + 安装器，`Restart=on-failure`）、NetworkManager 的无 GUI 配置；`getty` autologin **保留为兜底**
+- `airootfs`：kiosk unit（`cage` + 安装器）＋**把它走掉之后的 tty1 交回 `getty` 的兜底单元**（`mipl-installer.service` 的 `OnSuccess=` / `OnFailure=` → `mipl-installer-tty.service`；**不自动重启**安装器 —— 崩了不该在残骸上接着装，理由见 [archive](../archive/2026-09-25-tty1落不回去.md)）、NetworkManager 的无 GUI 配置；`getty` autologin **保留为兜底**
 - `baseline-build.sh` 把 `installer/` 拷进 airootfs；`mipl.sh` 加 `installer` 子命令（建盘 + 启动 + 串口日志落 `out/`）
 
-**验收：** 开机看到安装器窗口；`systemctl kill` 掉安装器后能落回 root TTY；`journalctl -u` 有日志。
+**验收：** 开机看到安装器窗口；`systemctl kill` / `stop` / 崩溃之后**自动**落回 root TTY（不需要切 tty）；`journalctl -u` 有日志。
 **产出：** `docs/work/tech/04-安装逻辑与实测.md`（开篇先记启动链与渲染兜底）
 
 ### M1 · 逻辑闭环（无界面，最高优先）
@@ -160,7 +160,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续） |
 | `pacman-key` 没初始化 | 检查点 6 会暴露 —— M1 的 `configure.py` 必须做 `--init` / `--populate` |
 | `reflector` 覆盖 mirrorlist | 装后系统不启用它的 timer（#23 已经踩过） |
-| 安装器崩溃 | `Restart=on-failure` + `getty` 兜底；日志看 `journalctl -u mipl-installer` |
+| 安装器崩溃 | `OnFailure=` 拉起 `mipl-installer-tty.service`，把 tty1 交回 `getty`（**不自动重启**安装器）；日志看 `journalctl -u mipl-installer` 与 `journalctl -u mipl-installer-tty` |
 | QEMU 无 GPU，Qt6 起不来 | `WLR_RENDERER=pixman` 软件渲染（M0 先验） |
 | 中文 SSID / 密码 | `nmcli` 走 UTF-8；界面 CJK 字体已在 Live 清单里 |
 | 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次 |

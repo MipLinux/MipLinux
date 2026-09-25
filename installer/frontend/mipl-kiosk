@@ -15,7 +15,8 @@ fi
 #   No backend was able to open a seat → Unable to create seat
 #   → [cage] Unable to create the wlroots backend（每次都在 0.000 秒就死）
 # seatd 没起，而 logind 那条要求调用方有登录会话 —— systemd 服务没有，
-# 所以每一次尝试都必然失败、由 Restart=on-failure 反复重来。
+# 所以每一次尝试都必然失败（当时靠 Restart=on-failure 反复重来，那条已经去掉，
+# 见 mipl-installer.service 的注释）。
 #
 # seatd-launch 就是为这个场景准备的（man seatd-launch）：它起一个专用 seatd、
 # **等它就绪**，再把命令跑起来（设好 SEATD_SOCK，命令结束就收掉 seatd）。
@@ -23,4 +24,18 @@ fi
 #
 # 代价：seatd 成了硬依赖。它在 Live 里由 wlroots0.20 间接拉进来（cage 的依赖），
 # 不用往 packages.x86_64 里加；但如果以后有人把 seatd 裁掉，这里会立刻起不来。
+#
+# seatd-launch 的 socket 路径**写死** /run/seatd.sock（2026-09-25 实测：SEATD_SOCK
+# 环境变量对它无效，它也没有 -s 之类的选项）。它只在子进程正常结束时才收掉 socket ——
+# 被 systemd SIGTERM 掉（systemctl stop / kill）就留下一个残留的 socket，下一次 seatd
+# 直接拒绝启动：
+#   Socket file found at socket path /run/seatd.sock, refusing to start
+#   seatd exited prematurely   →   status=1/FAILURE
+# 于是「兜底之后用 systemctl start mipl-installer 把界面叫回来」这条路永远失败。
+# 启动前清掉「没人监听」的那份：干净退出根本不会留下它，fuser 认不出就是残留
+# （实测残留 → 退出码 1；活着的 seatd → 0）。
+if [[ -S /run/seatd.sock ]] && ! fuser -s /run/seatd.sock 2>/dev/null; then
+      rm -f /run/seatd.sock
+fi
+
 exec /usr/bin/seatd-launch -- /usr/bin/cage -- /usr/local/bin/mipl-installer

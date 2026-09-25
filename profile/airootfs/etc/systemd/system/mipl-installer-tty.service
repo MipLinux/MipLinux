@@ -1,0 +1,19 @@
+[Unit]
+Description=MipLinux 安装器兜底：把 tty1 交回 root
+
+# 由 mipl-installer.service 的 OnSuccess= / OnFailure= 拉起，只有那一个调用者。
+
+[Service]
+Type=oneshot
+
+# 关机/重启时不抢 tty1 —— 那时安装器同样会 inactive，本单元会被拉起来，
+# 而 tty1 马上就要跟着系统一起熄掉，抢它只会拖长关机时间。
+ExecCondition=/bin/sh -c 'test "$(systemctl is-system-running)" != stopping'
+
+# 为什么要等半秒再看一眼：systemctl restart 也会触发本单元（重启的前一半就是停止），
+# 而那一刻安装器还没回到 active。若不等，两个东西会同时占着 tty1 抢键盘输入
+# —— 2026-09-25 在用户级 systemd 上实测过这个现象。
+# 连查 5 次（2.5 秒）都没等到它 active，才认为安装器真的走了，把 getty 拉回来。
+# 注意 ExecStart 里不能出现 % —— systemd 会把 %s / %n 这类当 specifier 展开
+# （实测 %s 变成了调用者的 shell 路径），$( ) 才会原样交给 sh。
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5; do sleep 0.5; systemctl is-active --quiet mipl-installer.service && exit 0; done; exec systemctl start getty@tty1.service'

@@ -2,8 +2,9 @@
 
 这是整条链里**唯一会摧毁数据**的一段，所以它被拆成两半：
 
-* 纯函数（`plan_layout`、`kernel_partitions`、`mount_sources`、`assert_usable`）
-  负责「算布局」和「该不该动手」，单测全覆盖，不用 root、不碰盘；
+* 纯函数（`plan_layout`、`kernel_partitions`、`mount_sources`、`assert_usable`、
+  `detect_disks`、`list_candidates`）负责「算布局」「该不该动手」与「有哪些盘」，
+  单测全覆盖，不用 root、不碰盘；
 * 副作用（`wipe_and_partition`、`make_filesystems`、`mount_target`）只做
   「把算好的东西落到盘上」，命令一条条经 `Runner`。
 
@@ -21,7 +22,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import util
@@ -94,6 +95,69 @@ def _align_up(value: int, align: int) -> int:
 
 def _align_down(value: int, align: int) -> int:
     return value // align * align
+
+
+def fits(size_bytes: int) -> bool:
+    """这块盘装得下吗？判据与 `plan_layout` **共用一份**，不另立一套阈值 ——
+    两套阈值意味着「列表里可选、装的时候被拒」这类自相矛盾。"""
+    try:
+        plan_layout(size_bytes)
+    except InstallerError:
+        return False
+    return True
+
+
+# ── 候选盘：给界面选盘用 ──────────────────────────────────────────────
+#: 一定不是「可安装的整块盘」的设备名前缀：光驱 / 软驱 / 回环 / 内存盘 /
+#: device-mapper / 软 RAID。**光靠前缀不够**，还有第二条判据（见 `detect_disks`）。
+NOT_A_DISK_PREFIXES = ("sr", "fd", "loop", "ram", "zram", "dm-", "md")
+
+
+@dataclass(frozen=True)
+class Partition:
+    """盘上的一个分区。起点与容量都是**字节**，来源是 sysfs。"""
+
+    device: str
+    number: int
+    start: int
+    size: int
+    #: 文件系统类型与卷标，来自 `blkid` 读超级块（**不挂载**）。读不到就是 None。
+    fs_type: str | None = None
+    label: str | None = None
+    #: 是不是 EFI 系统分区 —— 按 GPT 的类型 GUID 认，不是猜「第一个分区」。
+    esp: bool = False
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """一块候选盘，以及**能确证的事实**。
+
+    这里只放事实，不放结论：`fs_type="ntfs"` 就说 ntfs，**不说「那是 Windows」**；
+    `table_type="dos"` 就说 dos，不说「像是启动盘」。界面上的每个字都必须能指出
+    出处（见 frontend 的 `DiskPage.qml` 文件头）—— 推断出来的话由谁担保？
+    """
+
+    path: str
+    model: str
+    size: int
+    removable: bool
+    in_use: bool
+    #: "gpt" / "dos" / None（读不到就老实说不知道）
+    table_type: str | None = None
+    partitions: tuple[Partition, ...] = ()
+
+    @property
+    def too_small(self) -> bool:
+        return not fits(self.size)
+
+    @property
+    def usable(self) -> bool:
+        """能不能当安装目标。
+
+        **这不是动手时的守卫** —— 真正的守卫是 `assert_usable`（装的那一刻再查
+        一遍，见 cli/pipeline）。这里只负责把盘分成「可选 / 不可选」两堆。
+        """
+        return not self.in_use and not self.too_small
 
 
 # ── 该不该动手 ────────────────────────────────────────────────────────
@@ -201,6 +265,185 @@ def kernel_partitions(device: str, sysfs_root: str = "/sys") -> list[tuple[str, 
 
     found.sort(key=lambda item: item[3])
     return [(path, major, minor) for path, major, minor, _ in found]
+
+
+# ── 候选盘：从 sysfs 枚举（界面选盘页的数据源）──────────────────────────
+def _sysfs_read(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def detect_disks(sysfs_root: str = "/sys", disk_root: str = "/dev") -> list[str]:
+    """sysfs 里的整块盘路径，按名字排序。
+
+    **不看 `lsblk` 的列表。** 理由与 `kernel_partitions` 同一条（它会把内核没收下
+    的分区也列出来），而这里还有第二个理由：`lsblk` 默认把 `zram0`、`loop0`
+    当盘列出来，照着它建候选表，用户会在安装器里看见一堆装不进去的「盘」。
+
+    两条判据，缺一不可：
+      1. `/sys/block/<name>/device` 存在 —— zram / loop / dm / md 没有它；
+      2. 名字不以 `NOT_A_DISK_PREFIXES` 开头 —— 光驱（sr）与软驱**有** `device`，
+         但装不进去，也不该出现在候选表里。
+
+    `sysfs_root` 可注入：测试里搭一棵假目录就能验，不需要真盘、不需要 root。
+    """
+    base = Path(sysfs_root) / "block"
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        return []
+
+    found: list[str] = []
+    for entry in entries:
+        name = entry.name
+        if name.startswith(NOT_A_DISK_PREFIXES):
+            continue
+        if not (entry / "device").exists():
+            continue
+        size = _sysfs_read(entry / "size")
+        if size is None or size == "0":
+            continue
+        found.append(f"{disk_root}/{name}")
+    return found
+
+
+def model_of(device: str, sysfs_root: str = "/sys") -> str:
+    """盘的型号。读不到就返回空串 —— **不编一个**。
+
+    virtio-blk（QEMU 的 `if=virtio` 就是它）在 sysfs 里没有 `model`，这是正常的；
+    界面那边对空型号有降级显示。这里有啥说啥，别拿设备名冒充型号。
+    """
+    base = Path(sysfs_root) / "block" / os.path.basename(os.path.realpath(device))
+    for attr in ("model", "vendor"):
+        value = _sysfs_read(base / "device" / attr)
+        if value:
+            return " ".join(value.split())
+    return ""
+
+
+#: GPT 里「EFI 系统分区」的类型 GUID。`blkid` 原样小写给出。
+ESP_TYPE_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+
+def parse_blkid_export(text: str) -> dict[str, str]:
+    """`blkid -o export` 的输出 → 字典。认不出的行直接忽略，不猜。"""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            out[key.strip()] = value.strip()
+    return out
+
+
+def probe(runner: Runner | None, device: str) -> dict[str, str]:
+    """读一个块设备的超级块元数据（`blkid -p`：**不挂载、不写盘**）。
+
+    读不到就返回空字典 —— 非 root（开发机上跑测试）与不认识的表都走到这里。
+    这一层同样只给事实：`TYPE=ntfs` 就说 ntfs，不说它是谁的盘。
+    """
+    if runner is None or getattr(runner, "dry_run", False):
+        return {}
+    text = runner.run(["blkid", "-p", "-o", "export", device], capture=True, check=False)
+    return parse_blkid_export(text or "")
+
+
+def _blkid_facts(runner: Runner | None, device: str) -> tuple[str | None, str | None, bool]:
+    """一个分区的（文件系统类型, 卷标, 是不是 ESP）。读不到就是 (None, None, False)。"""
+    try:
+        facts = probe(runner, device)
+    except InstallerError:
+        # blkid 不在 / 读不了设备：退化成「只知道容量」，不把整页拖崩
+        return None, None, False
+    esp = facts.get("PART_ENTRY_TYPE", "").lower() == ESP_TYPE_GUID
+    return facts.get("TYPE") or None, facts.get("LABEL") or None, esp
+
+
+def _table_type(runner: Runner | None, device: str) -> str | None:
+    """分区表类型（gpt / dos）。读不到就说不知道，**不按盘大小猜**。"""
+    try:
+        return probe(runner, device).get("PTTYPE") or None
+    except InstallerError:
+        return None
+
+
+def _read_partition(entry: Path, disk_root: str) -> Partition | None:
+    """一个分区目录 → `Partition`。缺字段或不是数字就当没这个分区。"""
+    number = _sysfs_read(entry / "partition")
+    start = _sysfs_read(entry / "start")
+    size = _sysfs_read(entry / "size")
+    if number is None or start is None or size is None:
+        return None
+    try:
+        return Partition(
+            device=f"{disk_root}/{entry.name}",
+            number=int(number),
+            # sysfs 的 start / size 一律是 **512 字节扇区**（与逻辑块大小无关）
+            start=int(start) * 512,
+            size=int(size) * 512,
+        )
+    except ValueError:
+        return None
+
+
+def inspect(
+    device: str,
+    *,
+    sysfs_root: str = "/sys",
+    sources: set[str] | None = None,
+    runner: Runner | None = None,
+) -> Candidate:
+    """把一块盘读成 `Candidate`：判据全在 sysfs，`blkid` 只补文件系统那两列。"""
+    name = os.path.basename(os.path.realpath(device))
+    base = Path(sysfs_root) / "block" / name
+    if sources is None:
+        sources = mount_sources(util.read_text("/proc/self/mountinfo"))
+
+    disk_root = os.path.dirname(device.rstrip("/")) or "/dev"
+
+    partitions: list[Partition] = []
+    try:
+        children = sorted(base.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        part = _read_partition(child, disk_root)
+        if part is None:
+            continue
+        fs_type, label, esp = _blkid_facts(runner, part.device)
+        partitions.append(replace(part, fs_type=fs_type, label=label, esp=esp))
+    partitions.sort(key=lambda p: p.number)
+
+    return Candidate(
+        path=device,
+        model=model_of(device, sysfs_root=sysfs_root),
+        size=int(_sysfs_read(base / "size") or 0) * 512,
+        removable=(_sysfs_read(base / "removable") or "0") == "1",
+        in_use=any(same_device(s, device) for s in sources),
+        table_type=_table_type(runner, device),
+        partitions=tuple(partitions),
+    )
+
+
+def list_candidates(
+    *,
+    sysfs_root: str = "/sys",
+    disk_root: str = "/dev",
+    sources: set[str] | None = None,
+    runner: Runner | None = None,
+) -> list[Candidate]:
+    """选盘页的数据源：枚举所有**整块盘**，每块附上能确证的事实。
+
+    `runner` 给了就顺手用 `blkid` 补文件系统类型与卷标（Live 里是 root，读得到）；
+    不给就只报 sysfs 那几列 —— 开发机上跑得动，不必是 root。
+    """
+    if sources is None:
+        sources = mount_sources(util.read_text("/proc/self/mountinfo"))
+    return [
+        inspect(device, sysfs_root=sysfs_root, sources=sources, runner=runner)
+        for device in detect_disks(sysfs_root=sysfs_root, disk_root=disk_root)
+    ]
 
 
 def _ensure_node(runner: Runner, path: str, major: int, minor: int) -> bool:

@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -314,17 +315,29 @@ def model_of(device: str, sysfs_root: str = "/sys") -> str:
 
     virtio-blk（QEMU 的 `if=virtio` 就是它）在 sysfs 里没有 `model`，这是正常的；
     界面那边对空型号有降级显示。这里有啥说啥，别拿设备名冒充型号。
+
+    **但 PCI 的 vendor id 不算型号。** virtio 盘的 `device/vendor` 是 `0x1af4`
+    （红帽的 PCI 厂商号），实测它会一路显示到磁盘页的型号那一行 —— 用户看到
+    「0x1af4」学不到任何东西，比空着更糟。那种十六进制形式直接当读不到。
     """
     base = Path(sysfs_root) / "block" / os.path.basename(os.path.realpath(device))
     for attr in ("model", "vendor"):
         value = _sysfs_read(base / "device" / attr)
-        if value:
-            return " ".join(value.split())
+        if not value:
+            continue
+        value = " ".join(value.split())
+        if PCI_ID_RE.fullmatch(value):
+            continue
+        return value
     return ""
 
 
 #: GPT 里「EFI 系统分区」的类型 GUID。`blkid` 原样小写给出。
 ESP_TYPE_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+#: PCI 厂商 / 设备号的写法（`0x1af4`）。virtio 盘的 `device/vendor` 就是这个，
+#: 它不是型号 —— 详见 `model_of`。
+PCI_ID_RE = re.compile(r"0x[0-9a-fA-F]+")
 
 
 def parse_blkid_export(text: str) -> dict[str, str]:

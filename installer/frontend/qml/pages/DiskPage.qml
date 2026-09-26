@@ -188,10 +188,35 @@ PageShell {
     property int selectedIndex: -1
     readonly property var disk: selectedIndex >= 0 ? candidates[selectedIndex] : null
 
-    Component.onCompleted: {
-        if (autoSelected)
-            selectedIndex = candidates.indexOf(usable[0]);
+    /// 可用（可选）盘的**序号**。现从 `candidates` 数出来，不去读 `usable` /
+    /// `autoSelected` 那两个绑定。
+    ///
+    /// 为什么不读绑定：`candidates` 刚被赋值的那一刻，派生绑定的求值时机**靠不住**。
+    /// 实测 `onCandidatesChanged` 里读到的 `usable` 还是上一份数据的值，于是
+    /// `candidates.indexOf(usable[0])` 返回 -1 —— 表现是「只有一块盘的机器上圆圈
+    /// 是空的、主按钮灰着」，而 `autoSelected` 事后查又是 true。这种「查的时候对、
+    /// 用的时候错」最难查，所以在函数里同步数一遍。
+    function usableIndices() {
+        var out = [];
+        for (var i = 0; i < candidates.length; i++) {
+            if (candidates[i].selectable)
+                out.push(i);
+        }
+        return out;
     }
+
+    function reselect() {
+        // 原来选中的那一条还有效就别动它（返回再进来时不该丢掉用户的选择）
+        if (selectedIndex >= 0 && selectedIndex < candidates.length
+                && candidates[selectedIndex].selectable)
+            return;
+        var indices = usableIndices();
+        selectedIndex = indices.length === 1 ? indices[0] : -1;
+    }
+
+    onCandidatesChanged: page.reselect()
+
+    Component.onCompleted: page.reselect()
 
     // ── 列表的排版预算（与语言 / 键盘 / 时区三页同一套算法）──────────────
     /// 一行 = 设备行 24 + 间距 6 + 型号行 18 + 间距 6 + 分区条 12 + 间距 6

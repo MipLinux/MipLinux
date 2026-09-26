@@ -260,6 +260,17 @@ def main(argv: list[str] | None = None) -> int:
     target = usable[0]["path"]
     print(f"       用第一块可选的盘排练：{target}")
 
+    # **自动选中真的生效了吗。** 这一条是实测踩出来的：`wire()` 跑在 Loader 的
+    # `onLoaded` 里，晚于页面的 `Component.onCompleted` —— 页面「完成」时看到的还是
+    # 自己那份默认候选表，于是自动选中从没按真数据算过。表现是：只有一块盘的机器上
+    # 圆圈是空的、主按钮灰着，**流程直接走不下去**。只断言「候选表来自后端」抓不到它。
+    if len(usable) == 1:
+        selected = value("selectedIndex")
+        check(isinstance(selected, int) and selected >= 0 and value("disk") is not None,
+              f"恰好一块可用盘时**自动选中**（selectedIndex={selected}）")
+        check(value("primaryEnabled") is True,
+              "自动选中之后主按钮是启用的（不是灰着等人猜）")
+
     # ── 4. 分区预告来自后端 `plan_layout` ──────────────────────────────
     call(f"chosen('{target}')")
     advance("partition", "选盘 → 磁盘分区")

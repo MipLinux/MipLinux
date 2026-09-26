@@ -41,9 +41,11 @@ def build_sysfs(root: str, *, disk_partitions: list[tuple[str, str, str]] | None
     """
     block = Path(root) / "block"
 
-    # /dev/vda：virtio-blk。有 device 链接，**没有 model 文件**（这是它的真实形状）
+    # /dev/vda：virtio-blk。有 device 链接，**没有 model 文件**；
+    # `vendor` 是红的 PCI 厂商号 `0x1af4`（真 ISO 里实测到的就是它）
     vda = block / "vda"
     (vda / "device").mkdir(parents=True)
+    (vda / "device" / "vendor").write_text("0x1af4\n", encoding="utf-8")
     (vda / "size").write_text(str(40 * GiB // 512) + "\n", encoding="utf-8")
     (vda / "removable").write_text("0\n", encoding="utf-8")
     for name, start, size in disk_partitions or []:
@@ -93,10 +95,14 @@ class TestQemuLiveShape(unittest.TestCase):
         self.assertEqual(record["badges"], [], "空盘没有任何要提醒的状态")
 
     def test_virtio_blk_has_no_model_and_we_do_not_invent_one(self):
-        """virtio-blk 的 sysfs 里没有 model —— 界面显示「（型号未报告）」。
+        """virtio-blk 的 sysfs 里没有 model，`vendor` 是 PCI 厂商号 `0x1af4`。
 
-        **这是有意的**，不是漏了：界面上每个字都要能指出出处（`DiskPage.qml` 文件头）。
-        真机上（NVMe / SATA / USB）型号都在，只有 QEMU 这种虚拟盘没有。
+        界面显示「（型号未报告）」——**这是有意的**，不是漏了：界面上每个字都要能
+        指出出处（`DiskPage.qml` 文件头）。真机上（NVMe / SATA / USB）型号都在，
+        只有 QEMU 这种虚拟盘没有。
+
+        **这条是实测补上的**：真 ISO 里那一行曾经显示成 `0x1af4`（PCI 厂商号被
+        当成型号读出来了）—— 用户看到它学不到任何东西，比空着更糟。
         """
         with tempfile.TemporaryDirectory() as tmp:
             build_sysfs(tmp)

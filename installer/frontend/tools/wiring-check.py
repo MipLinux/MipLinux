@@ -98,6 +98,34 @@ def check_iso_layout(check) -> None:
                 print(f"       │ {line}")
 
 
+def check_rehearsal_switch(check, backend_cls, install_cls) -> None:
+    """排练开关**只有测试能打开** —— 单独验，因为反了的后果最严重。
+
+    流程壳从 `MipRehearsal` 这个上下文属性读它，而那个属性只有本脚本会挂。
+    要是它解析成 `true` 的那条路走歪了，装出来的就是「假装装完了」：界面一路绿灯、
+    日志漂漂亮亮，重启之后什么都没有 —— 而且现场没有任何东西提示你上当了。
+    所以两个方向都断言：挂了它是 `true`（走 dry-run），**没挂它必须是 `false`**。
+
+    （两个类由调用方传进来：它们在 `main()` 里 import —— 那要等
+    `ensure_backend_on_path()` 先把 `backend/` 挂上 `sys.path`。）
+    """
+    from PySide6.QtCore import QUrl
+    from PySide6.QtQml import QQmlApplicationEngine
+
+    engine = QQmlApplicationEngine()
+    # 故意**不挂** `MipRehearsal` —— 与 Live 的入口（mipl-installer）一致
+    engine.rootContext().setContextProperty("Backend", backend_cls(engine))
+    engine.rootContext().setContextProperty("Install", install_cls(engine))
+    engine.load(QUrl.fromLocalFile(str(MAIN_QML)))
+    roots = engine.rootObjects()
+    check(bool(roots), "排练开关：没有 MipRehearsal 时流程壳照样加载得起来")
+    if roots:
+        check(
+            roots[0].property("rehearsalMode") is False,
+            "排练开关：Live 的形状（不挂 MipRehearsal）→ rehearsalMode = false，真装",
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wiring-check.py", description="前后端接线的端到端烟测")
     parser.add_argument("--step-ms", type=int, default=150, help="每一跳之间让事件循环转多久")
@@ -193,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     # ── 1. 加载页：等**真的**就绪探测 ─────────────────────────────────
     check(root.property("hasBackend") is True, "流程壳认出了 Backend")
     check(root.property("hasInstall") is True, "流程壳认出了 Install")
+    check(root.property("rehearsalMode") is True,
+          "排练开关：挂了 MipRehearsal → rehearsalMode = true（这一轮只打印命令）")
     advance("welcome", "加载页（真探测完）→ 欢迎页")
 
     ready = root.property("readyItems")
@@ -321,6 +351,9 @@ def main(argv: list[str] | None = None) -> int:
     # 放在最后是因为它要起一个子进程；但它验的是**最要命**的那一条 ——
     # 仓库里全绿而构建产物里起不来，正是这个仓库踩过的坑。
     check_iso_layout(check)
+
+    # ── 9. 排练开关的方向：Live 里绝不能是 true ─────────────────────────
+    check_rehearsal_switch(check, Backend, InstallController)
 
     if problems:
         print(f"\n{checks['bad']} 项不过：", file=sys.stderr)

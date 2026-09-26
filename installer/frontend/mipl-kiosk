@@ -54,4 +54,41 @@ fi
 # 这一条不只关乎方便：tty1 是 Live 唯一的维护入口，mipl-installer.service 的
 # 兜底单元（mipl-installer-tty.service）要把 tty1 交回 root —— 切不了 tty 时，
 # 「面挂了还有 tty1」这句话在实机上不成立。
+
+# ── 高分屏缩放（2026-09-26 实机反馈：4K 屏上界面只有屏幕三分之一大）────
+#
+# Qt 在 cage 下拿不到输出的物理尺寸（Wayland 那边没报），所以**不会自己放大**，
+# 而界面是按 1280×800 逻辑像素画的。这里按 DRM 报的首选分辨率挑一档缩放，
+# 让逻辑分辨率落回 1280–1920 之间。可用 MIPL_SCALE 覆盖（例如手动试 1.5）。
+# 只读 /sys —— 不依赖新命令，也不需要图形会话。
+pick_scale() {
+    local best=0 f mode w
+    for f in /sys/class/drm/card*-*/modes; do
+        [[ -r "$f" ]] || continue
+        [[ "$(cat "${f%/modes}/status" 2>/dev/null)" == "connected" ]] || continue
+        mode="$(head -1 "$f" 2>/dev/null)" || continue
+        w="${mode%x*}"
+        [[ "$w" =~ ^[0-9]+$ ]] || continue
+        (( w > best )) && best="$w"
+    done
+    if   (( best >= 3200 )); then echo 2      # 4K：2 倍 → 1920×1080 逻辑
+    elif (( best >= 2400 )); then echo 1.5    # 1440p / 带鱼屏
+    else echo 1
+    fi
+}
+export QT_SCALE_FACTOR="${MIPL_SCALE:-$(pick_scale)}"
+
+# ── 字体预热（2026-09-26 实测）──────────────────────────────────────────
+#
+# Live 的字体元数据在 squashfs 上，fontconfig 的**第一次**扫描实测 18.3 秒
+# （客机里 `time fc-list`：首次 18.34s / 第二次 0.07s —— 钱花在从压缩镜像读
+# 字体元数据，读完就进页缓存）。界面第一帧要画中文，这笔钱就压在**第一帧**上，
+# 表现成更长的黑屏。
+#
+# cage 自己起来也要二十来秒，所以在后台先把它跑掉：不进关键路径，也不阻塞谁。
+# 失败无所谓（字体该能用还能用）：命令不存在、报错，全都吞掉。
+if command -v fc-list >/dev/null 2>&1; then
+      ( fc-list >/dev/null 2>&1 || true ) &
+fi
+
 exec /usr/bin/seatd-launch -- /usr/bin/cage -s -- /usr/local/bin/mipl-installer

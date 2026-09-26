@@ -32,6 +32,12 @@ Window {
 
     width: 1280
     height: 800
+    // **必须全屏**（2026-09-26 实机反馈）：窗口只要是普通 toplevel，Qt 的 Wayland
+    // 插件就会给它画一套客户端装饰（标题栏 + 关闭按钮）—— 而 cage 不是窗口管理器、
+    // 没有服务端装饰可谈。于是安装器带着标题栏出现、还能被关掉，一关就掉回 tty。
+    // 全屏窗口没有装饰，这才是 kiosk 该有的形态（M0 占位窗口当年也是 showFullScreen）。
+    // 取图工具会把它掰回窗口模式再定尺寸，见 tools/shots.py。
+    visibility: Window.FullScreen
     visible: true
     color: Tokens.pageBg
     title: "MipLinux 安装器"
@@ -249,9 +255,11 @@ Window {
 
         } else if (name === "done") {
             item.rebootRequested.connect(function() {
-                // ⚠️ 演示流程不真重启 —— 真接线时这里换成后端的 `systemctl reboot`。
-                // 在开发机上点「立即重启」会把开发机重启，那是不可接受的。
-                Qt.quit();
+                // 真重启（实机反馈：原来只 Qt.quit()，等于把安装器杀掉掉回 tty）。
+                // QML 不自己动手 —— 交给 bridge 的 System 对象（bridge/actions.py）。
+                // `typeof` 守卫：取图与流程烟测不注册 System，那时点它应当安静地什么都不做。
+                if (typeof System !== "undefined")
+                    System.reboot();
             });
 
         } else if (name === "advanced") {

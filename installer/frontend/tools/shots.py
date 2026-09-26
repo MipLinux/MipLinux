@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["QT_QPA_PLATFORM"] = os.environ.get("MIPL_SHOTS_PLATFORM", "offscreen")
 
     from PySide6.QtCore import QTimer, QUrl
-    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtGui import QGuiApplication, QWindow
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuick import QQuickWindow
 
@@ -210,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
         # 两种都在这里归一到 `win`（真正被 grabWindow 的那个窗口）。
         if isinstance(item, QQuickWindow):
             win = item
+            # 真跑时窗口是 kiosk 全屏（`Main.qml` 里 `visibility: Window.FullScreen` ——
+            # 不然 Qt 的 Wayland 插件会自己画标题栏 + 关闭按钮）。取图要**确定性**尺寸，
+            # 所以先掰回窗口模式再定宽高，否则截出来的是这台机器屏幕的尺寸。
+            win.setVisibility(QWindow.Windowed)
             win.setWidth(width)
             win.setHeight(height)
         else:

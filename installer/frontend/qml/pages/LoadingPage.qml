@@ -21,6 +21,18 @@ Item {
     property string message: "正在准备安装环境…"
     property url logoSource: Qt.resolvedUrl("../../assets/mipl-logo-hero.png")
 
+    /// **先出图，后出字**（2026-09-26 实测）：Live 里 fontconfig 的第一次字体扫描
+    /// 要 18 秒（见 `mipl-kiosk` 里的预热注释），而第一帧能不能提交决定了**黑屏什么
+    /// 时候结束**。所以首帧只画 LOGO（不碰字体），下一帧再把文字显出来 ——
+    /// 万一预热没跑完，那 18 秒也发生在「已经有画面」之后，而不是一片黑里。
+    property bool showText: false
+
+    Timer {
+        interval: 50
+        running: true
+        onTriggered: loading.showText = true
+    }
+
     Rectangle {
         anchors.fill: parent
         color: Tokens.pageBg
@@ -52,6 +64,8 @@ Item {
 
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
+            // 首帧不画它（见 showText 的说明）：这一行是**第一处要字体**的东西
+            visible: loading.showText
             text: loading.message
             font: Tokens.body
             color: Tokens.textMuted

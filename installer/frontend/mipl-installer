@@ -5,23 +5,28 @@
 直接 execve 拉起，所以 **shebang 不能省**：没有它内核返回 ENOEXEC，
 systemd 记成 203/EXEC，窗口不会出现（Issue #51）。
 
-做的事只有三件：
+做的事只有四件：
   1. 找自己旁边那份 QML（`qml/Main.qml`）—— 入口是从 `/usr/local/bin` 的软链
      进来的，所以按 `__file__` **解析后的真实路径**定位，不用写死目录；
   2. 注册 Lucide 图标 provider（`image://lucide/…`，见 bridge/icons.py）；
-  3. 起引擎、跑事件循环。
+  3. 把 `bridge/actions.py` 的 `System` 挂给 QML（界面只能「提出请求」，
+     动手的是这一侧 —— 见该文件头）；
+  4. 起引擎、跑事件循环，并在 journal 里留下**几处耗时打点**。
 
-**不含任何逻辑**：流程、状态与安装驱动都在 QML 里（`qml/Main.qml`），
-等接线真后端时这里再加一个 `QtReporter`（见 bridge/README.md）。
+**不含任何流程逻辑**：路由、状态与安装驱动都在 QML 里（`qml/Main.qml`）。
 """
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
+
+#: 进程起点。打点用 —— Live 的「黑屏等很久」要有数才谈得上修（Issue #53）。
+T0 = time.monotonic()
 
 #: 本文件所在目录（软链会被解析到 /usr/local/lib/mipl-installer/frontend/）
 HERE = Path(__file__).resolve().parent
@@ -42,13 +47,37 @@ def main() -> int:
     app = QGuiApplication(sys.argv)
 
     engine = QQmlApplicationEngine()
+
+    from bridge.actions import SystemActions
     from bridge.icons import register_icon_provider
+
     register_icon_provider(engine)
+    # QML 里叫 `System` —— `System.reboot()`（见 bridge/actions.py）
+    actions = SystemActions(app)
+    engine.rootContext().setContextProperty("System", actions)
 
     engine.load(QUrl.fromLocalFile(str(MAIN_QML)))
-    if not engine.rootObjects():
+    roots = engine.rootObjects()
+    if not roots:
         print(f"界面加载失败：{MAIN_QML}", file=sys.stderr)
         return 1
+
+    # ── 耗时打点：这几行进 journal（unit 的 StandardOutput=journal）─────────
+    # 实机「黑屏很久」时 `journalctl -u mipl-installer` 就能看出时间花在哪一段：
+    # 是 Python/Qt 起不来（squashfs 冷读 + QtQuick 插件），还是我们的 QML。
+    print(f"[mipl] 引擎就绪 {time.monotonic() - T0:.2f}s", flush=True)
+
+    shown = {"done": False}
+
+    def on_frame() -> None:
+        if shown["done"]:
+            return
+        shown["done"] = True
+        print(f"[mipl] 首帧上屏 {time.monotonic() - T0:.2f}s", flush=True)
+
+    window = roots[0]
+    if hasattr(window, "frameSwapped"):
+        window.frameSwapped.connect(on_frame)
 
     return app.exec()
 

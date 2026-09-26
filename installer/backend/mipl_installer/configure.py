@@ -66,6 +66,8 @@ class TargetConfig:
     #: 运行系统上的两份输入（Live 里就是出厂设置）
     pacman_conf: str = "/etc/pacman.conf"
     mirrorlist: str = "/etc/pacman.d/mirrorlist"
+    #: 中文字体 fallback 的出厂设置（Live 的 /etc/fonts/local.conf）
+    fonts_conf: str = "/etc/fonts/local.conf"
     #: 语言生成用（locale.gen 里放开的行）
     locales: tuple[str, ...] = field(default=("zh_CN.UTF-8", "en_US.UTF-8"))
 
@@ -94,7 +96,19 @@ def fstab_text(root_uuid: str, esp_uuid: str) -> str:
 
 
 def locale_conf(locale: str) -> str:
-    return f"LANG={locale}\n"
+    # 与 Live 出厂（profile/airootfs/etc/locale.conf）保持同一份真相：LANG + LANGUAGE。
+    # LANGUAGE 是 gettext 的回退链 —— 程序没有中文翻译时退回英文而不是留空。
+    # 只有 zh_CN 才有这条链；其它 locale 不硬塞（一致性指「同一份出厂设置」，不是照抄值）。
+    lines = [f"LANG={locale}"]
+    if locale.startswith("zh_CN"):
+        lines.append("LANGUAGE=zh_CN:zh:en_US:en")
+    return "\n".join(lines) + "\n"
+
+
+def environment_text() -> str:
+    # 与 Live 出厂（profile/airootfs/etc/environment）同一份真相：fcitx5 需要这三个
+    # 变量才会被 GTK / Qt 程序选为输入法模块，没有它们「装了 fcitx5 也打不了中文」。
+    return "GTK_IM_MODULE=fcitx\nQT_IM_MODULE=fcitx\nXMODIFIERS=@im=fcitx\n"
 
 
 def vconsole_conf() -> str:
@@ -189,9 +203,35 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
         write_text(runner, f"{cfg.target}{include}", read_text(str(source)))
 
 
+def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
+    """把运行系统（Live）的字体 fallback 配置复制进目标。
+
+    与 pacman.conf / mirrorlist 同一个哲学：出厂设置在 Live（airootfs），安装器
+    不复制第二份字符串 —— 中文 fallback 只该有一份真相。字体**包**是清单的事
+    （P10 未定），这份配置先就位：等包进来，fallback 立即生效。
+    """
+    source = Path(cfg.fonts_conf)
+    if not source.is_file():
+        if runner.dry_run:
+            # 宿主排练机上没有这份 Live 出厂设置 —— dry-run 只预览命令序列，
+            # 照 write_static_files 对 locale.gen 的同一口径：容忍并说出来。
+            runner.reporter.note(
+                f"dry-run：找不到字体配置 {cfg.fonts_conf}（Live 的出厂设置）—— 跳过复制预览"
+            )
+            return
+        raise InstallerError(
+            f"找不到字体配置：{cfg.fonts_conf}",
+            EXIT_CONFIGURE,
+            hint="默认读运行系统的 /etc/fonts/local.conf —— 这个安装器要在 Live 里跑",
+        )
+    ensure_dir(runner, f"{cfg.target}/etc/fonts")
+    write_text(runner, f"{cfg.target}/etc/fonts/local.conf", read_text(str(source)))
+
+
 def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uuid: str) -> None:
     write_text(runner, f"{cfg.target}/etc/fstab", fstab_text(root_uuid, esp_uuid))
     write_text(runner, f"{cfg.target}/etc/locale.conf", locale_conf(cfg.locale))
+    write_text(runner, f"{cfg.target}/etc/environment", environment_text())
     write_text(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf())
     write_text(runner, f"{cfg.target}/etc/hostname", cfg.hostname + "\n")
     write_text(runner, f"{cfg.target}/etc/hosts", hosts(cfg.hostname))
@@ -243,6 +283,22 @@ def verify_password(runner: Runner, cfg: TargetConfig, user: str) -> str:
     return out
 
 
+def reflector_guard(has_reflector: bool) -> list[str]:
+    """装后系统的 mirrorlist 不能被 reflector 覆盖（#23）。
+
+    reflector 装了就关掉它的 timer / service —— 它一跑，装后系统写好的国内源
+    就被重排/换掉，第一次 `pacman -Syu` 直接断（#23 已经踩过）。现在目标清单
+    里没有 reflector，这条是**防线**：等 M4 的清单把它带进来时自动生效。
+    """
+    if not has_reflector:
+        return []
+    return ["systemctl", "disable", "reflector.timer", "reflector.service"]
+
+
+def target_has_reflector(target: str) -> bool:
+    return Path(f"{target}/usr/lib/systemd/system/reflector.timer").is_file()
+
+
 def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
                   root_password: str | None = None) -> None:
     """必须在目标系统里跑的几条。顺序有讲究，别调换。
@@ -280,6 +336,11 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
     runner.run(chroot_argv(target, ["systemctl", "enable", "NetworkManager"]), exit_code=EXIT_CONFIGURE)
 
+    # 5.5 reflector 守卫（#23）：装了才关，没装就不产生任何命令
+    if target_has_reflector(target):
+        runner.run(chroot_argv(target, reflector_guard(True)), exit_code=EXIT_CONFIGURE)
+        runner.reporter.note("目标里有 reflector，已 disable reflector.timer / reflector.service（#23）")
+
     # 6. initramfs 放最后：它要往 /boot（= ESP）里写内核与 initramfs，
     #    所以必须在 ESP 挂好之后、boot.py 校验之前跑
     runner.run(chroot_argv(target, ["mkinitcpio", "-P"]), exit_code=EXIT_CONFIGURE)
@@ -295,5 +356,6 @@ def configure_system(
     root_password: str | None = None,
 ) -> None:
     copy_pacman_config(runner, cfg)
+    copy_fonts_conf(runner, cfg)
     write_static_files(runner, cfg, root_uuid, esp_uuid)
     run_in_chroot(runner, cfg, password, root_password)

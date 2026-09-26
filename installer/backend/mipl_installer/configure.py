@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import options
 from .util import (
     EXIT_CONFIGURE,
     InstallerError,
@@ -63,6 +64,9 @@ class TargetConfig:
     user: str = "mipl"
     locale: str = "zh_CN.UTF-8"
     timezone: str = "Asia/Shanghai"
+    #: 控制台键盘映射（`/etc/vconsole.conf` 的 `KEYMAP`）。**以前写死 `us`** ——
+    #: 界面里那个键盘页因此是个摆设（Issue #64）。现在它是真参数。
+    keymap: str = "us"
     #: 运行系统上的两份输入（Live 里就是出厂设置）
     pacman_conf: str = "/etc/pacman.conf"
     mirrorlist: str = "/etc/pacman.d/mirrorlist"
@@ -111,10 +115,40 @@ def environment_text() -> str:
     return "GTK_IM_MODULE=fcitx\nQT_IM_MODULE=fcitx\nXMODIFIERS=@im=fcitx\n"
 
 
-def vconsole_conf() -> str:
+def vconsole_conf(keymap: str = "us") -> str:
     # 只有 KEYMAP：字体留给 M3（要么带 terminus-font，要么换 CJK 字体方案），
     # 现在写一个包里没有的字体名，开机前几行就是报错。
-    return "KEYMAP=us\n"
+    # KEYMAP 是参数（Issue #64）：以前写死 us，界面上的键盘页选什么都不生效。
+    return f"KEYMAP={keymap}\n"
+
+
+def locales_to_enable(cfg: TargetConfig) -> tuple[str, ...]:
+    """要在目标 `locale.gen` 里放开的行：**选中的那个 locale 必须在里面**。
+
+    以前这里只放开 `cfg.locales`（默认恰好是 zh_CN / en_US 两行），于是「语言」页
+    选了第三种 locale 时，`LANG` 指向一个从没生成过的 locale —— 装出来的系统
+    每个程序都报 `setlocale` 警告（Issue #63）。`en_US.UTF-8` 始终带上：它是
+    gettext 的回退链末端，缺了它英文回退也没有。
+    """
+    wanted = [cfg.locale, *cfg.locales, "en_US.UTF-8"]
+    seen: list[str] = []
+    for locale in wanted:
+        if locale and locale not in seen:
+            seen.append(locale)
+    return tuple(seen)
+
+
+def has_locale(locale_gen_text: str, locale: str) -> bool:
+    """`locale.gen` 里有没有可放开的那一行（注释或未注释都算）。
+
+    带字符集比较（表里写的是 `zh_CN.UTF-8 UTF-8`），所以按整名匹配 ——
+    `zh_CN.UTF-8` 与 `zh_CN.GB18030` 是两行，不能只看前半个名字。
+    """
+    for line in locale_gen_text.splitlines():
+        body = line.strip().lstrip("#").strip()
+        if body and body.split()[0] == locale:
+            return True
+    return False
 
 
 def enable_locales(locale_gen_text: str, locales: tuple[str, ...]) -> str:
@@ -229,17 +263,31 @@ def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
 
 
 def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uuid: str) -> None:
+    # **先校验，再落盘。** 这一组守卫拦的是「装出来一个时间不对 / 键盘不对 /
+    # 主机名不合法的系统」—— 那些问题都要等到重启之后才暴露，而重启之后
+    # 用户在目标系统里，安装器的报错已经不在屏幕上了。
+    options.validate_hostname(cfg.hostname)
+    options.validate_timezone(cfg.timezone)
+    options.validate_keymap(cfg.keymap)
+
     write_text(runner, f"{cfg.target}/etc/fstab", fstab_text(root_uuid, esp_uuid))
     write_text(runner, f"{cfg.target}/etc/locale.conf", locale_conf(cfg.locale))
     write_text(runner, f"{cfg.target}/etc/environment", environment_text())
-    write_text(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf())
+    write_text(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf(cfg.keymap))
     write_text(runner, f"{cfg.target}/etc/hostname", cfg.hostname + "\n")
     write_text(runner, f"{cfg.target}/etc/hosts", hosts(cfg.hostname))
     write_text(runner, f"{cfg.target}/etc/sudoers.d/10-wheel", sudoers_dropin(), mode=0o440)
 
     locale_gen = Path(f"{cfg.target}/etc/locale.gen")
     if locale_gen.is_file():
-        write_text(runner, str(locale_gen), enable_locales(read_text(str(locale_gen)), cfg.locales))
+        text = read_text(str(locale_gen))
+        if not has_locale(text, cfg.locale):
+            raise InstallerError(
+                f"目标系统的 locale.gen 里没有 {cfg.locale}",
+                EXIT_CONFIGURE,
+                hint="换一个 locale（名单见安装器的语言页），或确认目标清单里装上了 glibc",
+            )
+        write_text(runner, str(locale_gen), enable_locales(text, locales_to_enable(cfg)))
     elif not runner.dry_run:
         raise InstallerError(
             f"目标系统里没有 {locale_gen}（glibc 没装上？）",

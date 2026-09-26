@@ -179,7 +179,9 @@ STEP_TOOLS = {
 
 
 def human_size(size: int) -> str:
-    for unit, step in (("GiB", 1024 ** 3), ("MiB", 1024 ** 2)):
+    # TiB 在最前：2 TB 的盘按 GiB 报是「1863.0 GiB」，而人对自己的盘记得的是
+    # 「2 T」—— 磁盘页要让人一眼认出哪块是自己的盘（见 frontend 的 DiskPage）。
+    for unit, step in (("TiB", 1024 ** 4), ("GiB", 1024 ** 3), ("MiB", 1024 ** 2)):
         if size >= step:
             return f"{size / step:.1f} {unit}"
     return f"{size} B"

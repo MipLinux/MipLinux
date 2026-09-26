@@ -101,8 +101,13 @@ PageShell {
     property bool submitted: false
 
     // ── 校验 ──────────────────────────────────────────────────────────
-    //: 与 backend/configure.py 的 validate_user 同一条规则： [a-z_][a-z0-9_-]{0,31}
-    readonly property bool userValid: /^[a-z_][a-z0-9_-]{0,31}$/.test(page.userName)
+    //: 用户名规则**来自后端**（`configure.validate_user`）：这里**调用**它，
+    //: 不重写一份正则 —— 重写就是「唯一来源」约定在验证逻辑上的翻版
+    //: （frontend/README）。没有后端时（取图 / 流程烟测）这条不拦：宁可在那条
+    //: 离线路径上宽松，也不在界面里养第二份迟早会不一致的规则。
+    readonly property bool userValid:
+        page.userName !== ""
+        && (typeof Backend === "undefined" || Backend.validateUser(page.userName) === "")
 
     readonly property string userError: {
         if (page.userName === "")

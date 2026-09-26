@@ -41,9 +41,11 @@
 // （小屏放不下时由 `PageShell` 给出可滚动的自定义细条，见该组件）。
 // 页头只留「返回」——图标与条目上的状态已经说清「在哪、什么状态」。
 //
-// ⚠️ 后端没有列网能力（`nmcli` 是现成的，但没人调用它）——
-// 这里的 networks 是原型注入值。要真连网需要一条后端 issue，见 tech/07 §6。
-// 流程壳（`qml/Main.qml`）现在靠注入 `wiredConnected` 模拟「已连接有线」。
+// ── 数据来自后端（2026-09-26）─────────────────────────────────────────
+// `Backend.network()` 给有线 / 无线的连接状态，`Backend.wifiNetworks()` 给扫描
+// 结果，`Backend.connectWifi()` 真去连。`nmcli` 的调用与解析都在后端
+// （`mipl_installer/network.py`），这一页**不解析命令输出**。
+// 下面的 `networks` 默认值只在没有后端时用（取图 / 流程烟测）。
 
 import QtQuick
 import QtQuick.Layouts
@@ -70,13 +72,18 @@ PageShell {
 
     // ── 无线 ──────────────────────────────────────────────────────────
     property string connectedSsid: ""
-    /// [{ ssid, dbm, secured }]
+    /// [{ ssid, signal, secured }]
+    ///
+    /// `signal` 是**百分比**（NetworkManager 的 SIGNAL，0–100），不是 dBm ——
+    /// 不换算成另一套量纲：那要靠一个没人担保的经验公式，而界面上每个字都得
+    /// 能指出出处。有后端时这份默认值整份被 `Backend.wifiNetworks()` 换掉，
+    /// 留着它是为了取图与烟测能离线渲染（见 `qml/Main.qml` 文件头）。
     property var networks: [
-        { ssid: "HomeWiFi-5G", dbm: -48, secured: true },
-        { ssid: "TP-LINK_2.4G", dbm: -61, secured: true },
-        { ssid: "CMCC-8fJ2", dbm: -67, secured: true },
-        { ssid: "Xiaomi_AX3000", dbm: -73, secured: true },
-        { ssid: "ChinaNet-guest", dbm: -79, secured: false }
+        { ssid: "HomeWiFi-5G", signal: 82, secured: true },
+        { ssid: "TP-LINK_2.4G", signal: 60, secured: true },
+        { ssid: "CMCC-8fJ2", signal: 48, secured: true },
+        { ssid: "Xiaomi_AX3000", signal: 36, secured: true },
+        { ssid: "ChinaNet-guest", signal: 22, secured: false }
     ]
 
     property int selectedIndex: 0
@@ -106,6 +113,11 @@ PageShell {
     /// 「点了连接但还缺密码」—— 不给按钮置灰，改成点完当场说清（见文件头）。
     property bool passwordMissing: false
 
+    /// 连接失败的**后端原文**（`InstallerError` 的 message + hint）。
+    /// 与「缺密码」分开：一个是缺输入，一个是 NetworkManager 拒绝了；
+    /// 用同一句话糊过去，用户就不知道该改密码还是该换个网络。
+    property string connectError: ""
+
     // 通了就往前走，没通就连接 —— 这一页永远在流程里（见文件头）
     primaryText: page.online ? "继续" : "连接"
 
@@ -127,14 +139,17 @@ PageShell {
             return;
         }
         page.passwordMissing = false;
+        page.connectError = "";
         page.connectRequested(page.selected ? page.selected.ssid : "", page.password);
     }
 
     // 信号强度直接用 Lucide 的三档图标（wifi / wifi-low / wifi-zero），
-    // 不再自己画弧线凑档位。
-    function iconOf(dbm) {
-        if (dbm >= -60) return "wifi";
-        if (dbm >= -75) return "wifi-low";
+    // 不再自己画弧线凑档位。档位按**百分比**分（0–100）：
+    // 70 以上视为强、45 以上中等，再低就是弱 —— 三档的边界值只影响图标，
+    // 不参与任何判断。
+    function iconOf(signal) {
+        if (signal >= 70) return "wifi";
+        if (signal >= 45) return "wifi-low";
         return "wifi-zero";
     }
 
@@ -264,8 +279,11 @@ PageShell {
                             required property var modelData
 
                             readonly property bool chosen: page.selectedIndex === netItem.index
-                            /// 展开条件：这一行被选中，且它需要密码
-                            readonly property bool expanded: netItem.chosen && netItem.modelData.secured
+                            /// 展开条件：这一行被选中，且（它需要密码 **或** 上一次
+                            /// 连接在这行上失败了）—— 失败时要让人看见原因，
+                            /// 哪怕是开放网络（没有密码框也该有那句错）
+                            readonly property bool expanded:
+                                netItem.chosen && (netItem.modelData.secured || page.connectError !== "")
                             /// 这个 SSID 就是当前连着的那个
                             readonly property bool connected:
                                 page.connectedSsid !== "" && modelData.ssid === page.connectedSsid
@@ -318,7 +336,7 @@ PageShell {
 
                                         Icon {
                                             Layout.alignment: Qt.AlignVCenter
-                                            name: page.iconOf(netItem.modelData.dbm)
+                                            name: page.iconOf(netItem.modelData.signal)
                                             size: 18
                                             color: netItem.chosen ? Tokens.accentAction : Tokens.textMuted
                                         }
@@ -357,7 +375,7 @@ PageShell {
                                         }
 
                                         Text {
-                                            text: netItem.modelData.dbm + " dBm"
+                                            text: netItem.modelData.signal + "%"
                                             font: Tokens.technicalSmall
                                             color: Tokens.textFaint
                                             Layout.alignment: Qt.AlignVCenter
@@ -420,6 +438,17 @@ PageShell {
                                             visible: page.passwordMissing && netItem.chosen
                                             width: parent.width
                                             text: "请输入密码"
+                                            font: Tokens.small
+                                            color: Tokens.danger
+                                            wrapMode: Text.WordWrap
+                                        }
+
+                                        // 连接被拒：**后端的原文**（含它给的下一步），
+                                        // 界面不另编一句 —— 那句原文才知道错在哪
+                                        Text {
+                                            visible: page.connectError !== "" && netItem.chosen
+                                            width: parent.width
+                                            text: page.connectError
                                             font: Tokens.small
                                             color: Tokens.danger
                                             wrapMode: Text.WordWrap

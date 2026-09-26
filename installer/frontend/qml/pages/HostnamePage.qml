@@ -53,16 +53,21 @@ PageShell {
     /// 点过一次「继续」之后，空的字段也要报错
     property bool submitted: false
 
+    /// 主机名规则**来自后端**（`options.validate_hostname`，RFC 1123）：这里
+    /// **调用**它，不重写一份正则 —— 这条规则原来是前端自己立的，现在回到了它
+    /// 该在的地方（`configure.write_static_files` 落盘之前还会再查一遍）。
+    /// 没有后端时（取图 / 流程烟测）只拦空值。
     readonly property bool hostValid:
-        /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(page.hostname)
+        page.hostname !== ""
+        && (typeof Backend === "undefined" || Backend.validateHostname(page.hostname) === "")
 
     readonly property string hostError: {
         if (page.hostname === "")
             return page.submitted ? "还没填主机名。" : "";
-        if (page.hostname.length > 63)
-            return "太长了，最多 63 个字符。";
+        // 只留一句「哪不对」：长度与字符集的**判据**在后端（`hostValid`），
+        // 这里再数一遍长度就是同一份规则的第二个副本。
         if (!page.hostValid)
-            return "只能含字母、数字与连字符，- 不能在头尾";
+            return "主机名不合法：字母或数字开头、字母或数字结尾，中间可以有连字符，最长 63 字符。";
         return "";
     }
 

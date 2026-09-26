@@ -27,7 +27,7 @@
 //   1. 型号与容量（人对「我这个是三星 2T」有印象，对 nvme0n1 没有）；
 //   2. **一张按容量的分区图**：盘上现有每个分区在条上的位置与大小；
 //   3. 一行文字摘要：`EFI 100 MiB · Windows (NTFS) 200 GiB · 未分配 1.6 TiB`。
-// 数据都来自后端（`disk.py` 的 sysfs 探测 + pyparted 读分区表），前端不推导。
+// 数据都来自后端（`disk.py` 的 sysfs 探测 + `blkid` 读文件系统），前端不推导。
 //
 // ── 铁律：界面上每个字都必须是后端能**确证**的事实 ────────────────────
 // 这一页曾经写过「EFI 100 MiB · **Windows** (NTFS) 200 GiB」与「整盘一个分区
@@ -52,8 +52,11 @@
 // 重写前这一页是 PageShell 之前的写法：自己在 Window 上挂了两个按钮（于是浮在
 // 窗口左上角）、页面底部还留着一个**没有文字的主按钮**，内容也超出可视区 300+px。
 //
-// ⚠️ 后端还没有列盘能力（只有 `disk.assert_usable` 校验**给定**路径），
-// 这里的 candidates 是原型注入值，真数据源见 tech/07 §6 的 issue 1。
+// ── 数据来自后端（2026-09-26）─────────────────────────────────────────
+// `Backend.candidates()` 给候选盘：sysfs 枚举 + `blkid` 补文件系统类型与卷标。
+// 这一页**不读 sysfs、不数分区、不算容量比例** —— 记录的字段形状由
+// `bridge/records.py` 定下（`path/model/size/summary/segments/selectable/badges`）。
+// 下面的 `candidates` 默认值只在**没有后端**时生效（取图与流程烟测要可复现的图）。
 
 import QtQuick
 import QtQuick.Layouts
@@ -185,10 +188,35 @@ PageShell {
     property int selectedIndex: -1
     readonly property var disk: selectedIndex >= 0 ? candidates[selectedIndex] : null
 
-    Component.onCompleted: {
-        if (autoSelected)
-            selectedIndex = candidates.indexOf(usable[0]);
+    /// 可用（可选）盘的**序号**。现从 `candidates` 数出来，不去读 `usable` /
+    /// `autoSelected` 那两个绑定。
+    ///
+    /// 为什么不读绑定：`candidates` 刚被赋值的那一刻，派生绑定的求值时机**靠不住**。
+    /// 实测 `onCandidatesChanged` 里读到的 `usable` 还是上一份数据的值，于是
+    /// `candidates.indexOf(usable[0])` 返回 -1 —— 表现是「只有一块盘的机器上圆圈
+    /// 是空的、主按钮灰着」，而 `autoSelected` 事后查又是 true。这种「查的时候对、
+    /// 用的时候错」最难查，所以在函数里同步数一遍。
+    function usableIndices() {
+        var out = [];
+        for (var i = 0; i < candidates.length; i++) {
+            if (candidates[i].selectable)
+                out.push(i);
+        }
+        return out;
     }
+
+    function reselect() {
+        // 原来选中的那一条还有效就别动它（返回再进来时不该丢掉用户的选择）
+        if (selectedIndex >= 0 && selectedIndex < candidates.length
+                && candidates[selectedIndex].selectable)
+            return;
+        var indices = usableIndices();
+        selectedIndex = indices.length === 1 ? indices[0] : -1;
+    }
+
+    onCandidatesChanged: page.reselect()
+
+    Component.onCompleted: page.reselect()
 
     // ── 列表的排版预算（与语言 / 键盘 / 时区三页同一套算法）──────────────
     /// 一行 = 设备行 24 + 间距 6 + 型号行 18 + 间距 6 + 分区条 12 + 间距 6

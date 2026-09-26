@@ -5,13 +5,15 @@
 直接 execve 拉起，所以 **shebang 不能省**：没有它内核返回 ENOEXEC，
 systemd 记成 203/EXEC，窗口不会出现（Issue #51）。
 
-做的事只有四件：
+做的事只有五件：
   1. 找自己旁边那份 QML（`qml/Main.qml`）—— 入口是从 `/usr/local/bin` 的软链
      进来的，所以按 `__file__` **解析后的真实路径**定位，不用写死目录；
-  2. 注册 Lucide 图标 provider（`image://lucide/…`，见 bridge/icons.py）；
-  3. 把 `bridge/actions.py` 的 `System` 挂给 QML（界面只能「提出请求」，
-     动手的是这一侧 —— 见该文件头）；
-  4. 起引擎、跑事件循环，并在 journal 里留下**几处耗时打点**。
+  2. **把 `backend/` 挂上 `sys.path`** —— 后端的包（`mipl_installer`）与前端不在
+     同一棵树里，少了这一步只在 ISO 里发作（见 bridge/paths.py）；
+  3. 注册 Lucide 图标 provider（`image://lucide/…`，见 bridge/icons.py）；
+  4. 挂两个 QML 侧的对象：`Backend`（探测 + 校验 + 重启）与 `Install`
+     （安装控制器）—— 界面只调它们，自己不解析命令、不读 sysfs；
+  5. 起引擎、跑事件循环，并在 journal 里留下**几处耗时打点**。
 
 **不含任何流程逻辑**：路由、状态与安装驱动都在 QML 里（`qml/Main.qml`）。
 """
@@ -40,21 +42,32 @@ def main() -> int:
         print(f"找不到界面：{MAIN_QML}", file=sys.stderr)
         return 1
 
-    # 让 `from bridge.icons import …` 能在 Live 里直接跑（入口被 execve 时
+    # 让 `from bridge.… import …` 能在 Live 里直接跑（入口被 execve 时
     # sys.path[0] 是脚本目录，但被软链调用时不一定 —— 显式加上更稳）。
     sys.path.insert(0, str(HERE))
+
+    # 后端那棵树不在 sys.path 上（ISO 里它在 ../backend/）。路径知识只留在
+    # bridge/paths.py 一处，工具与入口都调它。
+    from bridge.paths import BACKEND, ensure_backend_on_path
+
+    ensure_backend_on_path()
+    if not BACKEND.is_dir():
+        print(f"找不到后端源码：{BACKEND}", file=sys.stderr)
+        return 1
 
     app = QGuiApplication(sys.argv)
 
     engine = QQmlApplicationEngine()
 
-    from bridge.actions import SystemActions
+    from bridge.backend import Backend
     from bridge.icons import register_icon_provider
+    from bridge.install import InstallController
 
     register_icon_provider(engine)
-    # QML 里叫 `System` —— `System.reboot()`（见 bridge/actions.py）
-    actions = SystemActions(app)
-    engine.rootContext().setContextProperty("System", actions)
+    # QML 里叫 `Backend`（探测 / 校验 / 重启）与 `Install`（安装控制器）。
+    # 界面只能「提出请求」与「读回记录」，动手的是它们。
+    engine.rootContext().setContextProperty("Backend", Backend(app))
+    engine.rootContext().setContextProperty("Install", InstallController(app))
 
     engine.load(QUrl.fromLocalFile(str(MAIN_QML)))
     roots = engine.rootObjects()

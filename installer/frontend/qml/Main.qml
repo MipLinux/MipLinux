@@ -4,12 +4,17 @@
 // 「翻页」不能靠开关窗口。页面都是 `Loader` 换进换出的 Item ——
 // `components/PageShell.qml` 的根从 Window 改成 Item 就是为了这件事。
 //
-// ── 这一版**不接后端**（G3 口径，2026-09-25 评审确认）────────────────────
-// 安装页的阶段 / 当前动作 / 日志由下面那段**假脚本**演出来，不驱动真安装。
-// 真接线（后端 events 事件流 + InstallerError）见 `bridge/README.md`，到那时：
-//   · `phase` / `currentAction` / `logLines` 由 `QtReporter` 喂（不是 demoTick）；
-//   · 「立即重启」调 `systemctl reboot`（不是 `Qt.quit()`）；
-//   · 语言 / 键盘 / 时区 / 主机名 / 账户 / 目标盘走 cli.py 的参数交给后端。
+// ── 真接线（2026-09-26）：界面只订阅事件，数据全部来自后端 ────────────────
+// 两个 QML 侧的对象由 `mipl-installer` 挂进来（见该文件与 bridge/）：
+//   · `Backend` —— 候选盘 / 分区预告 / 就绪检查 / 网络 / 四份名单 / 校验；
+//   · `Install` —— 安装控制器（工作线程 + 事件信号）。
+// 界面**不解析 nmcli、不读 sysfs、不拼 parted 命令、不自己写校验正则** ——
+// 那是桥接层的事（frontend/README 的「唯一来源」，tech/07 §6 的四条缺口）。
+//
+// 取图与流程烟测（`tools/`）默认**不挂**这两个对象：那时页面用各自的默认值渲染
+// （评审要的是可复现的图，不是「这台机器正好有几块盘」）。`tools/flow-check.py
+// --backend` 会挂上，走的就与 Live 是同一条路。下面那段 `rehearsalSteps` 假安装
+// 同理：只在**没有** `Install` 时用，真身永远轮不到它。
 //
 // ── 流程（2026-09-25 评审定的顺序）──────────────────────────────────────
 //   加载 → 欢迎 → 网络 → 系统磁盘 → 磁盘分区 → 确认擦除 → 账户 → 安装详情
@@ -64,6 +69,31 @@ Window {
     readonly property string defaultKeymap: "us"
     readonly property string defaultTimezone: "Asia/Shanghai"
     readonly property string defaultHostname: "mipl"
+
+    // ── 后端接线 ──────────────────────────────────────────────────────
+    //: 有 `Backend` / `Install` 才是真身（Live 里永远有，见文件头）
+    readonly property bool hasBackend: typeof Backend !== "undefined"
+    readonly property bool hasInstall: typeof Install !== "undefined"
+
+    //: 就绪检查的三行（网络 / 目标盘 / EFI）。空数组 = 还没探过。
+    property var readyItems: []
+    property bool probed: false
+    property bool minShown: false
+    //: 加载页那句话：探测发现有问题时，把问题说在这一屏上
+    property string loadingMessage: "正在准备安装环境…"
+    //: 选完盘之后算出来的分区预告（安装详情页要用同一份）
+    property string partitionSummary: ""
+    //: root 密码：界面上没有单独的字段，「勾了就与账户同密码」（tech/07 §4 P3）
+    property string rootPassword: ""
+    property bool installRunning: false
+
+    /// 排练模式：让安装控制器只打印命令序列、一个字节都不动。
+    ///
+    /// **只有 `tools/wiring-check.py` 会挂 `MipRehearsal` 这个上下文属性**，
+    /// Live 的入口（`mipl-installer`）不挂它 —— 所以真身永远是 `false`。
+    /// 这是一个「只有测试能打开」的开关，不是界面上的一条路径：签名里那个
+    /// 布尔位如果由界面决定，就等于把「假装装完了」做成了一个可点选项。
+    readonly property bool rehearsalMode: typeof MipRehearsal !== "undefined" && MipRehearsal === true
 
     // ── 路由 ──────────────────────────────────────────────────────────
     //: 当前页（`--set page=…` 可以把取图工具直接送到某一屏）
@@ -146,16 +176,64 @@ Window {
         }
     }
 
-    // ── 加载页停一下就进欢迎页（真接线时等的是后端的就绪检查）─────────────
+    // ── 加载页：等**真的**探测结果，不是等一个固定秒数 ───────────────────
+    //
+    // 两件事同时满足才放行：
+    //   · `probeTimer` 后台探完就绪检查 —— interval 0 让第一帧先画出去，
+    //     所以 tech/07 §9.3 那条「先出 LOGO、后出字」的口径不变；
+    //   · `minTimer` 保证 LOGO 至少露一下（一次淡入 480ms，别闪一下就没）。
+    // 没有后端（取图 / 烟测）时探测立刻完成，所以那两条路的等待行为没变。
     Timer {
-        interval: 1400
+        id: probeTimer
+
+        interval: 0
         running: root.page === "loading"
-        onTriggered: root.replace("welcome")
+        onTriggered: root.probeReadiness()
+    }
+
+    Timer {
+        id: minTimer
+
+        interval: 700
+        running: root.page === "loading"
+        onTriggered: {
+            root.minShown = true;
+            root.leaveLoadingWhenReady();
+        }
+    }
+
+    /// 就绪检查里没通过的那几项，一句话说完；全通过就是空串。
+    function troubleSummary() {
+        var bad = [];
+        for (var i = 0; i < root.readyItems.length; i++) {
+            var row = root.readyItems[i];
+            if (row.state !== "ok")
+                bad.push(row.label + "：" + row.value);
+        }
+        return bad.join(" · ");
+    }
+
+    /// 探一遍就绪检查。**问题说在加载页上** —— 那是用户看到的第一屏，
+    /// 比等到磁盘页才发现「一块盘都没有」要早得多。
+    function probeReadiness() {
+        if (root.hasBackend)
+            root.readyItems = Backend.readiness();
+        root.probed = true;
+        var trouble = root.troubleSummary();
+        if (trouble !== "")
+            root.loadingMessage = trouble;
+        root.leaveLoadingWhenReady();
+    }
+
+    function leaveLoadingWhenReady() {
+        if (root.page === "loading" && root.probed && root.minShown)
+            root.replace("welcome");
     }
 
     // ── 页面 ──────────────────────────────────────────────────────────
     Loader {
         id: pageLoader
+
         anchors.fill: parent
         source: root.pageFiles[root.page] !== undefined ? root.pageFiles[root.page] : ""
         onLoaded: root.wire(root.page, item)
@@ -171,7 +249,13 @@ Window {
         if (!item)
             return;
 
-        if (name === "welcome") {
+        if (name === "loading") {
+            // 加载页那句话跟着探测结果走（探测完成后再改 `loadingMessage`）
+            item.message = Qt.binding(function() {
+                return root.loadingMessage;
+            });
+
+        } else if (name === "welcome") {
             item.installRequested.connect(function() {
                 root.go("network");
             });
@@ -180,12 +264,49 @@ Window {
             });
 
         } else if (name === "network") {
-            // 演示：网络状态由流程给，点「连接」就当接通了
-            item.wiredConnected = root.networkOnline;
+            // 有后端就读真的；没有（取图 / 烟测）沿用流程里那个默认值
+            if (root.hasBackend) {
+                var net = Backend.network();
+                root.networkOnline = net.online;
+                item.wiredConnected = net.wiredConnected;
+                item.wiredName = net.wiredName;
+                item.wiredIPv4 = net.wiredIPv4;
+                item.connectedSsid = net.connectedSsid;
+                item.networks = Backend.wifiNetworks(false);
+            } else {
+                item.wiredConnected = root.networkOnline;
+            }
+
+            /// 刷新与「其它网络」都走这里：让 NetworkManager 重新扫一遍
+            /// （要几秒，所以只在用户点的时候做，进页面那次读的是缓存）
+            item.refreshRequested.connect(function() {
+                if (!root.hasBackend)
+                    return;
+                item.networks = Backend.wifiNetworks(true);
+                root.syncNetworkInto(item);
+            });
+            item.manualEntryRequested.connect(function() {
+                if (!root.hasBackend)
+                    return;
+                item.networks = Backend.wifiNetworks(true);
+                root.syncNetworkInto(item);
+            });
             item.connectRequested.connect(function(ssid, password) {
-                root.networkOnline = true;
-                item.connectedSsid = ssid;
-                item.wiredConnected = true;
+                if (!root.hasBackend) {
+                    root.networkOnline = true;
+                    item.connectedSsid = ssid;
+                    item.wiredConnected = true;
+                    return;
+                }
+                var result = Backend.connectWifi(ssid, password);
+                if (result.ok) {
+                    item.connectError = "";
+                    root.syncNetworkInto(item);
+                } else {
+                    // 失败说人话：后端的原文 + 它给的下一步（不复用「缺密码」那句）
+                    item.connectError = result.hint === "" ? result.message
+                                                           : result.message + " → " + result.hint;
+                }
             });
             item.continueRequested.connect(function() {
                 root.go("disk");
@@ -193,6 +314,9 @@ Window {
             item.backRequested.connect(root.back);
 
         } else if (name === "disk") {
+            // 候选盘**全部**来自后端（sysfs + blkid），前端不编也不推导
+            if (root.hasBackend)
+                item.candidates = Backend.candidates();
             item.chosen.connect(function(device) {
                 root.targetDisk = device;
                 root.rememberDisk(item.candidates, device);
@@ -204,6 +328,13 @@ Window {
             item.device = root.targetDisk;
             item.diskModel = root.diskModel;
             item.diskSize = root.diskSize;
+            if (root.hasBackend) {
+                // 布局用后端 `disk.plan_layout` 算 —— 与真正动手时同一个函数
+                var plan = Backend.partitionPlan(root.targetDisk);
+                if (plan.partitions !== undefined)
+                    item.partitions = plan.partitions;
+                root.partitionSummary = plan.summary !== undefined ? plan.summary : "";
+            }
             item.continueRequested.connect(function() {
                 root.go("erase-confirm");
             });
@@ -224,6 +355,9 @@ Window {
                 root.userName = user;
                 root.userPassword = password;
                 root.setRootPassword = setRoot;
+                // 「设 root 密码」在界面上就是「与账户同密码」（tech/07 §4 P3）：
+                // 没有第二个输入框，也就不该编出第二个密码
+                root.rootPassword = setRoot ? password : "";
                 root.go("install-details");
             });
             item.backRequested.connect(root.back);
@@ -237,29 +371,50 @@ Window {
             item.keymap = root.keymap;
             item.timezone = root.timezone;
             item.hostName = root.hostName;
+            // 分区预告是分区页算出来的那一份，这里只是把同一份显示第二遍
+            if (root.partitionSummary !== "")
+                item.partitionSummary = root.partitionSummary;
             item.installRequested.connect(function() {
                 root.go("install");
             });
             item.backRequested.connect(root.back);
 
         } else if (name === "install") {
+            // 信号在 Component.onCompleted 里只接一次（见那段注释）；这里只负责
+            // 把这一页摆回初始态，然后**真开跑**或者（没有控制器时）演一遍。
             item.logLines = [];
-            root.startDemo();
+            item.failed = false;
+            item.failureMessage = "";
+            item.failureHint = "";
+            item.elapsed = 0;
+            if (root.hasInstall) {
+                root.startInstall();
+            } else {
+                root.startRehearsal();
+            }
             item.cancelRequested.connect(function() {
-                demoTimer.stop();
+                if (root.hasInstall) {
+                    // 真身的取消**不跳页**：要等后端那一步收尾（卸载目标），
+                    // 然后由 `failed` 信号把现场显示出来
+                    Install.cancel();
+                    return;
+                }
+                rehearsalTimer.stop();
                 root.back();
             });
             item.retryRequested.connect(function() {
-                root.startDemo();
+                if (root.hasInstall)
+                    root.startInstall();
+                else
+                    root.startRehearsal();
             });
 
         } else if (name === "done") {
             item.rebootRequested.connect(function() {
                 // 真重启（实机反馈：原来只 Qt.quit()，等于把安装器杀掉掉回 tty）。
-                // QML 不自己动手 —— 交给 bridge 的 System 对象（bridge/actions.py）。
-                // `typeof` 守卫：取图与流程烟测不注册 System，那时点它应当安静地什么都不做。
-                if (typeof System !== "undefined")
-                    System.reboot();
+                // QML 不自己动手 —— 交给 `Backend`（最终落到 bridge/actions.py）。
+                if (typeof Backend !== "undefined")
+                    Backend.reboot();
             });
 
         } else if (name === "advanced") {
@@ -270,6 +425,10 @@ Window {
             item.backRequested.connect(root.back);
 
         } else if (name === "language") {
+            // 名单来自运行系统的 `/usr/share/i18n/SUPPORTED`（502 条），
+            // 前端不写死一份 —— 那是 Issue #63 的翻版
+            if (root.hasBackend)
+                item.languages = Backend.locales();
             item.selectedLocale = root.localeName;
             item.chosen.connect(function(locale) {
                 root.localeName = locale;
@@ -278,6 +437,9 @@ Window {
             item.backRequested.connect(root.back);
 
         } else if (name === "keyboard") {
+            // 名单来自 `/usr/share/kbd/keymaps/**/*.map.gz`（252 条）
+            if (root.hasBackend)
+                item.keymaps = Backend.keymaps();
             item.selectedKeymap = root.keymap;
             item.chosen.connect(function(km) {
                 root.keymap = km;
@@ -286,6 +448,9 @@ Window {
             item.backRequested.connect(root.back);
 
         } else if (name === "timezone") {
+            // 名单来自 `zone1970.tab`，偏移是**当前**偏移（后端算的，夏令时会变）
+            if (root.hasBackend)
+                item.zones = Backend.timezones();
             item.selectedZone = root.timezone;
             item.chosen.connect(function(zone) {
                 root.timezone = zone;
@@ -303,12 +468,15 @@ Window {
         }
     }
 
-    // ── 假安装：把「装包」这一段演出来（G3 不接后端）────────────────────
+    // ── 排练：只在**没有** `Install` 时用（取图与流程烟测）────────────────
     //
-    // 形状照抄后端真实会报的东西：阶段名取自 `events.PHASES`，
-    // 命令行是 `Reporter.command()` 那一类，旁白是 `note()`。
-    // **它不是进度条**：阶段之间的步长是编的，真接线后由事件流决定。
-    readonly property var demoSteps: [
+    // Live 里 `mipl-installer` 一定挂了 `Install`，所以这一段永远轮不到 —— 它
+    // 不是「备用实现」，是给 `tools/shots.py` / `tools/flow-check.py` 用的离线
+    // 素材（评审要的图必须可复现，不能取决于这台机器装到第几步）。
+    //
+    // 形状照抄后端真实会报的东西：阶段名取自 `events.PHASES`，命令行是
+    // `Reporter.command()` 那一类，旁白是 `note()` —— 免得看图上像、真跑起来不像。
+    readonly property var rehearsalSteps: [
         {
             phase: "start",
             action: "正在准备安装环境",
@@ -381,53 +549,145 @@ Window {
         }
     ]
 
-    property int demoIndex: 0
+    property int rehearsalIndex: 0
 
-    function startDemo() {
+    function startRehearsal() {
         var it = pageLoader.item;
         if (!it)
             return;
-        root.demoIndex = 0;
+        root.rehearsalIndex = 0;
         it.failed = false;
         it.elapsed = 0;
-        it.phase = root.demoSteps[0].phase;
-        it.currentAction = root.demoSteps[0].action;
-        it.logLines = root.demoSteps[0].lines.slice();
-        demoTimer.restart();
+        it.phase = root.rehearsalSteps[0].phase;
+        it.currentAction = root.rehearsalSteps[0].action;
+        it.logLines = root.rehearsalSteps[0].lines.slice();
+        rehearsalTimer.restart();
     }
 
-    function demoTick() {
+    function rehearsalTick() {
         var it = pageLoader.item;
         if (!it || root.page !== "install")
             return;
-        if (root.demoIndex >= root.demoSteps.length - 1) {
-            demoTimer.stop();
+        if (root.rehearsalIndex >= root.rehearsalSteps.length - 1) {
+            rehearsalTimer.stop();
             finishTimer.restart();
             return;
         }
-        root.demoIndex += 1;
-        var step = root.demoSteps[root.demoIndex];
+        root.rehearsalIndex += 1;
+        var step = root.rehearsalSteps[root.rehearsalIndex];
         it.phase = step.phase;
         it.currentAction = step.action;
         it.logLines = it.logLines.concat(step.lines);
-        if (root.demoIndex >= root.demoSteps.length - 1) {
-            demoTimer.stop();
+        if (root.rehearsalIndex >= root.rehearsalSteps.length - 1) {
+            rehearsalTimer.stop();
             finishTimer.restart();
         }
     }
 
     Timer {
-        id: demoTimer
+        id: rehearsalTimer
+
         interval: 1300
         repeat: true
-        onTriggered: root.demoTick()
+        onTriggered: root.rehearsalTick()
     }
 
     //: 最后一条日志停一拍再进结束页 —— 让人看清「装完了」
     Timer {
         id: finishTimer
+
         interval: 900
         onTriggered: if (root.page === "install")
                          root.replace("done")
+    }
+
+    // ── 安装控制器：信号**只接一次** ──────────────────────────────────────
+    //
+    // 不能写在 `wire("install")` 里：用户来回翻页会重复接上同一个信号，
+    // 于是日志一行变两行、三行 —— 而且看起来像后端报了重复事件，极难查。
+    // `Install` 是长生命周期的对象，界面只是它的一个订阅者。
+    Component.onCompleted: {
+        if (!root.hasInstall)
+            return;
+        Install.phaseChanged.connect(root.onInstallPhase);
+        Install.logged.connect(root.onInstallLog);
+        Install.failed.connect(root.onInstallFailed);
+        Install.succeeded.connect(root.onInstallSucceeded);
+        Install.runningChanged.connect(root.onInstallRunning);
+    }
+
+    /// 安装页当前的 item；不在安装页就返回 null（事件可能在任何时刻到达）
+    function installPage() {
+        return root.page === "install" ? pageLoader.item : null;
+    }
+
+    function onInstallPhase(phase, action) {
+        var it = root.installPage();
+        if (it) {
+            it.phase = phase;
+            it.currentAction = action;
+        }
+    }
+
+    function onInstallLog(line) {
+        var it = root.installPage();
+        if (it)
+            it.logLines = it.logLines.concat([line]);
+    }
+
+    function onInstallFailed(message, hint) {
+        var it = root.installPage();
+        if (it) {
+            it.failed = true;
+            it.failureMessage = message;
+            it.failureHint = hint;
+        }
+    }
+
+    function onInstallSucceeded() {
+        if (root.page === "install")
+            root.replace("done");
+    }
+
+    function onInstallRunning(running) {
+        root.installRunning = running;
+    }
+
+    /// 把流程的状态交给后端。**这里是唯一拼 `request` 的地方** —— 之前是 CLI 拼
+    /// argv，现在两边都从同一份「意图」走（`pipeline.Plan`）。
+    function startInstall() {
+        var it = pageLoader.item;
+        if (it) {
+            it.logLines = [];
+            it.failed = false;
+            it.failureMessage = "";
+            it.failureHint = "";
+            it.elapsed = 0;
+            it.phase = "start";
+            it.currentAction = "正在准备安装环境";
+        }
+        Install.start({
+            "disk": root.targetDisk,
+            "hostname": root.hostName,
+            "user": root.userName,
+            "locale": root.localeName,
+            "timezone": root.timezone,
+            "keymap": root.keymap,
+            "password": root.userPassword,
+            "rootPassword": root.rootPassword,
+            "confirmedDevice": root.targetDisk
+        }, root.rehearsalMode);
+    }
+
+    /// 把后端当前的网络状况同步进网络页（连接成功、刷新之后都要做一遍）
+    function syncNetworkInto(item) {
+        if (!root.hasBackend || !item)
+            return;
+        var now = Backend.network();
+        root.networkOnline = now.online;
+        item.wiredConnected = now.wiredConnected;
+        item.wiredName = now.wiredName;
+        item.wiredIPv4 = now.wiredIPv4;
+        item.connectedSsid = now.connectedSsid;
     }
 }

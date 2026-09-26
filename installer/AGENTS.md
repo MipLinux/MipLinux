@@ -19,9 +19,15 @@ tags: [installer, python, pyside6, partitioning, uefi]
 installer/
 ├── backend/
 │   └── mipl_installer/   后端：不依赖 Qt，可被 CLI 与测试直接驱动
+│       ├── pipeline.py   编排（`Plan` + 四个阶段 + 失败收尾）—— CLI 与前端共用
+│       ├── disk.py       分区、候选盘枚举、动手前的守卫
+│       ├── options.py    语言 / 键盘 / 时区的名单与校验
+│       ├── network.py    Live 的网络状态与连网（`nmcli`）
 │       └── data/         随包走的数据（M1 的临时目标包清单）
 ├── frontend/             PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
-│   └── mipl-installer    Live 侧入口，由 cage 拉起（线 E）
+│   ├── mipl-installer    Live 侧入口，由 cage 拉起
+│   ├── bridge/           前后端**唯一**的耦合层（见 bridge/README.md）
+│   └── tools/            取图 / 流程烟测 / 接线烟测 / 开机取证 / M2 验收驱动
 ├── tests/                单测（test_*.py）+ Live 内排练脚本（*.sh）
 ```
 
@@ -49,6 +55,16 @@ python3 -m unittest discover -s installer/tests -t installer
 
 # 直接驱动 CLI（Live 里由 tests/live-rehearsal.sh 代劳）
 PYTHONPATH=installer/backend python3 -m mipl_installer --disk /dev/vda --dry-run
+
+# 接线烟测：挂真 Backend + Install，安装走 dry-run —— **不需要 root、不碰盘**
+python3 installer/frontend/tools/wiring-check.py
+
+# 离线流程烟测：不挂后端，只验路由与状态传递
+python3 installer/frontend/tools/flow-check.py --demo
+
+# M2 验收：真 ISO 上无头点完整条链（图形化装完一次）+ 从盘启动验检查点 4。
+# 要 root（pkexec）；**不需要显示器** —— QEMU 的 screendump 当眼睛、input-send-event 当手
+pkexec /usr/bin/python3 installer/frontend/tools/gui-install.py
 ```
 
 ## 测试
@@ -59,6 +75,14 @@ PYTHONPATH=installer/backend python3 -m mipl_installer --disk /dev/vda --dry-run
 sudo ./scripts/mipl.sh target --force                     # 1. 建空目标盘
 sudo ./scripts/mipl.sh qemu --disk target.qcow2           # 2. 进 Live，跑安装
 sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c  # 3. 检查点 4：从盘启动
+```
+
+**要看界面就走 `installer`，别用上面的 `qemu`** —— `installer` 自带 `-vga virtio`
+（cage 要 KMS，`qemu` 的默认显卡不一定起得来），而且目标盘缺了才建、已有就复用：
+
+```bash
+sudo ./scripts/mipl.sh installer --serial console        # Live + 界面（串口可交互）
+sudo ./scripts/mipl.sh installer --boot c                # 从盘启动验安装结果
 ```
 
 **安装器直到它装出来的系统能启动之前，都不算被测过。**

@@ -1,0 +1,14 @@
+module Mip.Components
+Button 1.0 Button.qml
+Icon 1.0 Icon.qml
+HeroMark 1.0 HeroMark.qml
+Card 1.0 Card.qml
+Field 1.0 Field.qml
+Alert 1.0 Alert.qml
+Badge 1.0 Badge.qml
+ProgressPhase 1.0 ProgressPhase.qml
+LogView 1.0 LogView.qml
+ReadyCheck 1.0 ReadyCheck.qml
+SegmentedToggle 1.0 SegmentedToggle.qml
+ScrollBar 1.0 ScrollBar.qml
+PageShell 1.0 PageShell.qml

@@ -157,6 +157,7 @@ networkmanager
 # ==> 安装器 ==>
 cage
 qt6-wayland
+qt6-svg
 pyside6
 python-pyparted
 # <== 安装器 <==

@@ -1,0 +1,2 @@
+module Mip.Theme
+singleton Tokens 1.0 Tokens.qml

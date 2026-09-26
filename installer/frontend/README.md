@@ -34,6 +34,10 @@ python3 installer/frontend/tools/flow-check.py --demo
 # 安装那一段走 dry-run（只打印命令，不碰盘，**不需要 root**）
 python3 installer/frontend/tools/wiring-check.py
 
+# **M2 验收**：真 ISO 上无头点完整条链，再从盘启动验检查点 4
+# （要 root；按仓库规矩走 pkexec。不需要显示器 —— 见该脚本头部）
+pkexec /usr/bin/python3 installer/frontend/tools/gui-install.py
+
 # 取图（每屏一张 PNG，落 out/m2-prototype/）
 python3 installer/frontend/tools/shots.py --page flow --set page=welcome
 ```
@@ -103,6 +107,7 @@ frontend/
     ├── shots.py            把页面渲染成 PNG + 量高（--measure / --set 取交互态）
     ├── flow-check.py       离线流程烟测：走一遍整条链并断言每一跳
     ├── wiring-check.py     接线烟测：真 Backend + 真事件流，安装走 dry-run
+    ├── gui-install.py      **M2 验收**：真 ISO 上无头点完整条链 + 验从盘启动
     └── build-assets.sh     从 LOGO 源图生成界面用的小图
 ```
 

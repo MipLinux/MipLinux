@@ -27,7 +27,7 @@ installer/
 ├── frontend/             PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
 │   ├── mipl-installer    Live 侧入口，由 cage 拉起
 │   ├── bridge/           前后端**唯一**的耦合层（见 bridge/README.md）
-│   └── tools/            取图 / 流程烟测 / 接线烟测 / 开机取证
+│   └── tools/            取图 / 流程烟测 / 接线烟测 / 开机取证 / M2 验收驱动
 ├── tests/                单测（test_*.py）+ Live 内排练脚本（*.sh）
 ```
 
@@ -61,6 +61,10 @@ python3 installer/frontend/tools/wiring-check.py
 
 # 离线流程烟测：不挂后端，只验路由与状态传递
 python3 installer/frontend/tools/flow-check.py --demo
+
+# M2 验收：真 ISO 上无头点完整条链（图形化装完一次）+ 从盘启动验检查点 4。
+# 要 root（pkexec）；**不需要显示器** —— QEMU 的 screendump 当眼睛、input-send-event 当手
+pkexec /usr/bin/python3 installer/frontend/tools/gui-install.py
 ```
 
 ## 测试

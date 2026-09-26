@@ -22,12 +22,15 @@ docs/work/
 ├── 2026-09-18.md            当日任务清单：基线构建
 ├── 2026-09-19.md            当日任务清单：自有 profile 落地
 ├── 2026-09-21.md            当日记录：P6 选型定案、文档规则
+├── 2026-09-23.md            当日记录：线 G / H / I 分工，收 #50 / #51
 └── tech/                    技术细节（可复现的操作步骤）
     ├── 01-容器环境搭建.md
     ├── 02-构建与QEMU测试.md
     ├── 03-术语表.md
     ├── 04-安装逻辑与实测.md
-    └── 05-装后系统验证.md
+    ├── 05-装后系统验证.md
+    ├── 06-镜像源与联网.md   （线 I 待建）
+    └── 07-M2界面设计.md
 ```
 
 脚本在仓库根目录的 `scripts/`，不在 `docs/` 下：
@@ -103,7 +106,8 @@ end
 | ② 自有 profile 落地 | [2026-09-19.md](2026-09-19.md) | ✅ `profile/` 进仓库、构建管线、目标盘挂载、改名 MipLinux |
 | ③ 国内源与中文本地化 | 见 9.19 线 C | 🚧 `airootfs` 的配置已并入主线；字体与输入法的**包**待补，装后系统的源继承待解（Issue #23） |
 | ④ NVIDIA 驱动 | [tech/05](tech/05-装后系统验证.md) | ✅ **Live 半段真机实测通过**（09-22，独显模式下 RTX 5060 Max-Q：驱动加载、`nvidia-smi` 正常、内屏点亮、`nmcli` 联网）；🚧 **装后系统半段未做**，随安装器 M3 一起验 |
-| ⑤ 安装程序 | [installer-roadmap.md](installer-roadmap.md) | 未开始。**P6 已定案（D14）**：Python + PySide6/Qt6 + `cage` kiosk + `python-pyparted`；从 M0 / M1 起 |
+| ⑤ 安装程序（M0–M2） | [installer-roadmap.md](installer-roadmap.md) · [tech/04](tech/04-安装逻辑与实测.md) · [tech/07](tech/07-M2界面设计.md) | ✅ M0 启动链与检查点 1 / 2 实测通过（含 tty1 兜底）；✅ M1 检查点 4 由 PR #42 验过；🚧 **M2 界面已接真后端**（2026-09-26：单测 234 全绿、接线烟测 33 项、15 个流程页一屏放得下），**「QEMU 里全程图形化装完一次」这条验收未做**；技术栈见 D14 |
+| ⑥ 装后系统（M3 前半） | [tech/05](tech/05-装后系统验证.md) | 🚧 检查点 5 / 6 与源继承归线 H；真机半段（N 卡 / 桌面 / 中文输入法）随维护者 |
 
 **新手从这里开始：** [tech/01-容器环境搭建.md](tech/01-容器环境搭建.md) → [tech/02-构建与QEMU测试.md](tech/02-构建与QEMU测试.md)。
 工具不熟先看 [tech/03-术语表.md](tech/03-术语表.md)。
@@ -141,3 +145,4 @@ end
 | 测试方法 | [knowledge/05-测试方法.md](../knowledge/05-测试方法.md) |
 | 待定事项 | [knowledge/06-待定事项.md](../knowledge/06-待定事项.md) |
 | 安装器 ROADMAP | [installer-roadmap.md](installer-roadmap.md) |
+| 已经解决的问题 | [archive/](../archive/) |

@@ -5,24 +5,25 @@
 1. **NVIDIA 显卡驱动开箱可用** —— 大多数 Arch 系发行版不预装 N 卡驱动，装完还要自己折腾
 2. **对中文用户友好** —— 参考 CachyOS 的短板：中文输入法、字体、国内镜像源、中文本地化都缺默认配置
 
-> **文档范围说明**：`docs/knowledge/` 覆盖到「开始写安装器之前」的全部内容。
-> 安装器的**计划**在 [docs/work/installer-roadmap.md](docs/work/installer-roadmap.md)，实现随代码进 `installer/`。
+> **文档范围说明**：`docs/knowledge/` 是已经定下来的结论。
+> 安装器的**计划**在 [installer-roadmap.md](docs/work/installer-roadmap.md)、**界面规格**在
+> [tech/07-M2界面设计.md](docs/work/tech/07-M2界面设计.md)，实现随代码进 `installer/`。
 
 ---
 
 ## 当前进度
 
-> 截至 **2026-09-22**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
+> 截至 **2026-09-26**。逐日的任务与实测记录在 [`docs/work/`](docs/work/)。
 
 | 阶段 | 状态 |
 |---|---|
 | 构建环境与基线 | ✅ 未修改的 `releng` 构建出 ISO，QEMU（UEFI）引导到 `[root@archiso ~]#` |
 | 自有 profile | ✅ `profile/` 进仓库并改名 MipLinux，产物 `miplinux-<日期>-x86_64.iso`（1.5 GiB，构建 2 分 08 秒） |
-| 装系统链路 | ✅ `mipl target` + `mipl qemu --disk … --boot c`：装完能从盘重启（[05-测试方法](docs/knowledge/05-测试方法.md) 检查点 4） |
-| 国内源与中文本地化 | 🚧 已并入主线：国内源、`zh_CN.UTF-8`、CJK fallback 规则、终端字体；**字体与输入法的包已进 `packages.x86_64`**（09-19），还没在含这些包的清单上验到装后系统 |
-| NVIDIA 驱动 | 🚧 Live 清单已加 `nvidia-open` / `nvidia-utils`。**真机第一次验证 ✅**（09-22，独显模式下 RTX 5060 Max-Q）：驱动加载、`nvidia-smi` 正常、内屏正常点亮、`nmcli` 联网通畅（原始输出未留存，见 [tech/05](docs/work/tech/05-装后系统验证.md) §2.5）；**第二次（装完重启后能用）未做**，那半段由安装器的装包阶段带（M3）。桌面试跑（niri / Hyprland）因 Live 可写层只有 256 MiB 未进行（§2.6） |
-| 安装程序 | 未开始。**P6 已定案**（D14）：Python + PySide6/Qt6 + `cage` kiosk + `python-pyparted`；里程碑见 [installer-roadmap.md](docs/work/installer-roadmap.md) |
-| 桌面环境 / 品牌化 | 未开始。**P5 已定 WM 路线**（不做 DE），niri / Hyprland 待定 |
+| 装系统链路 | ✅ 安装器 **M0**（QEMU 里不碰键盘直进安装器窗口；窗口被 `kill` / `stop` / 崩掉后 tty1 自动交回 `getty`，见 [archive](docs/archive/2026-09-25-tty1落不回去.md)）与 **M1**（无界面闭环）均已实测：从空盘装出能启动的系统（检查点 4），装后系统 `pacman -Syu` 成功（检查点 6）。检查点 5 只到**配置层** —— 用户 / sudo、`zh_CN.UTF-8`、CJK fallback 规则、输入法环境变量都已实测生效；CJK 字体与 `fcitx5` 系的**包**仍卡 P10（[tech/05](docs/work/tech/05-装后系统验证.md) §3） |
+| 国内源与中文本地化 | 🚧 配置已并入主线：国内源、`zh_CN.UTF-8`、CJK fallback 规则、终端字体；字体与输入法的**包在 Live 清单里**。**装后系统的源继承已实测**（`mirrorlist` 为继承的国内源、`pacman -Syu` 通过）；`reflector` 覆盖防线随 M4 落地（[Issue #23](https://github.com/MipLinux/MipLinux/issues/23)） |
+| NVIDIA 驱动 | 🚧 Live 清单已加 `nvidia-open` / `nvidia-utils`。**真机第一次验证 ✅**（09-22，独显模式下 RTX 5060 Max-Q）：驱动加载、`nvidia-smi` 正常、内屏正常点亮、`nmcli` 联网通畅（原始输出未留存，见 [tech/05](docs/work/tech/05-装后系统验证.md) §2.5）；**第二次（装完重启后能用）未做**，那半段由安装器的装包阶段带（M3）。桌面试跑（niri / Hyprland）因 Live 可写层只有 256 MiB 未进行（§2.6），已在 09-22 决定改到装后系统做 |
+| 安装程序 | 🚧 **M0 完成**、**M1 完成**、**M2 进行中**：设计语言与**全部流程页面的原型**（加载 / 欢迎 / 网络 / 磁盘 / 分区 / 擦除确认 / 账户 / 安装详情 / 安装 / 结束，外加高级安装四项）已接线，取图、量高（15 个流程页一屏放得下，含失败态）与流程烟测都过；**前端还没接后端**，09-26 实机跑的是修复前的 ISO —— **修复后的 ISO 待重建**，M2 验收（QEMU 里全程图形化装完一次）未达。技术栈见 D14，规格与实测状态见 [tech/07](docs/work/tech/07-M2界面设计.md) |
+| 桌面环境 / 品牌化 | ⬜ 未开始。**P5 已定 WM 路线**（不做 DE），niri / Hyprland 待真机各跑一轮 |
 
 **「✅」表示本机实测过**，不代表用户拿到的成品已经具备该能力。每一阶段验到了第几个检查点，
 以 [05-测试方法.md](docs/knowledge/05-测试方法.md) 的六个检查点为准。
@@ -40,7 +41,7 @@
 | [03-项目结构.md](docs/knowledge/03-项目结构.md) | profile 的每个文件是什么、为什么必须这么组织 | 所有人 |
 | [04-架构决策.md](docs/knowledge/04-架构决策.md) | NVIDIA 与中文方案的具体技术决策 | 所有人 |
 | [05-测试方法.md](docs/knowledge/05-测试方法.md) | 怎么验证 ISO 和安装结果 | 所有人 |
-| [06-待定事项.md](docs/knowledge/06-待定事项.md) | 已定案的决策与仍在讨论的问题（P1–P10 状态总表） | 所有人 |
+| [06-待定事项.md](docs/knowledge/06-待定事项.md) | 已定案的决策与仍在讨论的问题（P1–P12 状态总表） | 所有人 |
 
 ### 工作文档 `docs/work/`
 
@@ -51,8 +52,12 @@
 | [2026-09-18.md](docs/work/2026-09-18.md) | 基线构建：容器、构建、QEMU 引导 |
 | [2026-09-19.md](docs/work/2026-09-19.md) | 自有 profile 落地：构建管线、目标盘、改名 |
 | [2026-09-21.md](docs/work/2026-09-21.md) | P6 选型定案、文档规则 |
+| [2026-09-23.md](docs/work/2026-09-23.md) | 安装器 M0 收尾与 M2 布置：kiosk 启动链、装后系统首轮验证 |
 | [tech/](docs/work/tech/) | 可复现的技术操作步骤 |
 | [tech/03-术语表.md](docs/work/tech/03-术语表.md) | 各工具是什么、彼此什么关系 |
+| [tech/04-安装逻辑与实测.md](docs/work/tech/04-安装逻辑与实测.md) | 安装器启动链、窗口里怎么敲命令、装系统的实测记录 |
+| [tech/05-装后系统验证.md](docs/work/tech/05-装后系统验证.md) | 真机验证：Live 半段与装后系统半段的判据与结果 |
+| [tech/07-M2界面设计.md](docs/work/tech/07-M2界面设计.md) | M2 界面设计语言、全部页面规格与实测状态 |
 
 ### 脚本 `scripts/`
 
@@ -148,8 +153,9 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 | 编号 | 待定问题 |
 |---|---|
 | P5 | 桌面环境：**WM 路线已定**（不做 DE），niri / Hyprland 二选一 |
-| P10 | 包清单的组织方式：P3/P4 之后 Live 与装后系统不再共用一份清单，D6 怎么重述 |
+| P10 | 包清单的组织方式：**方向已明** —— 两份清单（Live 精简 / 装后更大）+ 安装器询问应用；D6 的「共用一份」怎么重述待定案 |
 | P11 | 第三方仓库政策：`archlinuxcn` 现在以 `SigLevel = Optional TrustAll` 启用，对外发布前怎么收紧 |
+| P12 | 时区名单与显示名的审定规则：tzdata 的地名本身带政治表述，「列出来的」与「我们写的」是两件事 |
 
 ---
 

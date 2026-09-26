@@ -40,7 +40,9 @@ python3 installer/frontend/tools/shots.py --page flow --set page=welcome
 
 `flow-check.py` 与 `wiring-check.py` 的分工：前者验**离线**那条路（路由与状态传递，
 页面默认值 + 排练假安装），后者验**真身**那条路（候选盘来自后端、事件流真的在报、
-擦盘守卫拦得住）。两条都要绿。
+参数守卫在动盘之前、擦盘守卫拦得住）。`wiring-check.py` 最后还会**照 ISO 的目录布局
+把入口真跑一遍** —— 后端包在产物里不在 `sys.path` 上，这类「仓库全绿、ISO 里起不来」
+的坑（Issue #50）不能靠推理蒙过去。两条都要绿。
 
 ## 一条规则
 

@@ -15,19 +15,28 @@
     python3 installer/frontend/tools/wiring-check.py
     python3 installer/frontend/tools/wiring-check.py -v     # 每一步都打印当前页
 
-它要证明的四件事，按重要性排：
+它要证明的五件事，按重要性排：
 
 1. **候选盘来自后端**：磁盘页上的那一串与 `Backend.candidates()` 逐条一致
    （不是页面里那份默认值）；
 2. **事件流真的接上了**：安装页的阶段与日志由后端 `Reporter` 喂出来，
    日志里能看到真命令（`wipefs` / `pacstrap` / `arch-chroot` / `bootctl`）；
-3. **擦盘守卫没被绕过**：`confirmedDevice` 对不上时控制器拒绝开跑；
-4. **走完整条链**：`start → disk → packages → configure → boot → done`。
+3. **参数守卫在动盘之前**：给一个不存在的时区，那一轮日志里一条 `wipefs` 都没有；
+4. **擦盘守卫没被绕过**：`confirmedDevice` 对不上时控制器拒绝开跑；
+5. **走完整条链**：`start → disk → packages → configure → boot → done`。
+
+再加一条与上面都不同类的（第 8 节）：**照 ISO 的目录布局把入口真跑一遍**。
+仓库里全绿而构建产物里起不来，是这个仓库踩过的坑（Issue #50），
+所以那一条不能靠「推理上应该没问题」蒙过去。
 """
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 FRONTEND = Path(__file__).resolve().parent.parent
@@ -40,6 +49,55 @@ EXPECTED_COMMANDS = ("wipefs -a", "mkfs.vfat", "pacstrap", "arch-chroot", "bootc
 DISK_KEYS = {"path", "model", "size", "summary", "segments", "selectable", "badges"}
 
 
+def check_iso_layout(check) -> None:
+    """照构建脚本的做法搭一份 ISO 目录，然后**真的把入口跑起来**。
+
+    为什么值得单独做一遍：`scripts/baseline-build.sh` 的 `stage_profile` 把整个
+    `installer/` 拷进 `/usr/local/lib/mipl-installer/`，而入口是
+    `/usr/local/bin/mipl-installer` 这个软链。于是仓库里跑得通 ≠ ISO 里跑得通 ——
+    后端包不在 `sys.path` 上、`__file__` 解析后的路径也不一样。Issue #50 就是这一类
+    「只在构建产物里发作」：122 个单测全绿，而构建在装配阶段直接 die。
+
+    这一段不需要 root、也不碰盘：拷自己的源码进临时目录，跑入口，读它的输出。
+    """
+    with tempfile.TemporaryDirectory() as staged:
+        lib = Path(staged) / "usr/local/lib/mipl-installer"
+        bin_dir = Path(staged) / "usr/local/bin"
+        shutil.copytree(
+            FRONTEND.parent, lib, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
+        )
+        bin_dir.mkdir(parents=True)
+        # 与构建脚本建的那条软链同一形状（目标跟着入口所在目录走）
+        (bin_dir / "mipl-installer").symlink_to("../lib/mipl-installer/frontend/mipl-installer")
+
+        entry = bin_dir / "mipl-installer"
+        check((lib / "backend/mipl_installer").is_dir(), "ISO 布局：后端源码在 ../backend/")
+        check(entry.is_file() and os.access(entry, os.X_OK),
+              "ISO 布局：入口软链指得到、且可执行")
+
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+        proc = subprocess.Popen(
+            [str(entry)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
+        )
+        try:
+            # 入口起完引擎就进 `app.exec()` 不出来，所以到点就杀 —— 我们要的是
+            # 「它有没有走到那一步」这句话，不是它的退出码
+            output, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate()
+        output = output or ""
+
+        check("[mipl] 引擎就绪" in output, "ISO 布局：入口真的起来了（打印了「引擎就绪」）")
+        check("ModuleNotFoundError" not in output, "ISO 布局：没有 ModuleNotFoundError")
+        check("找不到后端源码" not in output, "ISO 布局：入口找得到后端源码")
+        check("界面加载失败" not in output, "ISO 布局：QML 加载成功（没有「界面加载失败」）")
+        if os.environ.get("MIPL_WIRING_VERBOSE"):
+            print("       ── 入口输出 ──")
+            for line in output.splitlines():
+                print(f"       │ {line}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wiring-check.py", description="前后端接线的端到端烟测")
     parser.add_argument("--step-ms", type=int, default=150, help="每一跳之间让事件循环转多久")
@@ -48,7 +106,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="每一步都打印当前页")
     args = parser.parse_args(argv)
 
-    import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
     from PySide6.QtCore import QEventLoop, QTimer, QUrl
@@ -258,6 +315,12 @@ def main(argv: list[str] | None = None) -> int:
     check(wait_for("拒绝", lambda: bool(failures), 10)
           and "没有确认擦除" in failures[0][0],
           f"擦盘确认对不上 → 控制器拒绝开跑（{failures[0][0] if failures else '没反应'}）")
+
+    # ── 8. ISO 布局：入口能不能把这一整套拉起来（Issue #50 那一类）────────
+    #
+    # 放在最后是因为它要起一个子进程；但它验的是**最要命**的那一条 ——
+    # 仓库里全绿而构建产物里起不来，正是这个仓库踩过的坑。
+    check_iso_layout(check)
 
     if problems:
         print(f"\n{checks['bad']} 项不过：", file=sys.stderr)

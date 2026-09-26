@@ -54,6 +54,18 @@ QML 侧看到两个对象（由 [mipl-installer](../mipl-installer) 挂上去）
 会让人停在「盘已清空、系统装了一半」的现场。实测证据见
 [tech/07 §8](../../../docs/work/tech/07-M2界面设计.md)（`tools/wiring-check.py`）。
 
+## `paths.py` 那一行是有实测的，不是「推理上应该没问题」
+
+后端包在 ISO 里**不在** `sys.path` 上：源码在
+`/usr/local/lib/mipl-installer/backend/mipl_installer`，而入口解析后落在
+`/usr/local/lib/mipl-installer/frontend/`。漏掉这一步的后果是仓库里 239 个单测全绿、
+构建产物里起不来 —— Issue #50 的同一类（那次是装配阶段直接 die）。
+
+所以 `tools/wiring-check.py` 的第 8 节会**照构建脚本的做法搭一份同样的目录**
+（`usr/local/lib/mipl-installer/` + `usr/local/bin/mipl-installer` 软链），
+然后真去跑那个入口，断言它打印出 `引擎就绪` / `首帧上屏` 而没有 `ModuleNotFoundError`。
+这样「ISO 里能不能起来」就不必等一轮 root 构建才有答案。
+
 ## 排练开关：只有测试能打开
 
 `Install.start(request, dryRun)` 第二个参数为真时只打印命令序列、不动盘。

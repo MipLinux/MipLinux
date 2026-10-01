@@ -364,16 +364,27 @@ def main(argv=None) -> int:
             return 1
 
         expected_scale = os.environ["QT_SCALE_FACTOR"]
+        root = engine.rootObjects()[0]
+
+        # 复核线 2026-10-02 的 F-B：只比 MiplLaunch.* 读不出「QT_SCALE_FACTOR 设晚了」——
+        # 那种情况下 devicePixelRatio 仍是 1，而下面 5 条断言照样全过。把 Qt **实际生效**的
+        # devicePixelRatio 也断言进来，这条自证缺口才闭上。
+        screen = QGuiApplication.primaryScreen()
+        screen_dpr = float(screen.devicePixelRatio()) if screen is not None else -1.0
+        window_dpr = float(root.devicePixelRatio())
+        expected_dpr = float(int(decision))
+
         checks = [
             ("MiplLaunch.theme", probe.property("theme"), launch.theme),
             ("MiplLaunch.themeSource", probe.property("themeSource"), launch.themeSource),
             ("MiplLaunch.deviceScale", probe.property("deviceScale"), launch.deviceScale),
             ("MiplTheme.dark", probe.property("dark"), launch.theme == "dark"),
             ("QT_SCALE_FACTOR", expected_scale, str(int(decision))),
+            ("屏幕 devicePixelRatio", screen_dpr, expected_dpr),
+            ("根窗口 devicePixelRatio", window_dpr, expected_dpr),
         ]
         failed = [(name, got, want) for name, got, want in checks if got != want]
 
-        root = engine.rootObjects()[0]
         print(f"[self-test] 根页面：{main_qml}")
         print(f"[self-test] 根对象：{root.metaObject().className()}（创建成功）")
         print(f"[self-test] MiplLaunch.theme = {launch.theme!r}（themeSource={launch.themeSource!r}）")
@@ -383,6 +394,10 @@ def main(argv=None) -> int:
             f"（QT_SCALE_FACTOR={expected_scale}，来源 {decision.source}）"
         )
         print(f"[self-test] 设备层判定：{decision.reason}")
+        print(
+            f"[self-test] devicePixelRatio = {screen_dpr}（屏幕）/ {window_dpr}（根窗口）"
+            f"，期望 {expected_dpr}"
+        )
         for name, got, want in failed:
             print(f"[self-test] FAIL {name}: 实际 {got!r}，期望 {want!r}")
         if failed:

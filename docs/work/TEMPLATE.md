@@ -11,11 +11,10 @@ tags: [work, template, issue]
   注释，`./scripts/check-work-issue.sh` 会把它们判成错。骨架里的 `### <字段>` 小节标题**不能改名** ——
   GitHub 表单 `.github/ISSUE_TEMPLATE/task.yml` 的 `label:` 与它们逐字相同，守卫会比对两边是否漂移。
 
-  发布三条路（产出的正文同一份）：
-    1. 网页（维护者）：New issue →「工作分配」表单，逐字段填
-    2. 有 gh 的机器：gh issue create --title "[工作] <主题>" \
+  发布两条路（产出的正文同一份；**发布前先问维护者** —— 会以维护者账号公开）：
+    1. 网页：New issue →「工作分配」表单，逐字段填（不依赖 gh，任何环境都能走）
+    2. gh（本机已装并登录维护者账号）：gh issue create --title "[工作] <主题>" \
          --body-file out/issue-drafts/<主题>.md --label task
-    3. 没有 gh（本机现状）：草案交给维护者，由维护者按第 1 条发布
 
   字段为什么这么切、验收口径、角色到人的对应，见 docs/work/README.md 的「工作 issue 规范」——
   **本节不重述规范**，判据冲突时以规范为准。

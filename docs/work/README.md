@@ -46,7 +46,8 @@ docs/work/
     ├── 03-术语表.md
     ├── 04-安装逻辑与实测.md
     ├── 05-装后系统验证.md
-    └── 06-镜像源与联网.md   （规划中，尚未建立）
+    ├── 06-镜像源与联网.md   （规划中，尚未建立）
+    └── 08-界面设计方向.md   安装器 MD3 设计方向；阶段 0 的接口准据在 `installer/frontend/qml/README.md`
 ```
 
 脚本在仓库根目录的 `scripts/`，不在 `docs/` 下；清单见[根 README 的脚本表](../../README.md)。
@@ -99,15 +100,15 @@ docs/work/
 
 | 路 | 谁来做 | 怎么做 |
 |---|---|---|
-| 网页表单 | 维护者（本机没有 `gh`，这是默认路径） | New issue →「工作分配」 |
-| `gh` | 有 `gh` 的机器 | `gh issue create --title "[工作] <主题>" --body-file out/issue-drafts/<主题>.md --label task` |
+| 网页表单 | 维护者 | New issue →「工作分配」（不依赖 `gh`，任何环境都能走） |
+| `gh` | 维护者（本机已装 `gh` 并登录维护者账号） | `gh issue create --title "[工作] <主题>" --body-file out/issue-drafts/<主题>.md --label task` |
 | REST + token | 有 token 的机器 | `POST /repos/MipLinux/MipLinux/issues`，正文经 `jq -Rs` 塞进 JSON 的 `body` |
 
 **红线：** issue 会以**维护者账号公开发布**，发布前必须给人过目；AI 只产草案，不自己建 issue、
 不自己建 label、不自己开 PR。表单里的「受理人」只是候选，**维护者确认后才生效**。
 
-标签用 `task`。表单里写了 `labels: ["task"]`，但**标签不存在时 GitHub 是静默忽略**（不报错）——
-所以维护者要先建这个标签，否则新 issue 身上不会带标签。
+标签用 `task`（**已于 2026-10-01 建好**）。表单里写了 `labels: ["task"]`，但**标签不存在时 GitHub 是静默忽略**
+（不报错）—— 换仓库或换标签时要先建，否则新 issue 身上不会带标签。
 
 ### 守卫查到哪、查不到哪
 

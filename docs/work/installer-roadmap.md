@@ -28,7 +28,7 @@
 | 层 | 选型 | 一句话理由 |
 |---|---|---|
 | 语言 | Python 3 | Live 里本来就有（`reflector` 依赖它，与 `archinstall` 无关）；测试与迭代最省事 |
-| 界面 | Qt6 + PySide6 | `qt6-base` 已因 `fcitx5-qt` 在 Live 里，`pyside6` 在官方仓库 |
+| 界面 | Qt Quick（QML）+ PySide6（宿主） | **界面用 QML**（路线 B：`QtQuick.Controls.Basic` + 自建 MD3 层，见 [tech/08 §5](tech/08-界面设计方向.md)）；`qt6-base` 已因 `fcitx5-qt` 在 Live 里，`pyside6` 在官方仓库 |
 | kiosk 合成器 | `cage` | 单窗口全屏的 Wayland 合成器，专为这种场景而生；与 P5 的用户桌面（niri / Hyprland）不冲突 |
 | 分区 | `python-pyparted` | 官方 Python 绑定（`archinstall` 同栈）；后续做双系统沿用同一条路 |
 | 联网 | NetworkManager + `nmcli` | Issue #30；安装器直接调命令行，不用自己写 D-Bus |
@@ -51,9 +51,10 @@ installer/
 │   ├── util.py              外部命令与写文件的唯一出口（Runner，可注入替身）
 │   ├── cli.py / __main__.py 无界面入口：`python3 -m mipl_installer`
 │   └── data/                M1 的临时目标包清单（P10 定案后删）
-├── frontend/                PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
-│   ├── mipl-installer       入口，由 cage 拉起
-│   └── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage）
+├── frontend/                Qt Quick（QML）前端：只画界面，不实现逻辑
+│   ├── mipl-installer       入口，由 cage 拉起（待落地，见 #79）
+│   ├── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage；待落地，见 #79）
+│   └── qml/                 MD3 实现；接口准据见 qml/README.md
 ├── tests/                   单测 test_*.py + Live 内排练脚本（*.sh）
 ```
 

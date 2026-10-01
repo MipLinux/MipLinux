@@ -156,6 +156,7 @@ networkmanager
 
 # ==> 安装器 ==>
 cage
+wlr-randr
 qt6-wayland
 qt6-svg
 pyside6

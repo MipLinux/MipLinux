@@ -25,8 +25,8 @@ installer/
 │       ├── network.py    Live 的网络状态与连网（`nmcli`）
 │       └── data/         随包走的数据（M1 的临时目标包清单）
 ├── frontend/             Qt Quick（QML）前端：只画界面，不实现逻辑
-│   ├── mipl-installer    Live 侧入口，由 cage 拉起（**待落地**，见 #79）
-│   ├── mipl-kiosk        kiosk 启动脚本（**待落地**，见 #79）
+│   ├── mipl-installer    Live 侧入口，由 cage 拉起（见 #79）
+│   ├── mipl-kiosk        kiosk 启动脚本（见 #79）
 │   └── qml/              MD3 实现（2026-10-01 起从零重建）；接口准据见 qml/README.md
 │       └── Mipl/         QML 模块（URI `Mipl`）
 │           ├── tokens/   七个 token 单例 + 值类型 + color.json + 断言 / 探针脚本

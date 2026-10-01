@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""mipl-installer —— Live 侧安装器入口（Issue #79 的启动器接线）。
+
+谁拉起它
+--------
+`profile/airootfs/etc/systemd/system/mipl-installer.service` → `/usr/local/bin/mipl-kiosk`
+→ `seatd-launch -- cage -s /usr/local/bin/mipl-installer`。
+构建把整个 `installer/` 拷到 `/usr/local/lib/mipl-installer/`，再把
+`/usr/local/bin/mipl-{installer,kiosk}` 软链进去 —— 所以**本文件必须用
+`os.path.realpath(__file__)` 找自己**，否则软链路径下找不到同级 `qml/`。
+
+本文件干三件事（接口准据：`installer/frontend/qml/README.md` §2）：
+1. **Qt 初始化之前**算出主题与设备层缩放：
+   - 主题：`--theme=auto|light|dark`，auto 用 `Mipl/theme/theme_mode.py` 的纯函数按本地时间解析（08 §3.9）；
+   - 设备层缩放：`--scale=1|2|3` 覆盖一切，否则读 sysfs DRM（分辨率 + EDID 物理尺寸）
+     喂 `Mipl/theme/device_scale.py`（08 §3.10）。这一步**不依赖 Qt**，因为
+     `QT_SCALE_FACTOR` 必须在 Qt 初始化前写进环境。
+2. 用 `qmlRegisterSingletonInstance` 注册单例实例 `MiplLaunch`（`theme` / `themeSource` /
+   `deviceScale`），**顺序固定为 注册 → 建引擎 → load**（README §3.8 实测的两个坑：
+   注册必须早于本进程第一次编译任何 Mipl 类型；`property QtObject` 顺序敏感）。
+3. `auto` 下用 30s `QTimer` 重算 `MiplLaunch.theme`（08 §3.9）；界面在 `MiplTheme.locked`
+   之后不再理会它（`MiplTheme.qml` 自己管）。
+
+`--self-test`：离屏加载根页面、把注入值从 QML 侧读回来断言，打印摘要后退出 ——
+这是本任务唯一能在宿主机（`QT_QPA_PLATFORM=offscreen`）自动验收的路径。
+
+纪律：前端只画界面、不做安装逻辑；后端（`installer/backend/`）不碰 Qt，本文件也不碰它。
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import importlib.util
+import logging
+import os
+import re
+import sys
+from pathlib import Path
+
+LOG = logging.getLogger("mipl-installer")
+
+THEME_CHOICES = ("auto", "light", "dark")
+SCALE_CHOICES = (1, 2, 3)
+
+#: 注入契约（qml/README.md §2）：URI / 版本 / 单例名固定。
+QML_URI = "Mipl"
+QML_VERSION_MAJOR = 1
+QML_VERSION_MINOR = 0
+LAUNCH_SINGLETON = "MiplLaunch"
+
+#: 08 §3.9 建议的低频重算间隔。
+THEME_RECHECK_MS = 30_000
+
+#: `--scale` 覆盖时写进判定依据的 source —— 不是 device_scale.py 的四个来源之一，
+#: 因为它根本没过纯函数（手动覆盖「覆盖一切」）。
+SOURCE_MANUAL_OVERRIDE = "manual-override"
+
+#: sysfs DRM 连接器目录：/sys/class/drm/card0-HDMI-A-1/{status,modes,edid}。
+DRM_SYSFS = Path("/sys/class/drm")
+_MODE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
+
+#: self-test 探针：从 QML 侧读回注入值，别只信 Python 对象自己。
+SELF_TEST_QML = b"""
+import QtQml
+import Mipl 1.0
+
+QtObject {
+    property string theme: MiplLaunch.theme
+    property string themeSource: MiplLaunch.themeSource
+    property real deviceScale: MiplLaunch.deviceScale
+    property bool dark: MiplTheme.dark
+}
+"""
+
+
+# ───────────────────────────── 路径与纯函数模块 ─────────────────────────────
+
+def frontend_dir() -> Path:
+    """本文件所在目录（**realpath 之后**）。
+
+    软链 `/usr/local/bin/mipl-installer` → `/usr/local/lib/mipl-installer/frontend/mipl-installer`，
+    只有 realpath 才能找回同级 `qml/`。
+    """
+    return Path(os.path.realpath(__file__)).parent
+
+
+def load_pure_module(module_name: str, path: Path):
+    """按路径加载 theme 线的纯函数模块。
+
+    不进 `sys.path`（`theme` 不是包，且 `theme_mode` / `device_scale` 这种通用名字
+    容易和别人撞）；模块内容只依赖标准库，不会连带 import Qt。
+    """
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"加载不了纯函数模块：{path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        del sys.modules[module_name]
+        raise
+    return module
+
+
+# ───────────────────────────── 设备层缩放（不依赖 Qt）─────────────────────────────
+
+def _read_first_mode(path: Path):
+    """`modes` 的首行是首选分辨率（`1920x1080`），拿来当 resolution。"""
+    try:
+        with path.open("r", encoding="ascii", errors="replace") as handle:
+            for line in handle:
+                match = _MODE_RE.match(line)
+                if match:
+                    return (int(match.group(1)), int(match.group(2)))
+    except OSError:
+        return None
+    return None
+
+
+def _read_edid_size(path: Path):
+    """EDID 的 0x15 / 0x16 字节 = 最大横向 / 纵向图像尺寸，单位 cm → 返回 mm。"""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 23:
+        return None
+    width_cm, height_cm = data[21], data[22]
+    if width_cm == 0 or height_cm == 0:
+        return None
+    return (width_cm * 10.0, height_cm * 10.0)
+
+
+def read_display_info(sysfs: Path = DRM_SYSFS):
+    """扫 sysfs DRM，返回 `(resolution, physical_size)`；拿不到的项给 `None`。
+
+    只认 `connected` 的连接器；物理尺寸可能拿不到（虚拟显示 / QEMU / EDID 缺失），
+    那正是 §3.10 ③ 分辨率兜底要处理的输入 —— **不编值**。
+    """
+    try:
+        status_paths = sorted(sysfs.glob("card*-*/status"))
+    except OSError as exc:  # 连 /sys 都没有的容器
+        LOG.debug("扫描 %s 失败：%s", sysfs, exc)
+        return (None, None)
+
+    for status_path in status_paths:
+        connector = status_path.parent
+        try:
+            status = status_path.read_text(encoding="ascii", errors="replace").strip()
+        except OSError:
+            continue
+        if status and status != "connected":
+            continue
+        resolution = _read_first_mode(connector / "modes")
+        if resolution is None:
+            continue
+        return (resolution, _read_edid_size(connector / "edid"))
+
+    return (None, None)
+
+
+def decide_device_scale(device_scale_module, override, resolution, physical_size):
+    """`--scale` 覆盖一切；否则走 08 §3.10 的四级判定。
+
+    合成器侧 `wl_output::scale` 这里**拿不到**：要知道它得连上 Wayland，而那时 Qt 已经
+    初始化、`QT_SCALE_FACTOR` 也早定了 —— 设备层缩放必须在那之前算。两边正好对齐：
+    cage 里 `wl_output::scale` 恒为 1，而 `device_scale()` 明确把 `== 1` 当「没有信息」
+    不短路（README §2）；所以传 `None` 与传 `1` 判定完全等价，传 `None` 更诚实。
+    """
+    if override is not None:
+        return device_scale_module.DeviceScale(
+            override,
+            source=SOURCE_MANUAL_OVERRIDE,
+            reason=f"--scale={override} 手动覆盖一切（08 §3.10「手动覆盖」档）",
+        )
+    return device_scale_module.device_scale(
+        output_scale=None,
+        physical_size=physical_size,
+        resolution=resolution,
+    )
+
+
+# ───────────────────────────── 主题（不依赖 Qt）─────────────────────────────
+
+def decide_initial_theme(theme_mode, theme_arg: str, now):
+    """返回 `(theme, theme_source)`：`--theme=light|dark` 走 manual，auto 走时间。"""
+    if theme_arg == "auto":
+        return (theme_mode.resolve_theme(now, theme_mode.SOURCE_AUTO), "auto")
+    return (
+        theme_mode.resolve_theme(
+            now, theme_mode.SOURCE_MANUAL, manual_dark=(theme_arg == "dark")
+        ),
+        "manual",
+    )
+
+
+# ───────────────────────────── 命令行 ─────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mipl-installer",
+        description="MipLinux Live 安装器入口（由 mipl-kiosk 经 seatd-launch + cage 拉起）",
+    )
+    parser.add_argument(
+        "--theme",
+        choices=THEME_CHOICES,
+        default="auto",
+        help="首帧主题：auto（按本地时间，07:00–18:59 亮）/ light / dark（默认 auto）",
+    )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        choices=SCALE_CHOICES,
+        default=None,
+        help="设备层缩放 1|2|3，覆盖一切自动判定（默认按 DRM 信息算）",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="离屏加载根页面并断言注入值，打印摘要后退出（宿主机的自动验收路径）",
+    )
+    return parser
+
+
+# ───────────────────────────── main ─────────────────────────────
+
+def main(argv=None) -> int:
+    argv = list(argv) if argv is not None else list(sys.argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    args = build_parser().parse_args(argv[1:])
+
+    here = frontend_dir()
+    qml_dir = here / "qml"
+    theme_dir = qml_dir / "Mipl" / "theme"
+    main_qml = qml_dir / "Mipl" / "Main.qml"
+
+    if not main_qml.is_file():
+        LOG.error("找不到根页面：%s（本文件在 %s）", main_qml, here)
+        return 1
+    try:
+        theme_mode = load_pure_module("mipl_theme_mode", theme_dir / "theme_mode.py")
+        device_scale_module = load_pure_module(
+            "mipl_device_scale", theme_dir / "device_scale.py"
+        )
+    except (OSError, ImportError) as exc:
+        LOG.error("加载 theme 纯函数失败：%s", exc)
+        return 1
+
+    # ---- ① 设备层缩放：先算、先写环境变量；此刻还没 import 任何 Qt ----
+    resolution, physical_size = read_display_info()
+    decision = decide_device_scale(
+        device_scale_module, args.scale, resolution, physical_size
+    )
+    if decision.log_required:
+        # 08 §3.10 ④ 的硬要求：拿不到任何信息时落 1x 也**必须**留一条日志，不静默。
+        LOG.warning(
+            "device scale 落到 %sx（来源 %s）：%s",
+            int(decision),
+            decision.source,
+            decision.reason,
+        )
+        for note in decision.notes:
+            LOG.warning("device scale 备注：%s", note)
+    # Qt 初始化就吃这个变量，所以必须在 import PySide6 之前 set。
+    os.environ["QT_SCALE_FACTOR"] = str(int(decision))
+    LOG.info(
+        "设备层缩放 %sx（来源 %s）→ QT_SCALE_FACTOR=%s；判定：%s",
+        int(decision),
+        decision.source,
+        os.environ["QT_SCALE_FACTOR"],
+        decision.reason,
+    )
+
+    # ---- ② 首帧主题：同样在 Qt 之前定（P5 / 08 §3.9）----
+    now = datetime.datetime.now()
+    theme, theme_source = decide_initial_theme(theme_mode, args.theme, now)
+    LOG.info("首帧主题 %s（themeSource=%s，本地时间 %s）", theme, theme_source, now)
+
+    # ---- ③ Qt：到这里才 import，确保 QT_SCALE_FACTOR 已经生效 ----
+    try:
+        from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
+        from PySide6.QtQml import qmlRegisterSingletonInstance
+    except ImportError as exc:  # Live 里由 pyside6 提供
+        LOG.error("装不上 PySide6：%s（Live 里由 profile/packages.x86_64 的 pyside6 带进来）", exc)
+        return 1
+
+    class MiplLaunch(QObject):
+        """注入给 QML 的启动期状态（qml/README.md §2 的三个属性）。"""
+
+        themeChanged = Signal()
+
+        def __init__(self, initial_theme, source, device_scale_value):
+            super().__init__()
+            self._theme = initial_theme
+            self._theme_source = source
+            self._device_scale = float(device_scale_value)
+
+        @Property(str, notify=themeChanged)
+        def theme(self):  # noqa: N802 —— QML 属性名就是 `theme`
+            return self._theme
+
+        @Property(str, constant=True)
+        def themeSource(self):
+            return self._theme_source
+
+        @Property(float, constant=True)
+        def deviceScale(self):
+            return self._device_scale
+
+        @Slot()
+        def refresh_theme(self):
+            """30s 定时器回调：只有 auto 才重算；界面锁定与否由 QML 侧管。"""
+            if self._theme_source != "auto":
+                return
+            new_theme = theme_mode.resolve_theme(
+                datetime.datetime.now(), theme_mode.SOURCE_AUTO
+            )
+            if new_theme != self._theme:
+                LOG.info("主题随定时重算切换：%s → %s", self._theme, new_theme)
+                self._theme = new_theme
+                self.themeChanged.emit()
+
+    app = QGuiApplication(argv)
+
+    launch = MiplLaunch(theme, theme_source, decision)
+
+    # 注册必须早于本进程第一次编译任何 Mipl 类型（README §3.8）→ 注册 → 建引擎 → load。
+    #
+    # ⚠️ PySide6 的绑定签名与 C++ 模板不同（6.11.2 运行时核对）：
+    #     C++ : qmlRegisterSingletonInstance<T>(uri, major, minor, name, obj)
+    #     PySide6: qmlRegisterSingletonInstance(type_obj, uri, major, minor, name, obj)
+    # 即把 T 作为**第一个位置实参**。README §2 里那行是 C++ 形态，照抄会 TypeError。
+    qmlRegisterSingletonInstance(
+        MiplLaunch, QML_URI, QML_VERSION_MAJOR, QML_VERSION_MINOR,
+        LAUNCH_SINGLETON, launch,
+    )
+
+    engine = QQmlApplicationEngine()
+    engine.addImportPath(str(qml_dir))
+    engine.load(QUrl.fromLocalFile(str(main_qml)))
+
+    if not engine.rootObjects():
+        LOG.error("根页面加载失败（0 个根对象）：%s", main_qml)
+        return 1
+
+    # ---- ④ --self-test：从 QML 侧读回注入值再断言 ----
+    if args.self_test:
+        component = QQmlComponent(engine)
+        component.setData(SELF_TEST_QML, QUrl())
+        probe = component.create()
+        if probe is None:
+            errors = "; ".join(e.toString() for e in component.errors())
+            LOG.error("[self-test] 探针组件创建失败：%s", errors or "（无错误信息）")
+            return 1
+
+        expected_scale = os.environ["QT_SCALE_FACTOR"]
+        checks = [
+            ("MiplLaunch.theme", probe.property("theme"), launch.theme),
+            ("MiplLaunch.themeSource", probe.property("themeSource"), launch.themeSource),
+            ("MiplLaunch.deviceScale", probe.property("deviceScale"), launch.deviceScale),
+            ("MiplTheme.dark", probe.property("dark"), launch.theme == "dark"),
+            ("QT_SCALE_FACTOR", expected_scale, str(int(decision))),
+        ]
+        failed = [(name, got, want) for name, got, want in checks if got != want]
+
+        root = engine.rootObjects()[0]
+        print(f"[self-test] 根页面：{main_qml}")
+        print(f"[self-test] 根对象：{root.metaObject().className()}（创建成功）")
+        print(f"[self-test] MiplLaunch.theme = {launch.theme!r}（themeSource={launch.themeSource!r}）")
+        print(f"[self-test] MiplTheme.dark = {probe.property('dark')}")
+        print(
+            f"[self-test] MiplLaunch.deviceScale = {launch.deviceScale}"
+            f"（QT_SCALE_FACTOR={expected_scale}，来源 {decision.source}）"
+        )
+        print(f"[self-test] 设备层判定：{decision.reason}")
+        for name, got, want in failed:
+            print(f"[self-test] FAIL {name}: 实际 {got!r}，期望 {want!r}")
+        if failed:
+            return 1
+        print("[self-test] OK")
+        return 0
+
+    # ---- ⑤ auto：30s 低频重算（08 §3.9）----
+    if theme_source == "auto":
+        timer = QTimer()
+        timer.setInterval(THEME_RECHECK_MS)
+        timer.timeout.connect(launch.refresh_theme)
+        timer.start()
+        launch._theme_timer = timer  # 绑定生命周期，防止被 GC
+
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

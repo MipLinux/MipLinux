@@ -49,7 +49,10 @@
 启动器在**创建窗口之前**算好主题与设备缩放，注册单例实例（`engine.load()` 之前）：
 
 ```python
-qmlRegisterSingletonInstance("Mipl", 1, 0, "MiplLaunch", launch)
+# PySide6 6.11：**第一个位置实参是类型对象**，不是 uri。
+# （C++ 的模板形态是 qmlRegisterSingletonInstance<T>(uri, major, minor, name, obj)；
+#  照那个顺序写 Python 会直接 TypeError —— 以本行为准，签名已在运行时核对过。）
+qmlRegisterSingletonInstance(MiplLaunch, "Mipl", 1, 0, "MiplLaunch", launch)
 ```
 
 | 属性 | 类型 | 含义 |

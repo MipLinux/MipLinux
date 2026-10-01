@@ -1,8 +1,11 @@
 # Mipl QML · 接口冻结 v1（阶段 0）
 
 > **状态**：冻结于 2026-10-01。依据 [08-界面设计方向.md](../../../docs/work/tech/08-界面设计方向.md) §3 / §6。
-> **本目录的界面代码一条都没实测**。唯一有实测支撑的是色板数据：`tokens/color.json` 的 35×2 个值
-> 由官方算法在本机重生成，与 08 附录 A.2 逐项相等（2026-10-01）。其余一律记「未实测 / 仅静态检查」。
+> **已实测到哪一步**：色板、token 单例、theme 纯函数与组件都在**本机**跑过 —— 色板 35×2 与 08 附录 A.2 逐项相等；
+> V1（335 项）/ V2（28 组）/ V6（51 条单测）全绿；18 个组件在 offscreen + PySide6 6.11.2 下加载 Ready，
+> 并做过组件级键盘检查（见 §6）。
+> **仍未实测**：V3（键盘全流程）/ V4（首帧预算）/ V5（视觉基线）/ V7（真机缩放）/ V8（界面层四档），
+> 以及真 ISO / cage 里的一切 —— **离屏不等于笼子**。
 
 这份文件是阶段 0 的**唯一接口准据**：三条并行线（tokens / theme / components）各自只写自己的目录，
 **跨目录的名字以本文件为准**。改本文件 = 改接口，要先过维护者。
@@ -14,7 +17,7 @@
 | 路径 | 归谁 | 内容 |
 |---|---|---|
 | `installer/frontend/qml/README.md` | 接口（本文件） | 冻结的 token 名、注入契约、纪律 |
-| `installer/frontend/qml/Mipl/qmldir` | tokens 线 | 模块清单 |
+| `installer/frontend/qml/Mipl/qmldir` | tokens 线 + 整合步 | 模块清单（组件的 18 行登记由整合步补） |
 | `installer/frontend/qml/Mipl/tokens/**` | tokens 线 | 七个 QML 单例 + 一个值类型（`MiplTypeScale`）+ `color.json` + 断言脚本 |
 | `installer/frontend/qml/Mipl/theme/**` | theme 线 | 主题解析与设备缩放的**纯函数**（Python）+ 单测 |
 | `installer/frontend/qml/Mipl/components/**` | components 线 | 08 §4.1 的 17 项 + 示例页 |
@@ -135,6 +138,13 @@ DPI 取**对角线**口径（08 §3.10 没指定横向还是对角）；`wl_outp
   `engine→register` = Error；用 `property var` 则两种顺序都 Ready）。启动器仍按「注册 → 建引擎 → load」最稳。
 - **`MiplTypeScale` 是普通类型**（`qmldir` 里没有 `singleton`），组件才能写 `property MiplTypeScale x`。
 - `MiplShape.none`（`0 * factor`）与 `full`（`9999 * factor`）也乘 `factor`，形状档位统一、不开例外。
+- **动画时长只能用 `MiplMotion.<档>`，不要再乘 `motionScale`。** `MiplMotion.short2` 本身已是
+  `100 * motionScale`，再乘一次就是 `基准 × motionScale²` —— 在 0 与 1 两个端点上看不出来，中间值全错。
+  复核线第一轮就在 12 个组件里抓到 17 处这个写法（`motionScale=0.5` 时 25 而不是 50）。
+- **`qmllint` 只是语法检查**：`MiplColor.noSuchRole`、`Button { noSuchProperty: 1 }` 它都判 exit 0，
+  只有语法错才非 0。所以「qmllint 全绿」**不能**当语义证据 —— 语义靠 §6 的加载探针。
+- **注册时机**：`qmlRegisterSingletonInstance(..., "Mipl", ...)` 必须在本进程**第一次编译任何 Mipl 类型之前**
+  完成；否则后面所有 engine 解析 qmldir 里的复合类型都会失败，且报的是误导性错误。
 
 ## 4. 语言边界
 
@@ -154,7 +164,7 @@ date picker / time picker / search bar / data table / slider / tabs / bottom app
 
 | 判据 | 命令 | 现状 |
 |---|---|---|
-| 色板 = 08 附录 A.2 | `cd /tmp/mip-md3 && node gen.mjs '#2576E9'` 与 `tokens/color.json` 逐项比 | **本机已验**（2026-10-01 重生成，35×2 全等） |
+| 色板 = 08 附录 A.2 | 离线复现见 08 A.4（**必须显式传种子**）；库内一致性由 V1 的 `check-tokens.py` 三方比对覆盖 | **已验**：`#2576E9` 生成的 70 个值与 A.2 逐项相等。⚠️ **别用 `/tmp/mip-md3/gen.mjs` 验 A.2** —— 它第 14 行是 `ranked[0]`、**忽略 argv**，会落到打分首选 `#3c93fb`，于是 `on-surface/surface` 算出 14.38 而不是 14.41（复核线已独立复现这条差异的来源） |
 | V1 token 一致 | `python3 installer/frontend/qml/Mipl/tokens/tools/check-tokens.py` | **本机已跑绿**（2026-10-01）：335 个比对项全一致 |
 | V2 对比度 ≥4.5 / ≥3 | `python3 installer/frontend/qml/Mipl/tokens/tools/check-contrast.py` | **本机已跑绿**：28 组全过，与 A.3 两位小数一致（最大差 0.005） |
 | V6 主题解析 | `python3 -m unittest discover -s installer/frontend/qml/Mipl/theme/tests -t installer/frontend/qml/Mipl/theme` | **本机已跑绿**：51 条，含 06:59 / 07:00 / 18:59 / 19:00 四个边界 |

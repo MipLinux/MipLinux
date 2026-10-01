@@ -6,7 +6,7 @@ MipLinux 是基于 Arch Linux 的滚动发行版：**NVIDIA 显卡开箱可用**
 本文是 AI 在本仓库的行为契约，只放**全项目通用**的规则。目录专属的规矩在下级文件里（见「仓库布局」），
 按 AGENTS.md 规范的**累积**语义，下级文件继承本文而不重复它。
 技术结论以 `docs/` 为准，两者冲突时先问人，不自行裁决。
-动手前按顺序读：[01-概念模型](docs/knowledge/01-概念模型.md) → [05-测试方法](docs/knowledge/05-测试方法.md) → [README 的 D 表](README.md) → 手上那条线的文档。
+动手前按顺序读：[01-概念模型](docs/knowledge/01-概念模型.md) → [05-测试方法](docs/knowledge/05-测试方法.md) → [README 的 D 表](README.md) → 手上那条工作的 issue。
 
 ## 仓库布局
 
@@ -18,7 +18,7 @@ installer/   安装器源码
 scripts/     项目操作台：mipl.sh 及其调用的构建脚本
 docs/
   knowledge/ 已确定的结论，给新手读
-  work/      待执行与正在执行的工作：ROADMAP、当日记录、tech/
+  work/      工作 issue 的规范与草案骨架、ROADMAP、tech/
   archive/   已归档的问题记录：症状、根因、修法、排错方法
 out/         构建产物与测试资产（已 gitignore，不提交）
 .github/     CODEOWNERS、Issue 模板、workflow
@@ -44,12 +44,16 @@ out/         构建产物与测试资产（已 gitignore，不提交）
 
 **接到任务先走一遍；任何一问答不上来就停下问用户，不猜，也不「先做着看看」。**
 
-1. **这是哪条线？** 用户没说就问，**不要从代码里推断**。
-   工作线**按天布置、编号每轮重排** —— 9.18 的「线 B」是 Fedora 测试环境，9.19 的「线 B」是安装器，两者毫无关系。
-   所以本文**不列线表**：当前分工与文件所有权以**当日记录**为准，入口是 [work/README](docs/work/README.md)。
-2. **分支对不对？** `git status -sb`。不是这条线的分支就先切，不在别人的分支上顺手加东西。
+1. **这是哪个工作 issue？** 用户没说就问，**不要从代码里推断**。
+   工作**按 issue 布置**：一条工作 = 一个 issue（label `task`），**assignee 就是受理人**，
+   issue 里「实现」写明的文件路径就是这条工作能碰的范围。所以本文**不列分工表**：
+   当前在做的工作看 [GitHub Issues](https://github.com/MipLinux/MipLinux/issues?q=label%3Atask)，
+   规范入口是 [work/README](docs/work/README.md)，骨架是 [TEMPLATE.md](docs/work/TEMPLATE.md)。
+   草案写完跑 `./scripts/check-work-issue.sh`（校验 `out/issue-drafts/`，并比对骨架与表单是否漂移）；
+   **没有对应 issue 就先起草一份给用户过目，不自己建 issue**（三条发布路径见 work/README 的「怎么发布」）。
+2. **分支对不对？** `git status -sb`。不是这条工作的分支就先切，不在别人的分支上顺手加东西。
 3. **远端拉过没有？** `git fetch origin`，再与 `origin/main` 比领先 / 落后。
-4. **要碰的文件属于这条线吗？** 照当日记录的「任务分工」表逐个核对；不属于就不碰，走「出界提 issue」。
+4. **要碰的文件属于这条工作吗？** 照这个 issue 的「实现」（写明了文件路径）逐个核对；不属于就不碰，走「出界提 issue」。
 
 **总则：单线作业，不得跨线。** 所有权按**文件**切 —— 两边的改动撞在同一批文件上，就只能整份重建才能验证。
 
@@ -76,7 +80,7 @@ out/         构建产物与测试资产（已 gitignore，不提交）
   仓库设了 `blank_issues_enabled: false`，空白 issue 提不出去，必须按模板的必填字段写；依据文档操作出的问题用「文档问题」模板，不要当 Bug 提。
   流程：读模板 → 拼正文 → **给用户过目** → `gh issue create --title "<前缀>…" --body-file <文件> --label <label>`。
   不要用 `-T/--template`（它只把 YAML 当起始正文塞进去）；必须过目，是因为 `gh` 登录的是 code owner 账号，issue 会以维护者身份**公开发布**。
-  改模板本身要先改 `MipLinux/.github` 组织级（`.github/ISSUE_TEMPLATE/*.yml` 是它的副本）。提完回到本线继续干活 —— 提 issue 是分流，不是收工。
+  改模板本身要先改 `MipLinux/.github` 组织级（`.github/ISSUE_TEMPLATE/*.yml` 是它的副本）。提完回到手上的工作继续干活 —— 提 issue 是分流，不是收工。
 
 - **Git**：开工前 `git fetch origin` + `git status -sb`；落后 `origin/main` 就 `git pull --ff-only`。
   **不是快进、本地有改动、或出现冲突 → 立刻停下，把冲突文件交给用户**；禁止自行 `merge` / `rebase` / `reset --hard` / `push --force` ——
@@ -89,7 +93,7 @@ out/         构建产物与测试资产（已 gitignore，不提交）
 
 ### 必须停下来问人
 
-工作线不明 · 要改别人线里的文件 · 破坏性命令 · 要改 D 条目或新增 D 编号 · `pkexec` 返回 `126` / `127` ·
+没有对应 issue 的工作 · 要改别人 issue 里的文件 · 破坏性命令 · 要改 D 条目或新增 D 编号 · `pkexec` 返回 `126` / `127` ·
 拉取不是快进或出现冲突 · 要新增依赖 / 改包清单 / 改 `SigLevel` · 任何真机操作 · 文档该放哪层拿不准 · 用户指令与已定案决策冲突。
 
 > **拿不准就停下问。** `out/` 里的东西可以重建，但一条写错的口径会跟着后面所有人走。

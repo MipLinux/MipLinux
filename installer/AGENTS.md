@@ -90,4 +90,4 @@ sudo ./scripts/mipl.sh installer --boot c                # 从盘启动验安装
 ## 两块的边界
 
 `backend/mipl_installer/` 与 `tests/` 是安装器核心；`frontend/mipl-installer` 是 Live 侧入口（由 `cage` 拉起、由构建脚本拷进 `airootfs`）。
-两块常由不同的人同时推进 —— 动手前先确认当日的分工（见根文件的「开工前置」）。
+两块常由不同的人同时推进 —— 动手前先确认这两块各归哪个 issue（见根文件的「开工前置」）。

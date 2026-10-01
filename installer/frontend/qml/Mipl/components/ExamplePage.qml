@@ -106,11 +106,12 @@ ApplicationWindow {
             Repeater {
                 model: MiplScale.steps
 
-                MenuItem {
+                MiplMenuItem {
                     required property int index
                     required property var modelData
 
-                    text: MiplScale.labels[index] + " · " + Math.round(modelData * 100) + "%"
+                    // MiplScale.labels 本身就带百分比（token 侧契约），这里不要再拼一次
+                    text: MiplScale.labels[index]
                     checkable: true
                     checked: Math.abs(MiplScale.factor - modelData) < 0.001
                     onTriggered: {
@@ -121,20 +122,20 @@ ApplicationWindow {
             }
         }
 
-        // 15 · Menu：普通下拉（有分组分隔线的用法）
+        // 15 · Menu：普通下拉（分隔线用 MiplDivider；菜单项一律 MiplMenuItem —— 见 MiplMenuItem.qml 头部的 F8 说明）
         MiplMenu {
             id: moreMenu
 
-            MenuItem {
+            MiplMenuItem {
                 text: qsTr("重新扫描磁盘")
                 onTriggered: snackbar.show(qsTr("重新扫描磁盘（示例）"))
             }
-            MenuItem {
+            MiplMenuItem {
                 text: qsTr("查看安装日志")
                 onTriggered: snackbar.show(qsTr("查看安装日志（示例）"))
             }
-            MenuSeparator {}
-            MenuItem {
+            MiplDivider { inset: true }
+            MiplMenuItem {
                 text: qsTr("清除本次选择")
                 enabled: false
             }

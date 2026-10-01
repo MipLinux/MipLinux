@@ -21,7 +21,9 @@ ItemDelegate {
                                      : lineCount === 2 ? MiplSpace.page + MiplSpace.xl
                                      : MiplSpace.page + MiplSpace.xl + MiplSpace.l
 
-    implicitHeight: Math.max(minHeight, contentItem.implicitHeight + topPadding + bottomPadding)
+    // 走 control.contentItem：裸写 contentItem 在独立实例化时解析不到，会报 ReferenceError
+    readonly property real contentHeight: control.contentItem ? control.contentItem.implicitHeight : 0
+    implicitHeight: Math.max(minHeight, contentHeight + topPadding + bottomPadding)
     implicitWidth: MiplSpace.page * 6
     padding: MiplSpace.l
     spacing: MiplSpace.l

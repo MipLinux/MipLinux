@@ -57,8 +57,10 @@ Button {
     Keys.onReturnPressed: control._activateKey()
     Keys.onEnterPressed: control._activateKey()
 
-    // MD3 最小可点高度 48dp（08 §3.4 的 page 档），随界面层缩放
-    implicitHeight: Math.max(MiplSpace.page, contentItem.implicitHeight + MiplSpace.l)
+    // MD3 最小可点高度 48dp（08 §3.4 的 page 档），随界面层缩放。
+    // 走 control.contentItem：裸写 contentItem 在独立实例化时解析不到，会报 ReferenceError
+    readonly property real contentHeight: control.contentItem ? control.contentItem.implicitHeight : 0
+    implicitHeight: Math.max(MiplSpace.page, contentHeight + MiplSpace.l)
     leftPadding: MiplSpace.xl
     rightPadding: MiplSpace.xl
     topPadding: MiplSpace.s

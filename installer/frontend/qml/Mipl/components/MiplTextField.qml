@@ -22,10 +22,11 @@ TextField {
     readonly property color supportingColor: control.error ? MiplColor.error : MiplColor.onSurfaceVariant
 
     // MD3 filled / outlined 高度 56 = page + s；另外给输入行留足一行 bodyLarge 的行高 ——
-    // QQC 的 TextInput implicitHeight 偏小，只按它算会让输入文字和浮动标签挤在一起
-    implicitHeight: Math.max(MiplSpace.page + MiplSpace.s,
-                             Math.max(contentItem.implicitHeight, MiplType.bodyLarge.lineHeight)
-                             + topPadding + bottomPadding)
+    // QQC 的 TextInput implicitHeight 偏小，只按它算会让输入文字和浮动标签挤在一起。
+    // 走 control.contentItem：裸写 contentItem 在独立实例化时解析不到，会报 ReferenceError
+    readonly property real inputHeight: Math.max(control.contentItem ? control.contentItem.implicitHeight : 0,
+                                                MiplType.bodyLarge.lineHeight)
+    implicitHeight: Math.max(MiplSpace.page + MiplSpace.s, inputHeight + topPadding + bottomPadding)
     implicitWidth: MiplSpace.page * 5
 
     topPadding: control.label.length > 0

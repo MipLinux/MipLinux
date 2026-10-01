@@ -24,10 +24,14 @@ installer/
 │       ├── options.py    语言 / 键盘 / 时区的名单与校验
 │       ├── network.py    Live 的网络状态与连网（`nmcli`）
 │       └── data/         随包走的数据（M1 的临时目标包清单）
-├── frontend/             PySide6 前端：只画界面，不实现逻辑（M2 起有代码）
-│   ├── mipl-installer    Live 侧入口，由 cage 拉起
-│   ├── bridge/           前后端**唯一**的耦合层（见 bridge/README.md）
-│   └── tools/            取图 / 流程烟测 / 接线烟测 / 开机取证 / M2 验收驱动
+├── frontend/             Qt Quick（QML）前端：只画界面，不实现逻辑
+│   ├── mipl-installer    Live 侧入口，由 cage 拉起（**待落地**，见 #79）
+│   ├── mipl-kiosk        kiosk 启动脚本（**待落地**，见 #79）
+│   └── qml/              MD3 实现（2026-10-01 起从零重建）；接口准据见 qml/README.md
+│       └── Mipl/         QML 模块（URI `Mipl`）
+│           ├── tokens/   七个 token 单例 + 值类型 + color.json + 断言 / 探针脚本
+│           ├── theme/    主题解析与设备缩放的纯函数（Python）+ 单测
+│           └── components/ 08 §4.1 的 17 项 + ExamplePage + 组件探针
 ├── tests/                单测（test_*.py）+ Live 内排练脚本（*.sh）
 ```
 
@@ -41,7 +45,8 @@ installer/
 - **逻辑先于外壳。** 先让「分区 → 装包 → 配置 → 写引导」在没有界面的情况下跑通，再套界面 ——
   这样界面方案的变更不会导致返工。`core` 必须能被 CLI 与测试直接驱动。
 - **后端不依赖 Qt。** `backend/mipl_installer/` 里出现 `PySide6`/`Qt` 的 import 就算破线；
-  前端只订阅 `events.py` 的事件流、不实现逻辑（接口见 [frontend/README.md](frontend/README.md)）。
+  前端只订阅 `events.py` 的事件流、不实现逻辑。**新的前后端耦合层尚未落地**（旧 `frontend/bridge/` 已随 #74 移出）；
+  界面侧的接口准据是 [frontend/qml/README.md](frontend/qml/README.md)。
 - **包清单唯一来源。** 不得在代码里另写一份「装什么包」的列表（D6）—— 两边各写各的，就会出现
   「Live 里中文能打字、装完不能」这类难以定位的问题。装后系统的清单放哪见 [P10](../docs/knowledge/06-待定事项.md)。
 - **源码与镜像内容分开放。** 构建脚本把 `installer/` 拷进 `airootfs`，`profile/` 里只放 systemd unit 与入口 ——
@@ -51,20 +56,19 @@ installer/
 
 ```bash
 # 单测：不需要 root、不需要 Live（后端在 sys.path 上由 tests/__init__.py 自己接好）
+# 注意：test_records.py / test_qemu_scenario.py 测的是**已移出**的旧 frontend/bridge/，
+# 新的前后端耦合层落地前这两条会 import 失败（见 #81 / #79）。
 python3 -m unittest discover -s installer/tests -t installer
 
 # 直接驱动 CLI（Live 里由 tests/live-rehearsal.sh 代劳）
 PYTHONPATH=installer/backend python3 -m mipl_installer --disk /dev/vda --dry-run
 
-# 接线烟测：挂真 Backend + Install，安装走 dry-run —— **不需要 root、不碰盘**
-python3 installer/frontend/tools/wiring-check.py
-
-# 离线流程烟测：不挂后端，只验路由与状态传递
-python3 installer/frontend/tools/flow-check.py --demo
-
-# M2 验收：真 ISO 上无头点完整条链（图形化装完一次）+ 从盘启动验检查点 4。
-# 要 root（pkexec）；**不需要显示器** —— QEMU 的 screendump 当眼睛、input-send-event 当手
-pkexec /usr/bin/python3 installer/frontend/tools/gui-install.py
+# 界面侧验收：**不需要 root、不需要 Live**（离屏 Qt + Python 标准库）
+python3 installer/frontend/qml/Mipl/tokens/tools/check-tokens.py       # V1：token ↔ color.json ↔ 08
+python3 installer/frontend/qml/Mipl/tokens/tools/check-contrast.py     # V2：对比度 28 组
+python3 -m unittest discover -s installer/frontend/qml/Mipl/theme/tests -t installer/frontend/qml/Mipl/theme
+QT_QPA_PLATFORM=offscreen python3 installer/frontend/qml/Mipl/tokens/tools/probe-tokens.py
+QT_QPA_PLATFORM=offscreen python3 installer/frontend/qml/Mipl/components/tools/probe-components.py
 ```
 
 ## 测试

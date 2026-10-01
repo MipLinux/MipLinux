@@ -23,5 +23,6 @@ MiplChip 1.0 components/MiplChip.qml
 MiplSnackbar 1.0 components/MiplSnackbar.qml
 MiplTooltip 1.0 components/MiplTooltip.qml
 MiplMenu 1.0 components/MiplMenu.qml
+MiplMenuItem 1.0 components/MiplMenuItem.qml
 MiplDivider 1.0 components/MiplDivider.qml
 MiplBadge 1.0 components/MiplBadge.qml

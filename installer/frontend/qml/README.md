@@ -2,10 +2,10 @@
 
 > **状态**：冻结于 2026-10-01。依据 [08-界面设计方向.md](../../../docs/work/tech/08-界面设计方向.md) §3 / §6。
 > **已实测到哪一步**：色板、token 单例、theme 纯函数与组件都在**本机**跑过 —— 色板 35×2 与 08 附录 A.2 逐项相等；
-> V1（335 项）/ V2（28 组）/ V6（51 条单测）全绿；18 个组件在 offscreen + PySide6 6.11.2 下加载 Ready，
-> 并做过组件级键盘检查（见 §6）。
+> V1（335 项）/ V2（28 组）/ V6（51 条单测）全绿；18 个组件在 offscreen + PySide6 6.11.2 下加载 Ready。
 > **仍未实测**：V3（键盘全流程）/ V4（首帧预算）/ V5（视觉基线）/ V7（真机缩放）/ V8（界面层四档），
-> 以及真 ISO / cage 里的一切 —— **离屏不等于笼子**。
+> 以及真 ISO / cage 里的一切 —— **离屏不等于笼子**。组件级键盘行为有人离屏点过
+> （`Return` / 小键盘 `Enter` / `Space` 都能触发 `clicked`），但**没有落成仓内脚本**，所以只当旁证、不当 V3。
 
 这份文件是阶段 0 的**唯一接口准据**：三条并行线（tokens / theme / components）各自只写自己的目录，
 **跨目录的名字以本文件为准**。改本文件 = 改接口，要先过维护者。
@@ -164,8 +164,9 @@ date picker / time picker / search bar / data table / slider / tabs / bottom app
 
 | 判据 | 命令 | 现状 |
 |---|---|---|
-| 色板 = 08 附录 A.2 | 离线复现见 08 A.4（**必须显式传种子**）；库内一致性由 V1 的 `check-tokens.py` 三方比对覆盖 | **已验**：`#2576E9` 生成的 70 个值与 A.2 逐项相等。⚠️ **别用 `/tmp/mip-md3/gen.mjs` 验 A.2** —— 它第 14 行是 `ranked[0]`、**忽略 argv**，会落到打分首选 `#3c93fb`，于是 `on-surface/surface` 算出 14.38 而不是 14.41（复核线已独立复现这条差异的来源） |
+| 色板 = 08 附录 A.2 | 离线复现见 08 A.4（**必须显式传种子**）；库内一致性由 V1 的 `check-tokens.py` 三方比对覆盖 | **已验**：`#2576E9` 生成的 70 个值与 A.2 逐项相等。⚠️ **别用 `/tmp/mip-md3/gen.mjs` 验 A.2** —— 它第 14 行是 `ranked[0]`、**忽略 argv**，会落到打分首选（`#3c93fb` / `#3d93fb` —— WSMeans 有 ±1 阶随机，见 08 A.1），于是 `on-surface/surface` 算出 14.38 而不是 14.41（复核线已独立复现这条差异的来源） |
 | V1 token 一致 | `python3 installer/frontend/qml/Mipl/tokens/tools/check-tokens.py` | **本机已跑绿**（2026-10-01）：335 个比对项全一致 |
 | V2 对比度 ≥4.5 / ≥3 | `python3 installer/frontend/qml/Mipl/tokens/tools/check-contrast.py` | **本机已跑绿**：28 组全过，与 A.3 两位小数一致（最大差 0.005） |
 | V6 主题解析 | `python3 -m unittest discover -s installer/frontend/qml/Mipl/theme/tests -t installer/frontend/qml/Mipl/theme` | **本机已跑绿**：51 条，含 06:59 / 07:00 / 18:59 / 19:00 四个边界 |
+| 组件层（离屏旁证） | `QT_QPA_PLATFORM=offscreen python3 installer/frontend/qml/Mipl/components/tools/probe-components.py` | **本机已跑绿**：101 项全过（19 个组件 Ready + `Return`/小键盘 `Enter`/`Space` 触发 + 动画时长 0.5/1.0/2.0 等于 token）。**旁证，不是 V3** |
 | 模块能加载 | `python3 installer/frontend/qml/Mipl/tokens/tools/probe-tokens.py`（`addImportPath` + `import Mipl 1.0` 读回值） | 同口径探针**本机已验**（2026-10-01，对最终产物复跑）；见 §1 |

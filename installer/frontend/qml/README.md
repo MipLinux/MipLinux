@@ -15,7 +15,7 @@
 |---|---|---|
 | `installer/frontend/qml/README.md` | 接口（本文件） | 冻结的 token 名、注入契约、纪律 |
 | `installer/frontend/qml/Mipl/qmldir` | tokens 线 | 模块清单 |
-| `installer/frontend/qml/Mipl/tokens/**` | tokens 线 | 六个 QML 单例 + `color.json` + 断言脚本 |
+| `installer/frontend/qml/Mipl/tokens/**` | tokens 线 | 七个 QML 单例 + 一个值类型（`MiplTypeScale`）+ `color.json` + 断言脚本 |
 | `installer/frontend/qml/Mipl/theme/**` | theme 线 | 主题解析与设备缩放的**纯函数**（Python）+ 单测 |
 | `installer/frontend/qml/Mipl/components/**` | components 线 | 08 §4.1 的 17 项 + 示例页 |
 | `installer/frontend/mipl-installer`（尚未创建） | **本阶段不做** | 启动器接线留到整合步 |
@@ -33,12 +33,13 @@
   `qmlRegisterSingletonType(QUrl.fromLocalFile(...), "Mipl", 1, 0, "<名>")` 显式注册。
   回退必须留下实测记录，且**不许**改本文件的路径与名字。
 
-> ✅ **主方案本机已验证（2026-10-01）**，回退方案**不需要**：spike 里 `Mipl/qmldir` 写
-> `singleton MiplColor 1.0 tokens/MiplColor.qml` 与 `MiplCard 1.0 components/MiplCard.qml`，
-> PySide6 6.11.2 用 `engine.addImportPath("<qml 根>")` + `import Mipl 1.0` 读出
-> `MiplColor.primary = #adc6ff`、`MiplColor.surface = #111318`，`component.status = Ready`。
-> 反证也在：去掉 `-I` 后 `qml6` 报 `Did not load any objects`（退出码 2）。
+> ✅ **主方案本机已验证（2026-10-01）**，回退方案**不需要**。取证方式可随时复跑、不依赖任何临时目录：
+> 用 PySide6 6.11.2 建 `QQmlEngine` → `engine.addImportPath("installer/frontend/qml")` → 加载一个
+> `import Mipl 1.0` 的探针，读回 `MiplColor.primary == "#adc6ff"`、`MiplColor.surface == "#111318"`、
+> `component.status == Ready`。反证也在：不传 import path 时 `qml6` 报 `Did not load any objects`（退出码 2）。
 > 注意 `qml6` 的 `console.log` 在本机不出现在输出里 —— **别拿「没打印」当通过**，要用 Python 读回值。
+> （首次 spike 用的临时目录后来被别的工作覆盖了，所以上面改成「对最终产物复跑同口径探针」——
+> 复核时发现「取证不能只留在 `/tmp`」。）
 
 ## 2. 启动注入契约（首帧之前）
 
@@ -55,13 +56,23 @@ qmlRegisterSingletonInstance("Mipl", 1, 0, "MiplLaunch", launch)
 | `MiplLaunch.deviceScale` | `float` | 实际写进 `QT_SCALE_FACTOR` 的值（1 / 2 / 3） |
 
 **运行期**：`auto` 下启动器每 30s 用同一纯函数重算并更新 `MiplLaunch.theme`；界面锁定后绑定不再理会它。
-`MiplLaunch` 由 theme 线提供纯函数、由整合步接线 —— **本阶段不写启动器文件**。
 
-## 3. token 单例（六个，全在 `Mipl/tokens/`）
+**设备层四级判定**（维护者 2026-10-01 裁决，实现见 `theme/device_scale.py`）：
+① 合成器 `scale > 1` → 以它为准；② 有物理尺寸且 DPI `≥288 → 3x`、`≥192 → 2x`，**`DPI < 192` 继续走 ③**；
+③ 按分辨率兜底：宽 `≥5120 → 3x`、`≥3200 → 2x`；④ 都没有 → `1x` **且必须记一条日志**（不静默）。
+DPI 取**对角线**口径（08 §3.10 没指定横向还是对角）；`wl_output::scale == 1` 不算信息、**不短路**，
+否则 27" 4K（163 DPI）会停在 1x —— 那是「高分屏不得停在 1x」要拦的事。
+
+`MiplLaunch` 的纯函数由 theme 线提供，启动器文件由本阶段的「启动器接线」一并落地
+（`installer/frontend/mipl-installer` 与 `mipl-kiosk`）。
+
+## 3. token 单例（七个 + 一个值类型，全在 `Mipl/tokens/`）
 
 命名：`MiplXxx.<camelCase>`。MD3 官方角色名是 kebab-case，落到 QML 一律转小驼峰
 （`surface-container-high` → `MiplColor.surfaceContainerHigh`）。
-**不做** `Mipl.color.*` 那层嵌套 —— 08 §3 里那行是示意，§6 定的是五个独立单例名。
+**不做** `Mipl.color.*` 那层嵌套 —— 08 §3 里那行是示意；08 §6 点了五个名字
+（`MiplColor` / `MiplType` / `MiplShape` / `MiplSpace` / `MiplMotion`），落地时按 §3.6 / §3.7 又加了
+`MiplScale` 与 `MiplTheme`，所以 `Mipl/qmldir` 里一共 **7 个单例**，外带一个**值类型** `MiplTypeScale`（非单例）。
 
 ### 3.1 `MiplColor` —— 35 个角色
 
@@ -105,6 +116,26 @@ qmlRegisterSingletonInstance("Mipl", 1, 0, "MiplLaunch", launch)
 - 顶部 app bar 的主题按钮：`locked = true; manualDark = !dark`；tooltip 显示「跟随时间」/「已手动锁定为暗色」。
 - **不做**「恢复自动」入口（08 §4.2）。
 
+### 3.8 落地时踩到的 QML 行为（改这些文件前先读）
+
+`Mipl/` 这一层有几处不直观、**静态检查抓不到**的行为，都是 2026-10-01 落地时实测出来的：
+
+- **那 10 个 `on-*` 角色只能是 alias。** 同一对象里带初值的 `onXxx` 会被 QML 当成「信号 Xxx 的处理器」；
+  同对象只要有同名的小写兄弟（`on-primary` 对 `primary`…），编译就报
+  `Cannot assign a value to a signal (expecting a script to be run)`，**整个 `MiplColor` 类型不可用**。
+  落地做法：把 on-* 放进一个只声明 on-* 的嵌套对象，再用 `readonly property alias onPrimary: …` 平铺 ——
+  消费方 API 与冻结完全一致（名字 / 类型 / readonly / 响应主题）。
+  **`qmllint` 对这条完全静默（退出码 0）**，只有真加载才暴露，所以改完 `MiplColor` 必须跑 §6 的加载探针。
+- **`MiplTheme.qml` 必须自导入 `import Mipl 1.0`**，否则 `typeof MiplLaunch` 恒为 `"undefined"`、自动主题永远走兜底。
+- **`MiplLaunch` 未注册时 `MiplTheme.dark` 回落 `true`（暗色）** —— 只影响 token-only 探针与单测；
+  真启动器一定在 `engine.load()` 之前注册。
+- **嵌套 holder 用 `property var`，不要 `property QtObject`**：Qt 6.11 下若用 `property QtObject child: QtObject {}`，
+  **「先建引擎 → 再 `qmlRegisterSingletonInstance` → 再 load」这个顺序**会报假类型错
+  `Cannot assign object of type "QtObject" to property of type "QObject*"`（实测：`register→engine` = Ready、
+  `engine→register` = Error；用 `property var` 则两种顺序都 Ready）。启动器仍按「注册 → 建引擎 → load」最稳。
+- **`MiplTypeScale` 是普通类型**（`qmldir` 里没有 `singleton`），组件才能写 `property MiplTypeScale x`。
+- `MiplShape.none`（`0 * factor`）与 `full`（`9999 * factor`）也乘 `factor`，形状档位统一、不开例外。
+
 ## 4. 语言边界
 
 - QML：`tokens/**`、`components/**`。
@@ -124,7 +155,7 @@ date picker / time picker / search bar / data table / slider / tabs / bottom app
 | 判据 | 命令 | 现状 |
 |---|---|---|
 | 色板 = 08 附录 A.2 | `cd /tmp/mip-md3 && node gen.mjs '#2576E9'` 与 `tokens/color.json` 逐项比 | **本机已验**（2026-10-01 重生成，35×2 全等） |
-| V1 token 一致 | `python3 Mipl/tokens/tools/check-tokens.py` | 未实测 |
-| V2 对比度 ≥4.5 / ≥3 | `python3 Mipl/tokens/tools/check-contrast.py` | 08 附录 A.3 的 28 组**设计阶段已过**；脚本落地后未跑 |
-| V6 主题解析 | `python3 -m unittest discover -s installer/frontend/qml/Mipl/theme` | 未实测 |
-| 模块能加载 | `python3 <spike>/probe.py`（`addImportPath` + `import Mipl 1.0`） | **模块机制本机已验**（2026-10-01 spike）；组件与单例本身未实现 |
+| V1 token 一致 | `python3 installer/frontend/qml/Mipl/tokens/tools/check-tokens.py` | **本机已跑绿**（2026-10-01）：335 个比对项全一致 |
+| V2 对比度 ≥4.5 / ≥3 | `python3 installer/frontend/qml/Mipl/tokens/tools/check-contrast.py` | **本机已跑绿**：28 组全过，与 A.3 两位小数一致（最大差 0.005） |
+| V6 主题解析 | `python3 -m unittest discover -s installer/frontend/qml/Mipl/theme/tests -t installer/frontend/qml/Mipl/theme` | **本机已跑绿**：51 条，含 06:59 / 07:00 / 18:59 / 19:00 四个边界 |
+| 模块能加载 | `python3 installer/frontend/qml/Mipl/tokens/tools/probe-tokens.py`（`addImportPath` + `import Mipl 1.0` 读回值） | 同口径探针**本机已验**（2026-10-01，对最终产物复跑）；见 §1 |

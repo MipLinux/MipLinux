@@ -1,0 +1,27 @@
+module Mipl
+singleton MiplColor 1.0 tokens/MiplColor.qml
+singleton MiplTheme 1.0 tokens/MiplTheme.qml
+singleton MiplScale 1.0 tokens/MiplScale.qml
+singleton MiplType 1.0 tokens/MiplType.qml
+MiplTypeScale 1.0 tokens/MiplTypeScale.qml
+singleton MiplShape 1.0 tokens/MiplShape.qml
+singleton MiplSpace 1.0 tokens/MiplSpace.qml
+singleton MiplMotion 1.0 tokens/MiplMotion.qml
+MiplButton 1.0 components/MiplButton.qml
+MiplIconButton 1.0 components/MiplIconButton.qml
+MiplDialog 1.0 components/MiplDialog.qml
+MiplLinearProgress 1.0 components/MiplLinearProgress.qml
+MiplTextField 1.0 components/MiplTextField.qml
+MiplSwitch 1.0 components/MiplSwitch.qml
+MiplCheckbox 1.0 components/MiplCheckbox.qml
+MiplRadio 1.0 components/MiplRadio.qml
+MiplListItem 1.0 components/MiplListItem.qml
+MiplCard 1.0 components/MiplCard.qml
+MiplTopAppBar 1.0 components/MiplTopAppBar.qml
+MiplSegmentedButton 1.0 components/MiplSegmentedButton.qml
+MiplChip 1.0 components/MiplChip.qml
+MiplSnackbar 1.0 components/MiplSnackbar.qml
+MiplTooltip 1.0 components/MiplTooltip.qml
+MiplMenu 1.0 components/MiplMenu.qml
+MiplDivider 1.0 components/MiplDivider.qml
+MiplBadge 1.0 components/MiplBadge.qml

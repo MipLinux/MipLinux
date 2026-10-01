@@ -92,14 +92,14 @@ TextField {
 
             Behavior on y {
                 NumberAnimation {
-                    duration: MiplMotion.short3 * MiplMotion.motionScale
+                    duration: MiplMotion.short3
                     easing.type: Easing.Bezier
                     easing.bezierCurve: MiplMotion.easingStandardDecelerate
                 }
             }
             Behavior on font.pixelSize {
                 NumberAnimation {
-                    duration: MiplMotion.short3 * MiplMotion.motionScale
+                    duration: MiplMotion.short3
                     easing.type: Easing.Bezier
                     easing.bezierCurve: MiplMotion.easingStandardDecelerate
                 }

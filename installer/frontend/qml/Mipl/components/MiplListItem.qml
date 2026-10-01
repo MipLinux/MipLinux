@@ -127,7 +127,7 @@ ItemDelegate {
                    : control.activeFocus ? 0.12 : 0
             Behavior on opacity {
                 NumberAnimation {
-                    duration: MiplMotion.short2 * MiplMotion.motionScale
+                    duration: MiplMotion.short2
                     easing.type: Easing.Bezier
                     easing.bezierCurve: MiplMotion.easingStandard
                 }

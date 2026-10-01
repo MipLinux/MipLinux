@@ -41,7 +41,7 @@ Popup {
             property: "opacity"
             from: 0
             to: 1
-            duration: MiplMotion.short4 * MiplMotion.motionScale
+            duration: MiplMotion.short4
             easing.type: Easing.Bezier
             easing.bezierCurve: MiplMotion.easingStandardDecelerate
         }
@@ -51,7 +51,7 @@ Popup {
             property: "opacity"
             from: 1
             to: 0
-            duration: MiplMotion.short3 * MiplMotion.motionScale
+            duration: MiplMotion.short3
             easing.type: Easing.Bezier
             easing.bezierCurve: MiplMotion.easingStandardAccelerate
         }
@@ -132,7 +132,7 @@ Popup {
                     opacity: actionButton.down ? 0.12 : actionButton.hovered ? 0.08 : actionButton.activeFocus ? 0.12 : 0
                     Behavior on opacity {
                         NumberAnimation {
-                            duration: MiplMotion.short2 * MiplMotion.motionScale
+                            duration: MiplMotion.short2
                             easing.type: Easing.Bezier
                             easing.bezierCurve: MiplMotion.easingStandard
                         }

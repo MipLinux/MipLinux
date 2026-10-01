@@ -98,7 +98,7 @@ ProgressBar {
             property: "x"
             from: -indeterminateBar.width
             to: track.width
-            duration: MiplMotion.extraLong4 * MiplMotion.motionScale
+            duration: MiplMotion.extraLong4
             easing.type: Easing.Bezier
             easing.bezierCurve: MiplMotion.easingStandard
         }

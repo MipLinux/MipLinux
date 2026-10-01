@@ -22,9 +22,10 @@ Dialog {
     padding: MiplSpace.xl
     spacing: MiplSpace.l
     anchors.centerIn: parent
-    // MD3 对话框宽 280–560：min 用 page*6，max 用 page*10；长正文靠 wrapMode 换行
-    implicitWidth: Math.max(MiplSpace.page * 6, contentItem.implicitWidth + leftPadding + rightPadding)
-    width: Math.min(implicitWidth, MiplSpace.page * 10)
+    // MD3 对话框宽 280–560，这里取 page*6（288）作固定宽，正文靠 wrapMode 换行。
+    // **不**从 contentItem.implicitWidth 推宽度：换行 Text 的 implicitWidth 依赖它被分到的宽度，
+    // 与 Control 的 width 互推会形成 binding loop（实测在窗口激活后的某一轮布局里报过一次）。
+    implicitWidth: MiplSpace.page * 6
 
     // 遮罩用 scrim（08 §3.1），透明度是 MD3 的固定档
     Overlay.modal: Rectangle {

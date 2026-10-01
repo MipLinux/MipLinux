@@ -67,7 +67,7 @@ Switch {
                        : control.activeFocus ? 0.12 : 0
                 Behavior on opacity {
                     NumberAnimation {
-                        duration: MiplMotion.short2 * MiplMotion.motionScale
+                        duration: MiplMotion.short2
                         easing.type: Easing.Bezier
                         easing.bezierCurve: MiplMotion.easingStandard
                     }
@@ -88,14 +88,14 @@ Switch {
 
             Behavior on x {
                 NumberAnimation {
-                    duration: MiplMotion.short4 * MiplMotion.motionScale
+                    duration: MiplMotion.short4
                     easing.type: Easing.Bezier
                     easing.bezierCurve: MiplMotion.easingEmphasizedDecelerate
                 }
             }
             Behavior on width {
                 NumberAnimation {
-                    duration: MiplMotion.short4 * MiplMotion.motionScale
+                    duration: MiplMotion.short4
                     easing.type: Easing.Bezier
                     easing.bezierCurve: MiplMotion.easingEmphasizedDecelerate
                 }

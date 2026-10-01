@@ -1,5 +1,5 @@
 ---
-description: MipLinux 文档标准：knowledge 与 work 的分层判定、决策编号纪律、当日记录与技术步骤的写法。
+description: MipLinux 文档标准：knowledge 与 work 的分层判定、决策编号纪律、工作 issue 与技术步骤的写法。
 tags: [docs, documentation, standards, knowledge]
 ---
 
@@ -13,7 +13,7 @@ tags: [docs, documentation, standards, knowledge]
 | 层 | 放什么 | 不许出现什么 |
 |---|---|---|
 | `knowledge/` | **已确定的结论**，给新手读 | 「待解决」「以后再说」、修订痕迹、已出局的候选 |
-| `work/` | 待执行与正在执行的工作 | 已经定案的结论（该进 `knowledge/`） |
+| `work/` | 工作 issue 的规范与草案骨架、ROADMAP、实测步骤 | 已经定案的结论（该进 `knowledge/`）、**与 issue 重述的分工**（分工的载体是 issue 本身） |
 | `knowledge/06-待定事项.md` | **还没定的问题**，编号 P | 已定案的结论（该写回 README 的 D 表） |
 | `archive/` | **已经解决或已分流的问题记录**：症状 / 证据 / 根因 / 修法 | 未定的决策（→ 06）、计划与待办（→ `work/`）、能提炼成结论的内容（→ `knowledge/`） |
 
@@ -30,7 +30,10 @@ tags: [docs, documentation, standards, knowledge]
 
 - **提到人时用角色称呼**（维护者、贡献者），不写「朋友」「某某的分支」；人数会变，别把人数写进流程描述。
 - **引用已有结论时给链接，不要重述** —— 重述会产生第二份会漂移的真相。
-- `work/` 的当日记录按 `YYYY-MM-DD.md` 命名；可复现的操作步骤放 `work/tech/`。
+- **工作写在 issue 里，不写在仓库文档里**：一条工作 = 一个 issue（label `task`），草案照
+  [work/TEMPLATE.md](work/TEMPLATE.md) 的骨架写、存 `out/issue-drafts/`（`out/` 已 gitignore），
+  写完跑 `./scripts/check-work-issue.sh`；规范见 [work/README.md](work/README.md) 的「工作 issue 规范」。
+  可复现的操作步骤放 `work/tech/`。
 - `archive/` 按 `YYYY-MM-DD-主题.md` 命名，一篇一役：写「为什么」与「怎么查出来的」，不复制代码。
   **archive 不是垃圾桶** —— 能提炼成结论的写回 `knowledge/`，还要做的进 `work/` 或 06。
 - 每一步的实测结果写进 `work/tech/`，**不要把「跑过一次」当成「验过」**。

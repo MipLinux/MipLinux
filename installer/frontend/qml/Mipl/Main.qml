@@ -14,6 +14,13 @@ import Mipl 1.0
 ApplicationWindow {
     id: root
 
+    // kiosk 的根窗口：**全屏 + 无边框**。
+    // cage 里本来就只显示一个全屏客户端，但开发/排查时在桌面合成器（Hyprland）下直接跑
+    // `mipl-installer` 会带标题栏与最小化/最大化/关闭按钮 —— 那是笼子里不该有的东西。
+    // 启动器在 load 之后还会再 `showFullScreen()` 一次（防「先窗口态闪一帧」）。
+    flags: Qt.Window | Qt.FramelessWindowHint
+    visibility: Window.FullScreen
+
     visible: true
     width: 1280
     height: 800

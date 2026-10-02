@@ -286,8 +286,8 @@ def main(argv=None) -> int:
 
     # ---- ③ Qt：到这里才 import，确保 QT_SCALE_FACTOR 已经生效 ----
     try:
-        from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
-        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import Property, QObject, Qt, QTimer, QUrl, Signal, Slot
+        from PySide6.QtGui import QGuiApplication, QWindow
         from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
         from PySide6.QtQml import qmlRegisterSingletonInstance
     except ImportError as exc:  # Live 里由 pyside6 提供
@@ -353,6 +353,17 @@ def main(argv=None) -> int:
         LOG.error("根页面加载失败（0 个根对象）：%s", main_qml)
         return 1
 
+    # ---- ③.5 根窗口按 kiosk 要求摆好：**无边框 + 全屏** ----
+    # QML 里已经写了 `flags` / `visibility`，这里再做一次是因为部分合成器要等窗口 show 之后
+    # 才认 `visibility: Window.FullScreen` —— 而 kiosk 不允许「先带标题栏闪一帧、再全屏」。
+    # 桌面合成器下没有这两句就会看到标题栏与最小化/最大化/关闭按钮（维护者 2026-10-02 指出）。
+    root_window = engine.rootObjects()[0]
+    if hasattr(root_window, "showFullScreen"):
+        root_window.setFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        root_window.showFullScreen()
+    else:
+        LOG.warning("根对象不是窗口（%s），跳过全屏设置", type(root_window).__name__)
+
     # ---- ④ --self-test：从 QML 侧读回注入值再断言 ----
     if args.self_test:
         component = QQmlComponent(engine)
@@ -364,7 +375,7 @@ def main(argv=None) -> int:
             return 1
 
         expected_scale = os.environ["QT_SCALE_FACTOR"]
-        root = engine.rootObjects()[0]
+        root = root_window
 
         # 复核线 2026-10-02 的 F-B：只比 MiplLaunch.* 读不出「QT_SCALE_FACTOR 设晚了」——
         # 那种情况下 devicePixelRatio 仍是 1，而下面 5 条断言照样全过。把 Qt **实际生效**的
@@ -382,6 +393,8 @@ def main(argv=None) -> int:
             ("QT_SCALE_FACTOR", expected_scale, str(int(decision))),
             ("屏幕 devicePixelRatio", screen_dpr, expected_dpr),
             ("根窗口 devicePixelRatio", window_dpr, expected_dpr),
+            ("根窗口无边框", bool(root_window.flags() & Qt.WindowType.FramelessWindowHint), True),
+            ("根窗口全屏", root_window.visibility() == QWindow.Visibility.FullScreen, True),
         ]
         failed = [(name, got, want) for name, got, want in checks if got != want]
 
@@ -397,6 +410,10 @@ def main(argv=None) -> int:
         print(
             f"[self-test] devicePixelRatio = {screen_dpr}（屏幕）/ {window_dpr}（根窗口）"
             f"，期望 {expected_dpr}"
+        )
+        print(
+            f"[self-test] 根窗口 visibility = {root_window.visibility()}"
+            f"，frameless = {bool(root_window.flags() & Qt.WindowType.FramelessWindowHint)}"
         )
         for name, got, want in failed:
             print(f"[self-test] FAIL {name}: 实际 {got!r}，期望 {want!r}")

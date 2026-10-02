@@ -1,0 +1,41 @@
+#!/bin/sh
+# mipl-kiosk —— Live 侧 kiosk 启动脚本，由 mipl-installer.service 的 ExecStart 直接调用。
+#
+# 为什么要过 seatd-launch（不直接 exec cage）：
+#   cage 基于 wlroots，起 DRM 会话要先经 libseat 拿 seat。Live 里 libseat 的
+#   seatd 后端没守护进程（/run/seatd.sock 不存在）、logind 后端又要求登录会话
+#   （systemd 服务没有），两个都不通 —— 直接 cage 每次 0.000 秒必败。
+#   seatd-launch 起一个专用 seatd、等它就绪、再跑 cage（结束后收掉 seatd）。
+#   根因与三个候选机制的实测对照见 docs/archive/2026-09-23-kiosk启动链的两个坑.md。
+#
+# cage 必须带 -s（allow VT switching）：
+#   不带它实机 tty 切不出去，tty1 就再也回不来（PR #60）。
+#
+# 纪律：本脚本只负责「把 seatd + cage + 入口串起来」；安装逻辑、界面都在
+# mipl-installer（Python + QML）里。seatd / seatd-launch 由 wlroots（cage 的依赖）
+# 间接装进 Live，**不要往 profile/packages.x86_64 里加包**。
+
+set -eu
+
+SEATD_LAUNCH=/usr/bin/seatd-launch
+CAGE=/usr/bin/cage
+INSTALLER=/usr/local/bin/mipl-installer
+
+for binary in "$SEATD_LAUNCH" "$CAGE" "$INSTALLER"; do
+    if [ ! -x "$binary" ]; then
+        echo "mipl-kiosk: 找不到可执行文件 $binary —— 镜像里缺包或入口软链断了" >&2
+        exit 1
+    fi
+done
+
+# seatd-launch 的 socket 路径写死 /run/seatd.sock，且只在正常退出时才收掉。
+# systemctl stop / kill 把整个 cgroup 一发信号打死之后会留下残留，下一次 seatd
+# 直接拒绝启动（Socket file found at socket path …），"systemctl start 把界面叫回来"
+# 就永远失败。残留没人监听 → fuser 退出码 1 → 删；活着的 seatd → 0 → 不动。
+if [ -S /run/seatd.sock ] && ! fuser -s /run/seatd.sock 2>/dev/null; then
+    rm -f /run/seatd.sock
+fi
+
+# `--` 之后是 cage 的命令行：-s = allow VT switching；再往后是 cage 的客户端。
+# 多余参数透传给安装器，方便在 Live 里手工试 --theme=dark / --scale=2 / --self-test。
+exec "$SEATD_LAUNCH" -- "$CAGE" -s "$INSTALLER" "$@"

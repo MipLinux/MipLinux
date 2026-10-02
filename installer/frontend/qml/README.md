@@ -69,6 +69,13 @@ qmlRegisterSingletonInstance(MiplLaunch, "Mipl", 1, 0, "MiplLaunch", launch)
 DPI 取**对角线**口径（08 §3.10 没指定横向还是对角）；`wl_output::scale == 1` 不算信息、**不短路**，
 否则 27" 4K（163 DPI）会停在 1x —— 那是「高分屏不得停在 1x」要拦的事。
 
+**根窗口必须是「全屏 + 无边框」**（维护者 2026-10-02 评审指出：原来带标题栏、也不是全屏）。
+cage 里只显示一个全屏客户端，所以这条在笼子里不容易暴露；但开发/排查时在桌面合成器
+（KDE/KWin、Hyprland）下直接跑 `mipl-installer` 就会看到标题栏与最小化/最大化/关闭按钮。
+落地是两道，**缺一不可**：`Main.qml` 的 `flags: Qt.Window | Qt.FramelessWindowHint` + `visibility: Window.FullScreen`；
+启动器在 `engine.load()` 之后对根窗口再 `showFullScreen()` 一次（防「先带标题栏闪一帧」，P5）。
+`--self-test` 会断言 `visibility == FullScreen` 与 `FramelessWindowHint`，所以这条不会悄悄退化。
+
 `MiplLaunch` 的纯函数由 theme 线提供，启动器文件由本阶段的「启动器接线」一并落地
 （`installer/frontend/mipl-installer` 与 `mipl-kiosk`）。
 

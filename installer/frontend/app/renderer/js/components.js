@@ -268,37 +268,12 @@ export function meter({ percent = 0, indeterminate = false, id }) {
 }
 
 export function rings({ percent = 0, label, value, id }) {
-  return h('div', { id, class: 'rings', style: { '--p': String(percent) } }, [
-    h(
-      'svg',
-      { viewBox: '0 0 120 120', 'aria-hidden': 'true' },
-      [
-        h('defs', {}, [
-          (() => {
-            const gradient = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
-            gradient.setAttribute('id', 'rings-gradient');
-            gradient.setAttribute('x1', '0');
-            gradient.setAttribute('y1', '0');
-            gradient.setAttribute('x2', '1');
-            gradient.setAttribute('y2', '1');
-            for (const [offset, color] of [
-              ['0%', 'var(--aurora-1)'],
-              ['100%', 'var(--aurora-2)'],
-            ]) {
-              const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-              stop.setAttribute('offset', offset);
-              stop.setAttribute('stop-color', color);
-              gradient.append(stop);
-            }
-            return gradient;
-          })(),
-        ]),
-        h('circle', { class: 'rings__track', cx: '60', cy: '60', r: '56' }),
-        h('circle', { class: 'rings__fill', cx: '60', cy: '60', r: '56' }),
-      ]
-    ),
+  // 纯 CSS 圆环（conic-gradient）：不用 SVG —— SVG 元素的 className 赋值与 defs 渐变
+  // 在 h() 这套属性写入里都是额外的坑，而这里只需要「一圈进度」而已。
+  return h('div', { id, class: 'rings', style: { '--p': String(Math.max(0, Math.min(100, percent))) } }, [
+    h('div', { class: 'rings__track' }),
     h('div', { class: 'rings__label' }, [
-      h('span', { class: 'rings__value', text: value ?? `${percent}%` }),
+      h('span', { class: 'rings__value', text: value ?? `${Math.round(percent)}%` }),
       label ? h('span', { class: 'caption', text: label }) : null,
     ]),
   ]);

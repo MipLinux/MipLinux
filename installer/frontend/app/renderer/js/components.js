@@ -249,11 +249,12 @@ export function kv(pairs) {
 }
 
 export function emptyState({ icon: iconName = 'info', text, action }) {
-  return h('div', { class: 'empty' }, [icon(iconName), h('p', { text }), action || null]);
+  return h('div', { class: 'empty', 'data-anim': '' }, [icon(iconName), h('p', { text }), action || null]);
 }
 
 export function callout({ tone = 'info', icon: iconName = 'info', text, extra, id }) {
-  return h('div', { id, class: `callout callout--${tone}` }, [
+  // `data-anim`：警告条要和同一页的其他块**一起**展开，不许抢在它们前面出现
+  return h('div', { id, class: `callout callout--${tone}`, 'data-anim': '' }, [
     icon(iconName),
     h('div', { class: 'stack' }, [h('span', { text }), extra || null]),
   ]);

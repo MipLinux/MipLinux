@@ -150,7 +150,7 @@ export default {
         })
       : null;
 
-    queueMicrotask(() => staggerIn([...document.querySelectorAll('.option')]));
+    if (ctx.animateIn) queueMicrotask(() => staggerIn([...document.querySelectorAll('.option')]));
 
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('network.title'), desc: t('network.desc') }),

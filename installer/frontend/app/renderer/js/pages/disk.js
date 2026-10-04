@@ -93,7 +93,7 @@ export default {
             )
           );
 
-    queueMicrotask(() => staggerIn([...document.querySelectorAll('.disk-card')]));
+    if (ctx.animateIn) queueMicrotask(() => staggerIn([...document.querySelectorAll('.disk-card')]));
 
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('disk.title'), desc: t('disk.desc') }),

@@ -44,6 +44,10 @@ class App {
     this.page = null;
     this.nodes = {};
     this.snackbarTimer = null;
+    /** 渲染代次：`renderPage` 是 async（要先等旧页淡出），并发调用时旧的那次必须作废 */
+    this.renderToken = 0;
+    /** 本轮渲染是不是「刚进这一页」——页面用它决定要不要跑交错动画 */
+    this.animateIn = false;
   }
 
   /* ------------------------------------------------------------ 启动 */
@@ -181,6 +185,9 @@ class App {
     ]);
     rail.querySelector('.steps__head').replaceChildren(progress);
     mount(this.nodes.rail, rail);
+    // 12 步时轨道放不下：把当前步滚进视野（不用平滑滚动 —— 切页时滚动动画会和入场打架）
+    const current = rail.querySelector('.step[data-state="current"]');
+    if (current && current.scrollIntoView) current.scrollIntoView({ block: 'nearest' });
 
     mount(
       this.nodes.stepsbar,
@@ -193,6 +200,7 @@ class App {
 
   makeContext() {
     return {
+      animateIn: this.animateIn,
       t: (key, ...args) => this.i18n.t(key, ...args),
       i18n: this.i18n,
       setup: this.setup,
@@ -221,6 +229,7 @@ class App {
   }
 
   async renderPage({ animate = true } = {}) {
+    const token = (this.renderToken += 1);
     const id = this.setup.stepId;
     // 重新进入进度页 = 重跑一轮安装：不清掉上一轮的 100% 与 startedAt，环形进度会停在终点
     if (id === 'progress' && (this.setup.data.progress.done || this.setup.data.progress.cancelled)) {
@@ -228,15 +237,19 @@ class App {
     }
     const page = PAGES[id];
     if (!page) throw new Error(`没有这个页面模块：${id}`);
+    const pageChanged = !this.page || this.page.id !== id;
     if (animate && this.page && this.nodes.stage.firstElementChild) {
       await motion.pageLeave(this.nodes.stage.firstElementChild);
     }
+    // 等淡出的这段时间里可能又来了新的一次渲染：作废，别把两页同时挂上去
+    if (token !== this.renderToken) return;
     // 上一页如果有定时器（进度页的模拟事件流就是），离开时必须停 ——
     // 否则它会在别的页面上把人「推」到下一步去
     if (this.page && this.page !== page && typeof this.page.onLeave === 'function') {
       this.page.onLeave(this.makeContext());
     }
     this.page = page;
+    this.animateIn = Boolean(animate) && pageChanged;
     const wrapper = h('div', { class: 'stage__inner', id: `page-${id}`, dataset: { page: id } });
     wrapper.append(page.render(this.makeContext()));
     mount(this.nodes.stage, wrapper);

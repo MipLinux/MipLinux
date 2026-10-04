@@ -233,6 +233,8 @@ select {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
+  /* 给最后一个面板的阴影留出空间 —— 否则会被滚动容器切出一条硬边 */
+  padding-bottom: calc(var(--space-5) * var(--ui-scale));
 }
 
 .stage__inner {
@@ -356,6 +358,12 @@ select {
 *::-webkit-scrollbar {
   width: 0;
   height: 0;
+}
+
+/* 图片不许拖拽（拖出去会变成「复制图片」的拖动源），也不参与选中 */
+img {
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 /* 输入框里要能选中/编辑文本（kiosk 下这是唯一的例外） */

@@ -304,7 +304,26 @@ module.exports = async function probe({ app, win, launch }) {
     check(layout.docScroll <= layout.innerHeight + 1, '1024×768 下页面本身不滚动（整窗固定）', JSON.stringify(layout));
     check(layout.actionsBottom <= layout.innerHeight + 1, '动作区始终在视口内（12 步时也是）', `bottom=${layout.actionsBottom} / 视口=${layout.innerHeight}`);
     check(Math.abs(layout.rootHeight - layout.innerHeight) <= 1, '#root 高度 = 视口高度', `${layout.rootHeight} vs ${layout.innerHeight}`);
-    check(layout.stepsScroll <= layout.stepsClient + 1, '12 步在步骤轨道里一屏放下（轨道不滚动）', `${layout.stepsScroll} > ${layout.stepsClient}`);
+    // 维护者 2026-10-04：轨道**允许**在放不下时滚，但不许画出占位的滚动条，
+    // 条目也不许为了「塞下 12 步」被压扁。
+    const stepBox = await run(`(() => {
+      const step = document.querySelector('.step');
+      const body = document.querySelector('.steps__body');
+      const rail = document.querySelector('.steps');
+      return {
+        itemHeight: step ? Math.round(step.getBoundingClientRect().height) : -1,
+        scrollbarGap: body ? body.offsetWidth - body.clientWidth : -1,
+        // rail 的 offset-client 差 = 左右边框（1px×2），不是滚动条；要减掉边框再判
+        railGap: (() => {
+          if (!rail) return -1;
+          const style = getComputedStyle(rail);
+          const border = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+          return Math.round(rail.offsetWidth - rail.clientWidth - border);
+        })(),
+      };
+    })()`);
+    check(stepBox.itemHeight >= 34, '步骤条目保持舒适高度（没有被压扁）', JSON.stringify(stepBox));
+    check(stepBox.scrollbarGap === 0 && stepBox.railGap === 0, '轨道里没有占位的滚动条', JSON.stringify(stepBox));
     check(layout.scrollbarGap === 0, '滚动条不占位（不挤压内容宽度）', `差 ${layout.scrollbarGap}px`);
     check(layout.userSelect === 'none', '文本默认不可选中', `实际 ${layout.userSelect}`);
     check(layout.inputSelect === 'text', '输入框里可以选中文本', `实际 ${layout.inputSelect}`);
@@ -337,6 +356,27 @@ module.exports = async function probe({ app, win, launch }) {
     })()`);
     check(reachable.ok, '选中 WiFi 后主动作仍在视口内且可点', JSON.stringify(reachable));
     await shot('network-wifi-selected-1024x768');
+
+    // 完成页必须一屏放得下（实机反馈：安装完成界面居然能滚）
+    await run('window.__mipl.goTo("finish")');
+    await sleep(360);
+    await settle();
+    const finishBox = await run(`(() => {
+      const stage = document.getElementById('stage');
+      const page = document.getElementById('page-finish');
+      return {
+        stageScroll: stage.scrollHeight, stageClient: stage.clientHeight,
+        pageHeight: page ? Math.round(page.getBoundingClientRect().height) : -1,
+        logo: (() => { const el = document.querySelector('.finish__logo'); if (!el) return null; const r = el.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height), el.draggable]; })(),
+      };
+    })()`);
+    check(finishBox.stageScroll <= finishBox.stageClient + 1, '完成页一屏放得下（不滚动）', JSON.stringify(finishBox));
+    check(Boolean(finishBox.logo) && finishBox.logo[2] === false, '完成页 logo 不可拖拽', JSON.stringify(finishBox.logo));
+    await shot('finish-1024x768');
+
+    // 全站图片都不该可拖（拖出去会变成复制图片）
+    const draggable = await run(`[...document.images].map((img) => ({ src: img.currentSrc.split('/').pop(), draggable: img.draggable, drag: getComputedStyle(img).webkitUserDrag }))`);
+    check(draggable.every((item) => item.draggable === false && (item.drag === 'none' || item.drag === '')), '所有图片都不可拖拽', JSON.stringify(draggable));
 
     win.setContentSize(1440, 900);
     await sleep(360);

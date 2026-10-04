@@ -15,9 +15,10 @@ export default {
   render(ctx) {
     const t = ctx.t;
     const logo = h('img', {
-      class: 'welcome__logo',
+      class: 'finish__logo',
       src: new URL('../../assets/logo/logo-512.png', import.meta.url).href,
       alt: '',
+      draggable: 'false',
       decoding: 'async',
     });
     queueMicrotask(() => float(logo));
@@ -26,7 +27,7 @@ export default {
       h('div', { class: 'finish__check', 'data-anim': '' }, icon('check')),
       h('h1', { class: 'lead', 'data-anim': '', text: t('finish.title') }),
       h('p', { class: 'page-desc', 'data-anim': '', text: t('finish.body') }),
-      h('div', { class: 'welcome__art', 'data-anim': '' }, [logo]),
+      h('div', { class: 'finish__art', 'data-anim': '' }, [h('span', { class: 'welcome__glow' }), logo]),
     ]);
   },
 

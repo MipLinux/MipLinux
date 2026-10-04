@@ -540,7 +540,7 @@
 
 /* 列表 / 可选项 */
 
-/* 列表不再自己开滚动条：长列表由内容区（.stage）统一滚（维护者 2026-10-04） */
+/* 列表：内容区统一滚；列表自己只在必要时滚，且**滚动条不可见、不占位** */
 .list {
   display: flex;
   flex-direction: column;
@@ -723,12 +723,13 @@
   gap: 2px;
   padding: 8px;
   height: 100%;
+  margin-bottom: 2px;
   min-height: 0;
   overflow: hidden;
   border-radius: var(--r-shell);
   background: var(--surface);
   border: 1px solid var(--hairline);
-  box-shadow: 0 18px 40px -22px rgba(19, 32, 63, 0.28);
+  box-shadow: var(--shadow-2);
 }
 
 .steps__head {
@@ -743,13 +744,13 @@
   flex-direction: column;
   gap: 2px;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;   /* 放不下时能滚，但不画滚动条（全局 *::-webkit-scrollbar 宽 0） */
+  /* 底部渐隐：滚动条不可见时，「还有内容」这件事就得靠渐隐说 */
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
 }
 
-/* 12 步也要一屏放得下：条目压紧一点，靠字号与留白分层，不靠滚动 */
-.step {
-  padding: 8px var(--space-3);
-}
+
 
 
 
@@ -949,28 +950,5 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-/* 矮屏（QEMU 默认 768 / 笔记本 800）再紧一档 —— 宁可密一点，也不让轨道出现滚动条 */
-@media (max-height: 860px) {
-  .steps__head {
-    padding: 8px 10px 10px;
-    gap: var(--space-2);
-  }
-
-  .steps__body {
-    gap: 0;
-  }
-
-  .step {
-    padding: 3px var(--space-3);
-    font-size: calc(var(--t-caption) * var(--ui-scale));
-  }
-
-  .step__dot {
-    width: 20px;
-    height: 20px;
-    font-size: 10px;
   }
 }

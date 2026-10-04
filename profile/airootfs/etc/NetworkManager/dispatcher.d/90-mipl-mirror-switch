@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# NetworkManager dispatcher：网络一变就重新测速换源（Issue #18 的 Live 侧入口）。
+#
+# NM **同步**等 dispatcher 脚本跑完才继续自己的状态机，而测速要几十秒 —— 卡在这里，
+# 换 Wi-Fi 就会表现为「连上了但半天不干活」。所以这里只做判断，真正的活甩到后台：
+# setsid 另开一个会话，NM 返回后不会连坐把它收掉。
+#
+# 重复触发不用这里防：mipl-mirror-switch 自己带 flock，后到的那次直接放过。
+#
+# 这里**不判断 Live** —— 那是 mipl-mirror-switch 的事。装后系统上它自己会退出
+# （换源策略是 Issue #23 / P11 的范围）；dispatcher 只负责「网络变了」这个事实。
+
+set -u
+
+interface="${1:-}"
+action="${2:-}"
+
+case "$action" in
+    up|connectivity-change) ;;
+    *) exit 0 ;;
+esac
+
+setsid /usr/local/bin/mipl-mirror-switch --trigger "$action" --interface "$interface" \
+    >/dev/null 2>&1 </dev/null &
+
+exit 0

@@ -1,0 +1,376 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""mipl-mirror-switch —— 网络一变就重新测速选源（Issue #18 · Live 侧第一版）。
+
+管的是**两处源**（只换一半等于没换）：
+
+  1. **官方仓库**（core / extra / multilib）→ `/etc/pacman.d/mirrorlist`。
+     交给 `reflector`：它拿得到 Arch 官方的 Mirror Status 数据，按实测下载速率排序。
+  2. **archlinuxcn** → `/etc/pacman.d/mirrorlist-archlinuxcn`。
+     reflector 的数据源里没有 archlinuxcn，所以这半自己探。**顺序探、不并发** ——
+     几个镜像同时下，抢的是同一条带宽，测出来的「谁快」是假的。
+
+依赖：只用了 Live 里已有的东西。`python3` 本来就因为 `reflector` 在（D14 也是这么记的），
+HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类新包**（根文件红线）。
+
+在哪跑：**只有 Live 会真的写**。`airootfs/` 会被装后系统继承，所以装后系统里也有这个
+脚本 —— 但装后系统的换源策略是 Issue #23 / P11 的事，这里用 Live 标记
+（`/run/archiso/bootmnt`）挡住：装后系统上它一声不响地退出（退出码 0，不写任何东西）。
+#23 定案后改的是这个判断，不是另写一份脚本。
+
+谁调用：`etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch`（网络变化触发）；也可手动跑。
+
+用法：
+    mipl-mirror-switch --dry-run          # 只算不写，可以不在 Live 里跑
+    mipl-mirror-switch                    # 真换（仅 Live）
+    mipl-mirror-switch --force            # 忽略 Live 判断、连通性与最小间隔（调试用）
+
+退出码：0 = 换成功、或有意跳过（非 Live / 网络没通 / 刚换过 / 已有一次在跑）；1 = 出错了。
+日志同时写 stdout 与 <run-dir>/mipl-mirror-switch.log（NM dispatcher 的 stdout 不好捞，
+落一份文件，QEMU 里直接 `cat` 就有证据）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import http.client
+import os
+import platform
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# ---- 路径：全是绝对路径。NM 的 dispatcher 环境里 PATH 不一定是我们以为的那个 ----
+
+OFFICIAL_MIRRORLIST = Path("/etc/pacman.d/mirrorlist")
+CN_MIRRORLIST = Path("/etc/pacman.d/mirrorlist-archlinuxcn")
+DEFAULT_MIRRORLIST_DIR = Path("/etc/pacman.d")
+LIVE_MARKER = Path("/run/archiso/bootmnt")
+DEFAULT_RUN_DIR = Path("/run")
+
+REFLECTOR = "/usr/bin/reflector"
+NMCLI = "/usr/bin/nmcli"
+
+# ---- 可调参数 ----
+
+# reflector：只在国内及周边挑，https，取最近同步的 30 个，按速率排，最多留 12 个。
+# `--latest` 是必要的：不加它 reflector 会去 rate 官方池里所有镜像，慢得不像话。
+REFLECTOR_COUNTRIES = "CN,HK,TW,JP,SG,KR"
+REFLECTOR_LATEST = 30
+REFLECTOR_NUMBER = 12
+REFLECTOR_TIMEOUT = 150  # 秒。超时就算这半失败，保留原文件
+PROBE_BYTES = 64 * 1024  # 每个 archlinuxcn 镜像最多下这么多字节来量速率
+PROBE_TIMEOUT = 5.0  # 单个镜像的上限（秒）
+PROBE_BUDGET = 45.0  # 探完全部镜像的总预算（秒）；超了剩下的按原顺序留在后面
+DEFAULT_MIN_INTERVAL = 60  # 秒。刚换过就不再换，免得网络抖动时反复重排
+
+ARCH = platform.machine() or "x86_64"
+
+
+class LockBusy(Exception):
+    """已经有另一次换源在跑。"""
+
+
+class Logger:
+    def __init__(self, run_dir: Path, quiet: bool) -> None:
+        self.quiet = quiet
+        self.path = run_dir / "mipl-mirror-switch.log"
+
+    def __call__(self, msg: str) -> None:
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} mipl-mirror-switch: {msg}"
+        if not self.quiet:
+            print(line, flush=True)
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass  # 日志写不了不该让换源失败
+
+
+def read_server_lines(path: Path) -> list[str]:
+    """取出一份 mirrorlist 里所有 `Server = ` 行的 URL（注释与空行不管）。"""
+    if not path.is_file():
+        return []
+    servers = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("Server"):
+            continue
+        _, _, value = stripped.partition("=")
+        url = value.strip()
+        if url:
+            servers.append(url)
+    return servers
+
+
+def resolve_pacman_vars(url: str) -> str:
+    """把 pacman 的 `$arch` / `$repo` 换成真值 —— 发 HTTP 请求时得用真 URL。
+
+    写回文件时**必须保留 `$arch` 原样**（那是 pacman 的变量，见 knowledge/03 §4.2）。
+    """
+    return url.replace("$arch", ARCH).replace("$repo", "archlinuxcn")
+
+
+def atomic_write(path: Path, text: str, dry_run: bool, log: Logger) -> None:
+    """同目录写临时文件再 rename —— pacman 读到的要么是旧的、要么是新的，不会是半个。"""
+    if dry_run:
+        log(f"[dry-run] 本该写入 {path}：")
+        for line in text.splitlines():
+            log(f"[dry-run]   {line}")
+        return
+    tmp = path.with_name(f".{path.name}.mipl-tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def probe_archlinuxcn(url: str, deadline: float) -> float:
+    """量一个 archlinuxcn 镜像：下 `archlinuxcn.db` 的前 PROBE_BYTES 字节，返回字节/秒。
+
+    用 `.db` 而不是更小的文件：archlinuxcn 仓库不签名，`.db.sig` 根本不存在（实测 404）。
+    读满 PROBE_BYTES 或到 deadline 就停 —— 不读完，仓库 DB 是 MB 级的。
+    中途超时的话，已经下到的部分照样算数（那正是「这个镜像现在有多快」的答案）。
+    """
+    budget = min(PROBE_TIMEOUT, deadline - time.monotonic())
+    if budget <= 0:
+        return 0.0
+    probe_url = f"{resolve_pacman_vars(url)}/archlinuxcn.db"
+    started = time.monotonic()
+    read = 0
+    try:
+        request = urllib.request.Request(probe_url, headers={"User-Agent": "mipl-mirror-switch/1"})
+        with urllib.request.urlopen(request, timeout=budget) as response:
+            while read < PROBE_BYTES and time.monotonic() - started < budget:
+                chunk = response.read(min(16 * 1024, PROBE_BYTES - read))
+                if not chunk:
+                    break
+                read += len(chunk)
+    except (urllib.error.URLError, http.client.HTTPException, ssl.SSLError,
+            socket.timeout, TimeoutError, OSError):
+        pass
+    return read / max(time.monotonic() - started, 1e-3)
+
+
+def format_archlinuxcn_mirrorlist(measured: list[tuple[float, str]]) -> str:
+    header = [
+        "#",
+        "# archlinuxcn 仓库镜像列表",
+        f"# 由 mipl-mirror-switch 于 {time.strftime('%Y-%m-%d %H:%M:%S')} 按实测速率重排（Issue #18）。",
+        "# 初始顺序见仓库里的 profile/airootfs/etc/pacman.d/mirrorlist-archlinuxcn。",
+        "# 本次实测（字节/秒），0 = 这次没探通、按原顺序排在后面：",
+    ]
+    header.extend(f"#   {rate:>10.0f}  {url}" for rate, url in measured)
+    body = ["", *(f"Server = {url}" for _, url in measured), ""]
+    return "\n".join(header + body)
+
+
+def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool:
+    """探速并重排 archlinuxcn 的 mirrorlist。返回是否真的改了顺序。"""
+    servers = read_server_lines(cn_path)
+    if not servers:
+        log(f"{cn_path} 里没有 Server 行，archlinuxcn 这半跳过")
+        return False
+
+    log(f"开始探 {len(servers)} 个 archlinuxcn 镜像（每个最多 {PROBE_BYTES // 1024} KiB）")
+    deadline = time.monotonic() + PROBE_BUDGET
+    measured: list[tuple[float, str]] = []
+    for index, url in enumerate(servers):
+        if time.monotonic() >= deadline:
+            log(f"探速预算用完，剩下 {len(servers) - index} 个按原顺序留在后面")
+            measured.extend((0.0, rest) for rest in servers[index:])
+            break
+        rate = probe_archlinuxcn(url, deadline)
+        measured.append((rate, url))
+        log(f"  {rate:>10.0f} B/s  {url}")
+
+    # stable sort：没探通的（0）保持原有相对顺序，排到最后
+    ordered = sorted(measured, key=lambda item: item[0], reverse=True)
+    if [url for _, url in ordered] == servers:
+        log("archlinuxcn 的顺序没变（现有的第一个就是最快的）")
+        return False
+
+    atomic_write(cn_path, format_archlinuxcn_mirrorlist(ordered), dry_run, log)
+    if dry_run:
+        log(f"archlinuxcn：[dry-run] 最快的是 {ordered[0][1]}")
+        return False
+    log(f"archlinuxcn：{servers[0]} → {ordered[0][1]}")
+    return True
+
+
+def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Logger) -> bool:
+    """用 reflector 重写官方 mirrorlist。任何一步不满意就保留原文件。"""
+    target = work_dir / "mirrorlist.new"
+    cmd = [
+        REFLECTOR,
+        "--country", REFLECTOR_COUNTRIES,
+        "--protocol", "https",
+        "--latest", str(REFLECTOR_LATEST),
+        "--sort", "rate",
+        "--number", str(REFLECTOR_NUMBER),
+        "--connection-timeout", "3",
+        "--download-timeout", "5",
+        "--threads", "4",
+        "--save", str(target),
+    ]
+    log("reflector：" + " ".join(cmd))
+    # reflector 把 Mirror Status 数据缓存在 $XDG_CACHE_HOME（实测报错原文：
+    # `OSError: [Errno 30] Read-only file system: '<HOME>/.cache/mirrorstatus.json'`）。
+    # NM 的 dispatcher 环境里 HOME 不保证可写、甚至可能没设 —— 所以缓存目录自己指一个，
+    # 否则 Live 里这半会静默失败、看起来「换了源其实没换」。
+    cache_dir = work_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["XDG_CACHE_HOME"] = str(cache_dir)
+    env.setdefault("HOME", str(cache_dir))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=REFLECTOR_TIMEOUT, env=env)
+    except FileNotFoundError:
+        log(f"{REFLECTOR} 不存在，官方那半跳过（保留原 mirrorlist）")
+        return False
+    except subprocess.TimeoutExpired:
+        log(f"reflector 超过 {REFLECTOR_TIMEOUT}s 没回来，官方那半跳过")
+        return False
+    if proc.returncode != 0:
+        log(f"reflector 退出码 {proc.returncode}，官方那半跳过；stderr：{proc.stderr.strip()[:400]}")
+        return False
+
+    servers = read_server_lines(target)
+    if not servers:
+        log("reflector 写出来的文件里没有 Server 行，拒绝替换（保留原 mirrorlist）")
+        return False
+    if not target.read_text(encoding="utf-8").strip():
+        log("reflector 写出来的文件是空的，拒绝替换（保留原 mirrorlist）")
+        return False
+
+    old = read_server_lines(official_path)
+    changed = old != servers
+    if dry_run:
+        log(f"官方：[dry-run] 会换成 {len(servers)} 个，第一个是 {servers[0]}"
+            + ("" if changed else "（与现在相同）"))
+    else:
+        log(f"官方：{old[0] if old else '(空)'} → {servers[0]}（共 {len(servers)} 个）")
+    atomic_write(official_path, target.read_text(encoding="utf-8"), dry_run, log)
+    return changed and not dry_run
+
+
+def nm_connectivity() -> str:
+    """NetworkManager 眼里的连通性：full / limited / portal / none / unknown。"""
+    try:
+        proc = subprocess.run(
+            [NMCLI, "-t", "-f", "CONNECTIVITY", "general"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return f"unknown ({exc.__class__.__name__})"
+    if proc.returncode != 0:
+        return f"unknown (nmcli 退出码 {proc.returncode})"
+    return proc.stdout.strip() or "unknown"
+
+
+def acquire_lock(run_dir: Path) -> int:
+    """同一时刻只允许一个实例。拿不到锁 = 已经有一次在跑，不是错误。"""
+    fd = os.open(run_dir / "mipl-mirror-switch.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        raise LockBusy from exc
+    return fd
+
+
+def is_live() -> bool:
+    """Live 的判据：archiso 把 ISO 挂在这里（见 installer/tests/live-rehearsal.sh）。
+
+    装后系统里没有它 —— 于是这个脚本在装后系统上什么都不做（那是 Issue #23 的范围）。
+    """
+    return LIVE_MARKER.exists()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mipl-mirror-switch",
+        description="网络变更后测速换源（Issue #18 · Live 侧）",
+    )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只算不写：真去测速，但 /etc 一个字节都不动；可以不在 Live 里跑")
+    parser.add_argument("--force", action="store_true",
+                        help="忽略 Live 判断、连通性与最小间隔（调试用；正常路径别传）")
+    parser.add_argument("--trigger", default="manual",
+                        help="谁触发的，只进日志（NM dispatcher 传 up / connectivity-change）")
+    parser.add_argument("--interface", default="", help="触发时的网卡名，只进日志")
+    parser.add_argument("--min-interval", type=int, default=DEFAULT_MIN_INTERVAL,
+                        help=f"两次换源之间的最小间隔秒数，默认 {DEFAULT_MIN_INTERVAL}")
+    parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR),
+                        help=f"锁 / 时间戳 / 日志 / 临时文件放哪，默认 {DEFAULT_RUN_DIR}")
+    parser.add_argument("--mirrorlist-dir", default=str(DEFAULT_MIRRORLIST_DIR),
+                        help="mirrorlist 所在目录，默认 /etc/pacman.d。"
+                             "本机 dry-run 时可以指向仓库里那份（profile/airootfs/etc/pacman.d）")
+    parser.add_argument("--quiet", action="store_true", help="不往 stdout 打，只写日志文件")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    run_dir = Path(args.run_dir)
+    log = Logger(run_dir, args.quiet)
+    log(f"── 触发：{args.trigger}" + (f"（{args.interface}）" if args.interface else "")
+        + ("[dry-run]" if args.dry_run else ""))
+
+    if not args.dry_run and not args.force and not is_live():
+        log(f"不是 Live（{LIVE_MARKER} 不存在），什么都不做 —— 装后系统的换源策略见 Issue #23")
+        return 0
+
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        lock_fd = acquire_lock(run_dir)
+    except LockBusy:
+        log("另一次换源还在跑（拿不到锁），这次跳过")
+        return 0
+    except OSError as exc:
+        log(f"没法在 {run_dir} 下建锁文件：{exc}")
+        return 1
+
+    try:
+        stamp = run_dir / "mipl-mirror-switch.stamp"
+        if not args.dry_run and not args.force and stamp.is_file():
+            age = time.time() - stamp.stat().st_mtime
+            if age < args.min_interval:
+                log(f"距上次换源只有 {age:.0f}s（< {args.min_interval}s），这次跳过")
+                return 0
+
+        connectivity = nm_connectivity()
+        if connectivity != "full" and not args.force:
+            log(f"NetworkManager 报告的连通性是 {connectivity}，没到 full，先不换")
+            return 0
+        log(f"NetworkManager 连通性：{connectivity}")
+
+        work_dir = Path(tempfile.mkdtemp(prefix="mirror-switch.", dir=str(run_dir)))
+        mirrorlist_dir = Path(args.mirrorlist_dir)
+        official_changed = switch_official(
+            mirrorlist_dir / OFFICIAL_MIRRORLIST.name, work_dir, args.dry_run, log)
+        cn_changed = switch_archlinuxcn(
+            mirrorlist_dir / CN_MIRRORLIST.name, args.dry_run, log)
+
+        if args.dry_run:
+            log("dry-run 结束：没有写任何文件")
+            return 0
+        stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
+        log("换源结束（官方：" + ("变了" if official_changed else "没变")
+            + "；archlinuxcn：" + ("变了" if cn_changed else "没变") + "）")
+        return 0
+    except Exception as exc:  # dispatcher 里绝不能让异常留下半个文件
+        log(f"换源失败：{exc.__class__.__name__}: {exc}")
+        return 1
+    finally:
+        os.close(lock_fd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

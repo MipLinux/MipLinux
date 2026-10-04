@@ -269,6 +269,58 @@ def device_scale(output_scale=None, physical_size=None, resolution=None) -> Devi
     )
 
 
+# ───────────────────── 界面层缩放（百分比档，2026-10-04 维护者定） ─────────────────────
+#
+# 与上面的「设备层缩放」是两件事，别再混：
+#   - 设备层（1x/2x/3x）：**不再单独生效** —— 两层相乘会把 4K 屏推到 4x。界面层统一承担缩放。
+#   - 界面层（100% / 167% / 200%）：用户在顶栏选的档位，落到 CSS 的 `--ui-scale`。
+#
+# 自动档的判据（维护者给的目标值：2560×1600 → 167%）
+# --------------------------------------------------
+# 「逻辑宽度落在 1536px 附近」：对每个候选档算 `物理宽 / 档位`，取与目标最接近的那个。
+#   2560 / 1.67 = 1533  ← 命中 167%
+#   3840 / 2.00 = 1920
+#   1920 / 1.00 = 1920  （1920 与 1536 差 384；167% 给 1150，差 386 —— 于是选 100%）
+# 只做整数百分比，不做任意值：档位少，用户和排查都不用猜。
+#
+# 高度兜底：选完档再看**逻辑高度** `物理高 / 档位`，低于 800px 就往下降一档 ——
+# 5120×1440 这种「超宽但矮」的屏，按宽算会选到 200%（逻辑高只有 720），装不下一屏内容。
+
+UI_SCALE_PERCENTS = (100, 167, 200)
+UI_SCALE_TARGET_WIDTH = 1536
+#: 逻辑高度下限（低于它说明这一档竖着放不下）
+UI_SCALE_MIN_LOGICAL_HEIGHT = 800
+SOURCE_UI_AUTO = "ui-auto"
+
+
+def recommend_ui_scale_percent(width_px, height_px=None) -> int:
+    """按物理分辨率推荐界面缩放档位（百分数）。
+
+    拿不到宽度（`None` / <= 0）→ 返回 100（最保守的一档，宁可小也不要糊）。
+    高度用于**逻辑高度兜底**：按宽选完档后，若 `高 / 档位 < 800`，往下降一档
+    （5120×1440 会在 200% 上得到 720px 逻辑高 —— 装不下一屏内容）。
+    """
+    if not width_px or width_px <= 0:
+        return 100
+
+    best = UI_SCALE_PERCENTS[0]
+    best_gap = None
+    for percent in UI_SCALE_PERCENTS:
+        logical = width_px / (percent / 100.0)
+        gap = abs(logical - UI_SCALE_TARGET_WIDTH)
+        if best_gap is None or gap < best_gap:
+            best, best_gap = percent, gap
+
+    # 逻辑高度兜底：降档直到「逻辑高 >= 800」或已经是最低档
+    if height_px and height_px > 0:
+        index = UI_SCALE_PERCENTS.index(best)
+        while index > 0 and (height_px / (UI_SCALE_PERCENTS[index] / 100.0)) < UI_SCALE_MIN_LOGICAL_HEIGHT:
+            index -= 1
+        best = UI_SCALE_PERCENTS[index]
+    return best
+
+
+
 __all__ = [
     "DeviceScale",
     "device_scale",
@@ -283,4 +335,8 @@ __all__ = [
     "SOURCE_PHYSICAL_DPI",
     "SOURCE_RESOLUTION",
     "SOURCE_FALLBACK",
+    "recommend_ui_scale_percent",
+    "UI_SCALE_PERCENTS",
+    "UI_SCALE_TARGET_WIDTH",
+    "SOURCE_UI_AUTO",
 ]

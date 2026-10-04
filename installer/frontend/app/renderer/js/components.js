@@ -327,6 +327,83 @@ export function dialogNode({ title, body, actions, labelledBy = 'dialog-title' }
   ]);
 }
 
+/**
+ * 下拉菜单（顶栏的主题 / 缩放用它）
+ *
+ * 结构：一个触发件 + 一个浮层；浮层里每项是 `role="menuitemradio"`（带选中态）。
+ * 关闭方式：选中一项 / 点外面 / Esc。**只有一份全局监听**，关闭时立刻摘掉，不累积。
+ */
+export function menu({ id, trigger, items, onSelect, ariaLabel }) {
+  const popup = h(
+    'div',
+    { class: 'menu__popup', role: 'menu', id: `${id}-popup`, hidden: true },
+    items.map((item) =>
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'menu__item',
+          role: 'menuitemradio',
+          'aria-checked': String(Boolean(item.checked)),
+          dataset: { value: String(item.value) },
+          onclick: () => {
+            close();
+            onSelect(item.value);
+          },
+        },
+        [icon(item.checked ? 'check' : 'caret-right'), h('span', { text: item.label })]
+      )
+    )
+  );
+
+  const triggerNode = h(
+    'button',
+    {
+      id,
+      type: 'button',
+      class: trigger.kind === 'chip' ? 'chip menu__trigger' : 'icon-btn menu__trigger',
+      'aria-haspopup': 'menu',
+      'aria-expanded': 'false',
+      'aria-controls': `${id}-popup`,
+      title: trigger.label,
+      'aria-label': ariaLabel || trigger.label,
+      onclick: (event) => {
+        event.stopPropagation();
+        if (popup.hidden) open();
+        else close();
+      },
+    },
+    [trigger.icon ? icon(trigger.icon) : null, trigger.label && trigger.kind === 'chip' ? h('span', { text: trigger.label }) : null]
+  );
+
+  const onDocumentPointerDown = (event) => {
+    if (!root.contains(event.target)) close();
+  };
+  const onKeydown = (event) => {
+    if (event.key === 'Escape') close();
+  };
+
+  function open() {
+    popup.hidden = false;
+    triggerNode.setAttribute('aria-expanded', 'true');
+    document.addEventListener('pointerdown', onDocumentPointerDown, true);
+    document.addEventListener('keydown', onKeydown, true);
+    const checked = popup.querySelector('[aria-checked="true"]');
+    if (checked) checked.focus();
+  }
+
+  function close() {
+    if (popup.hidden) return;
+    popup.hidden = true;
+    triggerNode.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+    document.removeEventListener('keydown', onKeydown, true);
+  }
+
+  const root = h('div', { class: 'menu' }, [triggerNode, popup]);
+  return root;
+}
+
 export function snackbarNode(text) {
   return h('div', { class: 'snackbar', role: 'status' }, [icon('info'), h('span', { text })]);
 }

@@ -85,6 +85,7 @@
   "progress.phase.packages": "正在下载并安装软件包",
   "progress.phase.start": "正在准备安装环境",
   "progress.title": "正在安装",
+  "scale.auto": "自动检测",
   "scale.tooltip": "界面缩放 %1%",
   "step.of": "第 %1 / %2 步",
   "summary.desc": "确认下面的内容。点「开始安装」之后，目标盘会被重新分区。",

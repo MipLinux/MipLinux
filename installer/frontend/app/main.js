@@ -13,7 +13,7 @@
  * 启动参数（由 `installer/frontend/mipl-installer` 传进来）
  * -------------------------------------------------------
  *   --theme=auto|light|dark   首帧主题（auto 由启动器按本地时间算好后再传）
- *   --scale=1|2|3             设备层缩放（启动器按 DRM 信息算好）
+ *   --ui-scale=100|167|200    界面层缩放的推荐值（启动器按分辨率算好）；0 = 自动档但没推荐值
  *   --lang=zh_CN|en_US        首帧语言
  *
  * Chromium 的开关（`--no-sandbox` / `--ozone-platform=wayland` …）**由启动器写在命令行上**，
@@ -35,14 +35,14 @@ const APP_THEME_BG = { dark: '#06070b', light: '#f7f8fb' };
 // ---------------------------------------------------------------- 启动参数
 
 function parseLaunchArgs(argv) {
-  const wanted = { theme: 'auto', scale: null, lang: 'zh_CN' };
+  const wanted = { theme: 'auto', uiScale: 0, lang: 'zh_CN' };
   for (const raw of argv) {
-    const match = /^--(theme|scale|lang)=(.+)$/.exec(raw);
+    const match = /^--(theme|ui-scale|lang)=(.+)$/.exec(raw);
     if (!match) continue;
     const [, key, value] = match;
-    if (key === 'scale') {
+    if (key === 'ui-scale') {
       const parsed = Number.parseInt(value, 10);
-      wanted.scale = [1, 2, 3].includes(parsed) ? parsed : null;
+      wanted.uiScale = [100, 167, 200].includes(parsed) ? parsed : 0;
     } else {
       wanted[key] = value;
     }
@@ -132,7 +132,7 @@ function createWindow(launch) {
         `--mipl-theme=${theme}`,
         `--mipl-theme-source=${launch.theme}`,
         `--mipl-lang=${launch.lang}`,
-        `--mipl-scale=${launch.scale ?? 0}`,
+        `--mipl-ui-scale=${launch.uiScale || 0}`,
         `--mipl-probe=${process.env.MIPL_PROBE ? '1' : '0'}`,
       ],
     },

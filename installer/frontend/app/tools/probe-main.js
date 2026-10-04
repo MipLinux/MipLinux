@@ -27,7 +27,13 @@ module.exports = async function probe({ app, win, launch }) {
 
   const failures = [];
   const notes = [];
-  const run = (code) => win.webContents.executeJavaScript(code, true);
+  // 记住「最后一句注入的脚本」：注入脚本抛错时 Electron 只给一句笼统的话，
+  // 没有它就只能靠猜是哪一行
+  let lastRun = '';
+  const run = async (code) => {
+    lastRun = code.replace(/\s+/g, ' ').slice(0, 160);
+    return win.webContents.executeJavaScript(code, true);
+  };
 
   // 离屏渲染：最新的 paint 帧就是「屏幕上的画面」。headless 下 capturePage() 会给 1×1。
   let lastFrame = null;
@@ -255,20 +261,85 @@ module.exports = async function probe({ app, win, launch }) {
     const darkTheme = await run('document.documentElement.dataset.theme');
     check(darkTheme === 'dark', '暗色主题已应用', `实际 ${darkTheme}`);
 
-    // ---------------------------------------------------------- 6. 缩放四档
-    const scaleResults = [];
-    for (const level of [0.85, 1, 1.15, 1.3]) {
-      await run(`window.__mipl.setScale(${level})`);
-      await sleep(120);
+    // ---------------------------------------------------------- 6. 界面缩放：自动 / 100 / 167 / 200
+    for (const mode of [100, 167, 200]) {
+      await run(`window.__mipl.setScale(${mode})`);
+      await sleep(140);
       const applied = await run('getComputedStyle(document.documentElement).getPropertyValue("--ui-scale").trim()');
-      scaleResults.push(`${Math.round(level * 100)}%→${applied}`);
-      check(Number(applied) === level, `界面缩放 ${Math.round(level * 100)}% 生效`, `实际 ${applied}`);
+      check(Math.abs(Number(applied) - mode / 100) < 0.001, `界面缩放 ${mode}% 生效`, `实际 ${applied}`);
     }
+    const autoPercent = await run('window.__mipl.setScale("auto")');
+    check([100, 167, 200].includes(autoPercent), `自动档落到白名单档位（${autoPercent}%）`, `实际 ${autoPercent}`);
+
+    // 菜单本身：缩放 4 项（自动 + 三档）、主题 3 项
+    await run('window.__mipl.setScale(100)');
+    await sleep(120);
+    await run('window.__mipl.openScaleMenu()');
+    await sleep(200);
+    await shot('menu-scale-open');
+    const scaleMenu = await run(`(() => {
+      const open = !document.getElementById('scale-menu-popup').hidden;
+      const items = [...document.querySelectorAll('#scale-menu-popup .menu__item')].map((el) => el.innerText.trim());
+      const triggerIcon = document.querySelector('#scale-menu svg') ? 'yes' : 'no';
+      document.body.click();
+      return { open, items, triggerIcon };
+    })()`);
+    check(scaleMenu.open, '缩放菜单能打开', JSON.stringify(scaleMenu));
+    check(scaleMenu.items.length === 4 && scaleMenu.items[0] === '自动检测', '缩放菜单是「自动检测 + 100/167/200」', JSON.stringify(scaleMenu.items));
+    check(scaleMenu.triggerIcon === 'yes', '缩放按钮有图标（放大镜）');
+
+    await run('window.__mipl.openThemeMenu()');
+    await sleep(200);
+    await shot('menu-theme-open');
+    const themeMenu = await run(`(() => {
+      const open = !document.getElementById('theme-menu-popup').hidden;
+      const items = [...document.querySelectorAll('#theme-menu-popup .menu__item')].map((el) => el.innerText.trim());
+      document.body.click();
+      return { open, items };
+    })()`);
+    check(themeMenu.open, '主题菜单能打开', JSON.stringify(themeMenu));
+    check(themeMenu.items.length === 3, '主题菜单是「跟随时间 / 亮 / 暗」', JSON.stringify(themeMenu.items));
+
+    // 药囊：不换行（实机反馈：被折成四行）。走**真实用户路径** —— 点菜单项，
+    // 因为药囊就是由菜单的 onSelect 弹出来的（用探针 API 换档不会弹）。
+    const clicked = await run(`(() => {
+      try {
+        window.__mipl.openScaleMenu();
+        const item = document.querySelector('#scale-menu-popup .menu__item[data-value="167"]');
+        if (!item) return { ok: false, why: '没找到 167% 菜单项', items: [...document.querySelectorAll('#scale-menu-popup .menu__item')].map((el) => el.dataset.value) };
+        item.click();
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, why: String(error && (error.stack || error.message || error)) };
+      }
+    })()`);
+    check(clicked.ok, '能通过菜单把缩放切到 167%', JSON.stringify(clicked));
+    await sleep(260);
+    // 判「一行」只用药囊的高度 + white-space：**别在注入脚本里分裂换行**
+    // （注入脚本是模板字面量，`\n` 会先被 Node 变成真换行，注入进去就是语法错误）
+    const snack = await run(`(() => {
+      const el = document.querySelector('.snackbar');
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      const span = el.querySelector('span');
+      return {
+        height: Math.round(el.getBoundingClientRect().height),
+        width: Math.round(el.getBoundingClientRect().width),
+        nowrap: style.whiteSpace,
+        // 换行的行内盒会给**多个** client rect —— 这才是「有没有折行」的可靠判据
+        textRects: span ? span.getClientRects().length : 0,
+      };
+    })()`);
+    check(
+      Boolean(snack) && snack.nowrap === 'nowrap' && snack.textRects === 1 && snack.height <= 72,
+      '药囊提示一行放得下（不换行）',
+      JSON.stringify(snack)
+    );
 
     // ---------------------------------------------------------- 6.5 布局不变量（实机反馈的回归）
     // 2026-10-04 实机发现：`#root` 没有高度 → `.app` 随内容长高，高级安装（12 步）与
     // WiFi 展开都会把底部动作区顶出视口。下面这些断言把那次问题钉死。
-    await run('window.__mipl.setScale(1)');
+    await run('window.__mipl.setScale(100)');
     await run('window.__mipl.setTheme("light")');   // 亮色是主主题：回归截图也按亮色留档
     win.setContentSize(1024, 768);
     await sleep(420);
@@ -419,9 +490,9 @@ module.exports = async function probe({ app, win, launch }) {
       console.log(`  ⚠️  reduced-motion 未验：${error.message}`);
     }
 
-    await run('window.__mipl.setScale(1)');
+    await run('window.__mipl.setScale(100)');
   } catch (error) {
-    failures.push(`探针异常：${error.stack || error.message}`);
+    failures.push(`探针异常：${error.message || error} —— 最后执行的脚本：${lastRun}`);
   }
 
   console.log('');

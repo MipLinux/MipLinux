@@ -10,15 +10,15 @@
 import { h, mount, clear } from './dom.js';
 import { I18n, LANGUAGE_LABEL } from './i18n.js';
 import { ThemeController } from './theme.js';
-import { ScaleController } from './scale.js';
+import { ScaleController, SCALE_AUTO, SCALE_PERCENTS } from './scale.js';
 import { Setup } from './setup.js';
 import { Mock } from './mock.js';
 import { STEP_TITLE_KEY, NO_BACK } from './steps.js';
 import * as motion from './motion.js';
 import {
   button,
-  iconButton,
   chip,
+  menu,
   meter,
   stepsRail,
   dialogNode,
@@ -38,7 +38,8 @@ class App {
   constructor() {
     this.i18n = new I18n(launch.lang);
     this.theme = new ThemeController({ theme: launch.theme, source: launch.themeSource });
-    this.scale = new ScaleController(launch.scale || 1);
+    // 缩放：默认自动档；推荐值由启动器算（device_scale.py 的纯函数），这里不复制判据
+    this.scale = new ScaleController({ mode: SCALE_AUTO, recommended: launch.uiScale || 0 });
     this.setup = new Setup();
     this.mock = new Mock();
     this.page = null;
@@ -91,33 +92,15 @@ class App {
     langToggle.setAttribute('aria-label', this.i18n.t('lang.tooltip', LANGUAGE_LABEL[this.i18n.other]));
 
     this.nodes.langToggle = langToggle;
-    this.nodes.themeToggle = iconButton({
-      id: 'theme-toggle',
-      name: this.theme.theme === 'dark' ? 'sun' : 'moon-stars',
-      label: this.i18n.t(this.theme.theme === 'dark' ? 'theme.toLight' : 'theme.toDark'),
-      onClick: () => {
-        this.theme.toggle();
-        this.renderShell();
-      },
-    });
-    this.nodes.scaleToggle = iconButton({
-      id: 'scale-toggle',
-      name: 'arrows-out-simple',
-      label: this.i18n.t('scale.tooltip', this.scale.percent),
-      onClick: () => {
-        this.scale.cycle();
-        this.nodes.scaleToggle.setAttribute('aria-label', this.i18n.t('scale.tooltip', this.scale.percent));
-        this.nodes.scaleToggle.setAttribute('title', this.i18n.t('scale.tooltip', this.scale.percent));
-        this.showSnackbar(this.i18n.t('scale.tooltip', this.scale.percent));
-      },
-    });
+    this.nodes.themeMenu = this.buildThemeMenu();
+    this.nodes.scaleMenu = this.buildScaleMenu();
 
     const topbar = h('header', { class: 'topbar' }, [
       brand,
       h('span', { class: 'topbar__spacer' }),
       langToggle,
-      this.nodes.themeToggle,
-      this.nodes.scaleToggle,
+      this.nodes.themeMenu,
+      this.nodes.scaleMenu,
     ]);
 
     this.nodes.stepsbar = h('div', { class: 'stepsbar', id: 'stepsbar' });
@@ -147,6 +130,61 @@ class App {
     );
   }
 
+  /** 主题菜单：跟随时间 / 亮 / 暗（三个词都在审核稿里） */
+  buildThemeMenu() {
+    const t = (key, ...args) => this.i18n.t(key, ...args);
+    const source = this.theme.source;
+    const label =
+      source === 'auto'
+        ? t('theme.following')
+        : source === 'dark'
+          ? t('theme.lockedDark')
+          : t('theme.lockedLight');
+    return menu({
+      id: 'theme-menu',
+      ariaLabel: label,
+      trigger: { kind: 'icon', icon: source === 'dark' ? 'moon-stars' : 'sun', label },
+      items: [
+        { value: 'auto', label: t('theme.following'), checked: source === 'auto' },
+        { value: 'light', label: t('theme.toLight'), checked: source === 'light' },
+        { value: 'dark', label: t('theme.toDark'), checked: source === 'dark' },
+      ],
+      onSelect: (value) => {
+        this.theme.setMode(value);
+        this.renderShell();
+        this.showSnackbar(
+          this.theme.source === 'auto'
+            ? this.i18n.t('theme.following')
+            : this.i18n.t(this.theme.source === 'dark' ? 'theme.lockedDark' : 'theme.lockedLight')
+        );
+      },
+    });
+  }
+
+  /** 缩放菜单：自动检测 / 100% / 167% / 200%（百分比是数字，不需要翻译） */
+  buildScaleMenu() {
+    const t = (key, ...args) => this.i18n.t(key, ...args);
+    const label = t('scale.tooltip', this.scale.percent);
+    return menu({
+      id: 'scale-menu',
+      ariaLabel: label,
+      trigger: { kind: 'icon', icon: 'magnifying-glass', label },
+      items: [
+        { value: SCALE_AUTO, label: t('scale.auto'), checked: this.scale.isAuto },
+        ...SCALE_PERCENTS.map((percent) => ({
+          value: percent,
+          label: `${percent}%`,
+          checked: !this.scale.isAuto && this.scale.mode === percent,
+        })),
+      ],
+      onSelect: (value) => {
+        this.scale.setMode(value);
+        this.renderShell();
+        this.showSnackbar(this.i18n.t('scale.tooltip', this.scale.percent));
+      },
+    });
+  }
+
   /** 顶栏 / 步骤轨道 / 窄屏步骤条 —— 语言、主题、进度变了就重画这几块。 */
   renderShell() {
     const t = (key, ...args) => this.i18n.t(key, ...args);
@@ -164,19 +202,13 @@ class App {
     this.nodes.langToggle.replaceWith(nextLang);
     this.nodes.langToggle = nextLang;
 
-    const themeName = this.theme.theme === 'dark' ? 'sun' : 'moon-stars';
-    const themeLabel = t(this.theme.theme === 'dark' ? 'theme.toLight' : 'theme.toDark');
-    const nextTheme = iconButton({
-      id: 'theme-toggle',
-      name: themeName,
-      label: themeLabel,
-      onClick: () => {
-        this.theme.toggle();
-        this.renderShell();
-      },
-    });
-    this.nodes.themeToggle.replaceWith(nextTheme);
-    this.nodes.themeToggle = nextTheme;
+    const nextThemeMenu = this.buildThemeMenu();
+    this.nodes.themeMenu.replaceWith(nextThemeMenu);
+    this.nodes.themeMenu = nextThemeMenu;
+
+    const nextScaleMenu = this.buildScaleMenu();
+    this.nodes.scaleMenu.replaceWith(nextScaleMenu);
+    this.nodes.scaleMenu = nextScaleMenu;
 
     const rail = stepsRail({ steps, index: this.setup.index, onJump: () => {} });
     const progress = h('div', { class: 'stack' }, [
@@ -430,7 +462,21 @@ class App {
         this.renderShell();
         return this.theme.theme;
       },
-      setScale: (level) => this.scale.set(level),
+      setScale: (mode) => {
+        this.scale.setMode(mode === 'auto' ? 'auto' : Number(mode));
+        this.renderShell();
+        return this.scale.percent;
+      },
+      openThemeMenu: () => {
+        const trigger = document.querySelector('#theme-menu');
+        if (trigger) trigger.click();
+        return !document.getElementById('theme-menu-popup').hidden;
+      },
+      openScaleMenu: () => {
+        const trigger = document.querySelector('#scale-menu');
+        if (trigger) trigger.click();
+        return !document.getElementById('scale-menu-popup').hidden;
+      },
       setAdvanced: (value) => {
         this.setup.setAdvanced(value);
         this.renderPage({ animate: false });

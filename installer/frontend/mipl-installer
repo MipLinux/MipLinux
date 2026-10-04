@@ -16,9 +16,10 @@
 3. `exec` Electron —— 本进程被替换掉，信号直接落到 Electron 上，kiosk 的 stop/kill 语义才干净。
 
 主题与缩放都是**纯函数**（`frontend/theme/*.py`，有单测）：
-  - 主题：`--theme=auto|light|dark`；**默认 light**（亮色是主主题，维护者 2026-10-04），
-    auto 才按本地时间（07:00–18:59 亮）；
-  - 缩放：`--scale=1|2|3` 覆盖一切，否则读 sysfs DRM（分辨率 + EDID 物理尺寸）。
+  - 主题：`--theme=auto|light|dark`；**默认 auto** —— 按本地时间（07:00–18:59 亮）；
+    亮色是设计基线，用户可以锁定；
+  - 缩放：`--scale=auto|100|167|200`；auto 由分辨率推荐（`recommend_ui_scale_percent`，
+    2560×1600 → 167%）。**只有界面层这一层缩放** —— 设备层相乘会把高分屏推爆。
 
 纪律：前端只画界面、不做安装逻辑；`installer/backend/` 不碰界面技术栈。
 接口准据：`installer/frontend/app/README.md`。
@@ -39,8 +40,10 @@ from pathlib import Path
 LOG = logging.getLogger("mipl-installer")
 
 THEME_CHOICES = ("auto", "light", "dark")
-DEFAULT_THEME = "light"
-SCALE_CHOICES = (1, 2, 3)
+#: 默认跟随时间（白天亮、入夜暗）——「亮色为主」指的是设计基线，不是锁死亮色
+DEFAULT_THEME = "auto"
+#: 界面层缩放的档位（百分数；`auto` 走 device_scale.recommend_ui_scale_percent）
+SCALE_CHOICES = ("auto", "100", "167", "200")
 LANGUAGES = ("zh_CN", "en_US")
 SOURCE_LANGUAGE = "zh_CN"
 
@@ -51,8 +54,6 @@ ELECTRON_CANDIDATES = ("/usr/lib/electron44/electron", "/usr/bin/electron")
 DRM_SYSFS = Path("/sys/class/drm")
 _MODE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
 
-#: `--scale` 覆盖时写进判定依据的 source（手动覆盖「覆盖一切」）。
-SOURCE_MANUAL_OVERRIDE = "manual-override"
 
 
 # ───────────────────────────── 路径与纯函数模块 ─────────────────────────────
@@ -128,21 +129,6 @@ def read_display_info(sysfs: Path = DRM_SYSFS):
     return (None, None)
 
 
-def decide_device_scale(device_scale_module, override, resolution, physical_size):
-    """`--scale` 覆盖一切；否则走 tech/08 §3.10 的四级判定。"""
-    if override is not None:
-        return device_scale_module.DeviceScale(
-            override,
-            source=SOURCE_MANUAL_OVERRIDE,
-            reason=f"--scale={override} 手动覆盖一切",
-        )
-    return device_scale_module.device_scale(
-        output_scale=None,
-        physical_size=physical_size,
-        resolution=resolution,
-    )
-
-
 # ───────────────────────────── 主题（纯计算）─────────────────────────────
 
 def decide_initial_theme(theme_mode, theme_arg: str, now):
@@ -164,8 +150,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--theme", choices=THEME_CHOICES, default=DEFAULT_THEME,
                         help="首帧主题：light（默认）/ dark / auto（按本地时间 07:00–18:59）")
-    parser.add_argument("--scale", type=int, choices=SCALE_CHOICES, default=None,
-                        help="设备层缩放 1|2|3，覆盖一切自动判定（默认按 DRM 信息算）")
+    parser.add_argument("--scale", choices=SCALE_CHOICES, default="auto",
+                        help="界面层缩放：auto（默认，按分辨率推荐）/ 100 / 167 / 200")
     parser.add_argument("--lang", choices=LANGUAGES, default=SOURCE_LANGUAGE,
                         help="界面语言：zh_CN（源语言，默认）/ en_US")
     parser.add_argument("--electron", default=None,
@@ -206,15 +192,20 @@ def main(argv=None) -> int:
         LOG.error("加载 theme 纯函数失败：%s", exc)
         return 1
 
-    # ---- ① 设备层缩放：先算，再写进 Chromium 的命令行 ----
-    resolution, physical_size = read_display_info()
-    decision = decide_device_scale(device_scale_module, args.scale, resolution, physical_size)
-    if decision.log_required:
-        # tech/08 §3.10 ④：拿不到任何信息时落 1x 也**必须**留一条日志，不静默
-        LOG.warning("device scale 落到 %sx（来源 %s）：%s", int(decision), decision.source, decision.reason)
-        for note in decision.notes:
-            LOG.warning("device scale 备注：%s", note)
-    LOG.info("设备层缩放 %sx（来源 %s）；判定：%s", int(decision), decision.source, decision.reason)
+    # ---- ① 界面层缩放（**只有这一层**，维护者 2026-10-04）----
+    # 设备层（1x/2x/3x）不再单独生效：两层相乘会把 4K 屏推到 4x。
+    # 这里按分辨率推荐档位，渲染层的「自动检测」档读的就是这个值。
+    resolution, _physical_size = read_display_info()
+    if args.scale == "auto":
+        ui_scale = device_scale_module.recommend_ui_scale_percent(
+            resolution[0] if resolution else None,
+            resolution[1] if resolution else None,
+        )
+        LOG.info("界面缩放 auto → %s%%（按分辨率 %s 推荐）", ui_scale,
+                 f"{resolution[0]}×{resolution[1]}" if resolution else "拿不到")
+    else:
+        ui_scale = int(args.scale)
+        LOG.info("界面缩放 %s%%（--scale 显式指定）", ui_scale)
 
     # ---- ② 首帧主题 ----
     now = datetime.datetime.now()
@@ -233,10 +224,11 @@ def main(argv=None) -> int:
         str(app_dir),
         f"--theme={theme}",
         f"--lang={args.lang}",
+        f"--ui-scale={ui_scale}",
         # kiosk 场景的开关写死在启动器里，不散到别处：
         "--no-sandbox",                     # Live 里安装器就是 root，Chromium 沙箱在 root 下拒绝启动
         "--ozone-platform=wayland",         # cage 是 Wayland 合成器；Live 里没有 XWayland 可退
-        f"--force-device-scale-factor={int(decision)}",
+        "--force-device-scale-factor=1",    # 缩放统一由界面层承担，见上
         # QEMU 无 GPU：用 Chromium 自带的 SwiftShader 软渲染，不额外装驱动
         "--use-gl=angle",
         "--use-angle=swiftshader",

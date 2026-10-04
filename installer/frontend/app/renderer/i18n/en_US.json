@@ -85,6 +85,7 @@
   "progress.phase.packages": "Downloading and installing packages",
   "progress.phase.start": "Preparing",
   "progress.title": "Installing",
+  "scale.auto": "Auto-detect",
   "scale.tooltip": "Installer scale %1%",
   "step.of": "Step %1 of %2",
   "summary.desc": "Review the settings below. The target disk will be repartitioned after you press Install.",

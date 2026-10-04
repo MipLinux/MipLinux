@@ -1,14 +1,16 @@
-"""V7 的纯函数侧：设备层缩放（08 §3.10）—— 不依赖 Qt、无副作用。
+"""V7 的纯函数侧：设备层缩放（08 §3.10）+ 界面层缩放档位推荐 —— 无副作用、不依赖界面栈。
 
 跑法（任务验收命令）::
 
-    python3 -m unittest discover -s installer/frontend/qml/Mipl/theme/tests \
-        -t installer/frontend/qml/Mipl/theme
+    python3 -m unittest discover -s installer/frontend/theme/tests \
+        -t installer/frontend/theme
 """
 
 import unittest
 
 from device_scale import (
+    UI_SCALE_PERCENTS,
+    recommend_ui_scale_percent,
     DPI_2X,
     DPI_3X,
     RES_WIDTH_2X,
@@ -281,3 +283,38 @@ class DeviceScaleValueTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecommendUiScaleTest(unittest.TestCase):
+    """界面层缩放档位推荐（维护者 2026-10-04 给的目标：2560×1600 → 167%）。"""
+
+    def test_维护者给的例子(self):
+        self.assertEqual(recommend_ui_scale_percent(2560, 1600), 167)
+
+    def test_常见分辨率(self):
+        cases = {
+            (1920, 1080): 100,
+            (2560, 1440): 167,
+            (3840, 2160): 200,
+            (1366, 768): 100,
+            (1024, 768): 100,
+        }
+        for (width, height), want in cases.items():
+            with self.subTest(resolution=f"{width}x{height}"):
+                self.assertEqual(recommend_ui_scale_percent(width, height), want)
+
+    def test_拿不到宽度就落最保守的一档(self):
+        for value in (None, 0, -1):
+            self.assertEqual(recommend_ui_scale_percent(value), 100)
+
+    def test_超宽屏按逻辑高度降一档(self):
+        # 5120 宽按 1536 目标本该 200%，但 1440 高在 200% 下只剩 720 逻辑高 —— 降一档
+        self.assertEqual(recommend_ui_scale_percent(5120, 1440), 167)
+        # 同样是 5120 宽，高度够（2880 → 1440 逻辑高）就不降
+        self.assertEqual(recommend_ui_scale_percent(5120, 2880), 200)
+        # 已是最低档时不再降（1024×768 逻辑高 768 < 800，但没有更低的档）
+        self.assertEqual(recommend_ui_scale_percent(1024, 768), 100)
+
+    def test_只返回白名单里的档位(self):
+        for width in range(800, 6000, 137):
+            self.assertIn(recommend_ui_scale_percent(width, 1080), UI_SCALE_PERCENTS)

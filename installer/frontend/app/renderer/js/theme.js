@@ -10,7 +10,8 @@ const AUTO_LIGHT_UNTIL = 19;
 
 /**
  * `auto` 模式下的判定（07:00–18:59 亮）。
- * 注意：**默认不是 auto** —— 亮色是主主题（维护者 2026-10-04），auto 是显式选择。
+ * **默认就是 auto**（维护者 2026-10-04）—— 白天落亮色（亮色是设计基线），入夜自动转暗；
+ * 用户可以在顶栏把主题**锁**成亮或暗（锁了就不再跟时间走）。
  */
 export function themeForNow(date = new Date()) {
   const hour = date.getHours();
@@ -18,7 +19,7 @@ export function themeForNow(date = new Date()) {
 }
 
 export class ThemeController {
-  constructor({ theme = 'light', source = 'light', intervalMs = 30_000 } = {}) {
+  constructor({ theme = 'light', source = 'auto', intervalMs = 30_000 } = {}) {
     this.theme = theme === 'light' ? 'light' : 'dark';
     /** 'auto' = 跟时间；'light' | 'dark' = 用户手动锁定（08 §3.9） */
     this.source = ['auto', 'light', 'dark'].includes(source) ? source : 'auto';
@@ -33,6 +34,25 @@ export class ThemeController {
 
   apply() {
     document.documentElement.dataset.theme = this.theme;
+  }
+
+  /** 顶栏菜单用：auto = 跟随时间；light / dark = 锁定。 */
+  setMode(mode) {
+    if (mode === 'auto') {
+      const changed = this.source !== 'auto';
+      this.source = 'auto';
+      this.theme = themeForNow();
+      this.apply();
+      this.emit();
+      return changed;
+    }
+    if (mode !== 'light' && mode !== 'dark') return false;
+    const changed = this.source !== mode;
+    this.source = mode;
+    this.theme = mode;
+    this.apply();
+    this.emit();
+    return changed;
   }
 
   /** 手动切换：锁定到当前主题的相反面。 */

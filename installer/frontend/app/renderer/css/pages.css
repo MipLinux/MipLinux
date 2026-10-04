@@ -309,6 +309,19 @@
   fill: currentColor;
 }
 
+/* 选中 Wi-Fi 后的展开区：跟列表项同宽内收一点，按钮不要横贯整行 */
+.wifi-editor {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space-3) * var(--ui-scale));
+  max-width: 380px;
+  padding: 0 4px calc(var(--space-3) * var(--ui-scale));
+}
+
+.wifi-editor .btn {
+  align-self: flex-start;
+}
+
 .net-item__signal {
   display: inline-flex;
   align-items: flex-end;

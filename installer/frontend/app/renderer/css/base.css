@@ -14,7 +14,19 @@ body {
   margin: 0;
 }
 
+/* 高度架构（2026-10-04 实机反馈）：
+ * 整窗 = 固定高度，**只有内容区内部滚动**。缺了 #root 的高度，`.app` 的 100% 会退化成
+ * auto，页面就会随内容长高 —— 高级安装多出 4 步、WiFi 展开输入框，都会把底部动作区顶出视口。
+ * 这也是「选中高级安装后整个应用高度重绘」的根因。 */
+#root {
+  height: 100%;
+  min-height: 0;
+}
+
 body {
+  /* kiosk 不是文档：文本一律不可选（输入框单独放行，见下） */
+  user-select: none;
+  -webkit-user-select: none;
   font-family: var(--font-sans);
   font-size: calc(var(--t-body) * var(--ui-scale));
   line-height: var(--lh-body);
@@ -137,8 +149,10 @@ select {
   position: relative;
   z-index: 2;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
   padding: calc(var(--space-5) * var(--ui-scale));
   gap: calc(var(--space-5) * var(--ui-scale));
 }
@@ -203,7 +217,7 @@ select {
 .rail {
   display: none;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 
 @media (min-width: 840px) {
@@ -212,11 +226,13 @@ select {
   }
 }
 
+/* 内容区是**唯一**允许滚动的容器 */
 .stage {
   position: relative;
   min-height: 0;
-  overflow: auto;
-  padding-right: var(--space-2);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .stage__inner {
@@ -331,24 +347,21 @@ select {
 
 /* ------------------------------------------------------------ 滚动条 */
 
-.stage,
-.rail,
-.list {
-  scrollbar-width: thin;
-  scrollbar-color: var(--hairline-strong) transparent;
+/* 滚动条**不占位、不可见**（维护者 2026-10-04）：滚动照旧（滚轮 / 键盘 / 触屏），
+ * 只是不画出那条会挤动布局的槽 —— 出现/消失时页面不会横向抖一下。 */
+* {
+  scrollbar-width: none;
 }
 
-.stage::-webkit-scrollbar,
-.rail::-webkit-scrollbar,
-.list::-webkit-scrollbar {
-  width: 10px;
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
-.stage::-webkit-scrollbar-thumb,
-.rail::-webkit-scrollbar-thumb,
-.list::-webkit-scrollbar-thumb {
-  background: var(--hairline-strong);
-  border-radius: var(--r-pill);
-  border: 3px solid transparent;
-  background-clip: content-box;
+/* 输入框里要能选中/编辑文本（kiosk 下这是唯一的例外） */
+input,
+textarea,
+[contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
 }

@@ -52,7 +52,10 @@ export default {
     const { setup, mock } = ctx;
     const net = mock.network;
 
-    const status = panel({ title: t('network.title'), sub: t('network.desc') }, [
+    // 状态条：连上了就报「已连接 + 介质 + IP」，右侧永远只有「重新扫描」。
+    // **不要**把「未连接」这种状态串做成按钮（2026-10-04 实机反馈：读起来像可以点，
+    // 点了又什么都不说明）。Live 里断网就该走 blockedReason 那一条。
+    const status = panel({}, [
       h('div', { class: 'row', 'data-anim': '' }, [
         badge({
           label: net.connected ? t('network.connected') : t('network.disconnected'),
@@ -60,6 +63,7 @@ export default {
         }),
         badge({ label: net.kind === 'wired' ? t('network.wired') : t('network.wireless') }),
         net.ipv4 ? h('span', { class: 'mono muted', text: net.ipv4 }) : null,
+        net.connected && net.ssid ? h('span', { class: 'muted', text: net.ssid }) : null,
         h('span', { class: 'panel__spacer' }),
         net.scanning
           ? h('span', { class: 'label faint', text: t('network.scanning') })
@@ -75,26 +79,6 @@ export default {
               },
             }),
       ]),
-      !net.connected
-        ? button({
-            id: 'net-wired-connect',
-            label: t('network.connect'),
-            variant: 'tonal',
-            icon: 'wifi-high',
-            onClick: () => {
-              mock.connectWired();
-              ctx.rerender();
-            },
-          })
-        : button({
-            id: 'net-disconnect',
-            label: t('network.disconnected'),
-            variant: 'ghost',
-            onClick: () => {
-              mock.disconnectNetwork();
-              ctx.rerender();
-            },
-          }),
     ]);
 
     const wifiBody = net.scanning
@@ -128,7 +112,7 @@ export default {
                   },
                 }),
                 selected
-                  ? h('div', { class: 'stack', style: { padding: '0 4px 10px' } }, [
+                  ? h('div', { class: 'wifi-editor' }, [
                       item.security === 'open'
                         ? null
                         : field({

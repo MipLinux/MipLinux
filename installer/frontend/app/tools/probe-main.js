@@ -265,6 +265,83 @@ module.exports = async function probe({ app, win, launch }) {
       check(Number(applied) === level, `界面缩放 ${Math.round(level * 100)}% 生效`, `实际 ${applied}`);
     }
 
+    // ---------------------------------------------------------- 6.5 布局不变量（实机反馈的回归）
+    // 2026-10-04 实机发现：`#root` 没有高度 → `.app` 随内容长高，高级安装（12 步）与
+    // WiFi 展开都会把底部动作区顶出视口。下面这些断言把那次问题钉死。
+    await run('window.__mipl.setScale(1)');
+    await run('window.__mipl.setTheme("light")');   // 亮色是主主题：回归截图也按亮色留档
+    win.setContentSize(1024, 768);
+    await sleep(420);
+    await run('window.__mipl.setAdvanced(true)');
+    await run('window.__mipl.goTo("welcome")');
+    await sleep(420);
+    await settle();
+
+    const layout = await run(`(() => {
+      const root = document.getElementById('root');
+      const actions = document.getElementById('actions');
+      const stepsBody = document.querySelector('.steps__body');
+      const stage = document.getElementById('stage');
+      const rect = actions.getBoundingClientRect();
+      const inner = window.innerHeight;
+      return {
+        innerHeight: inner,
+        docScroll: document.documentElement.scrollHeight,
+        bodyScroll: document.body.scrollHeight,
+        rootHeight: Math.round(root.getBoundingClientRect().height),
+        actionsBottom: Math.round(rect.bottom),
+        actionsTop: Math.round(rect.top),
+        stageClient: stage.clientHeight,
+        stageScroll: stage.scrollHeight,
+        stepsClient: stepsBody ? stepsBody.clientHeight : -1,
+        stepsScroll: stepsBody ? stepsBody.scrollHeight : -1,
+        scrollbarGap: window.innerWidth - document.documentElement.clientWidth,
+        userSelect: getComputedStyle(document.body).userSelect || getComputedStyle(document.body).webkitUserSelect,
+        inputSelect: getComputedStyle(document.querySelector('input') || document.body).userSelect,
+      };
+    })()`);
+
+    check(layout.docScroll <= layout.innerHeight + 1, '1024×768 下页面本身不滚动（整窗固定）', JSON.stringify(layout));
+    check(layout.actionsBottom <= layout.innerHeight + 1, '动作区始终在视口内（12 步时也是）', `bottom=${layout.actionsBottom} / 视口=${layout.innerHeight}`);
+    check(Math.abs(layout.rootHeight - layout.innerHeight) <= 1, '#root 高度 = 视口高度', `${layout.rootHeight} vs ${layout.innerHeight}`);
+    check(layout.stepsScroll <= layout.stepsClient + 1, '12 步在步骤轨道里一屏放下（轨道不滚动）', `${layout.stepsScroll} > ${layout.stepsClient}`);
+    check(layout.scrollbarGap === 0, '滚动条不占位（不挤压内容宽度）', `差 ${layout.scrollbarGap}px`);
+    check(layout.userSelect === 'none', '文本默认不可选中', `实际 ${layout.userSelect}`);
+    check(layout.inputSelect === 'text', '输入框里可以选中文本', `实际 ${layout.inputSelect}`);
+    await shot('layout-1024x768-advanced-welcome');
+
+    // ---------------------------------------------------------- 6.6 选中 WiFi 之后主按钮仍可点
+    await run('window.__mipl.goTo("network")');
+    await sleep(360);
+    const wifi = await run('window.__mipl.scanWifi()');   // 显式扫一次，别在空列表上做断言
+    await sleep(320);
+    check(wifi.length > 0, `Wi-Fi 候选扫出来了（${wifi.length} 个）`, JSON.stringify(wifi));
+    await settle();
+    await run('window.__mipl.setData("wifiSelected", "MipLab-5G")');
+    await run('window.__mipl.rerender()');
+    await sleep(320);
+    await settle();
+    const reachable = await run(`(() => {
+      const btn = document.getElementById('nav-primary');
+      if (!btn) return { ok: false, why: '没有主按钮' };
+      const rect = btn.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+      const hit = document.elementFromPoint(cx, cy);
+      return {
+        ok: rect.bottom <= window.innerHeight && !btn.disabled && Boolean(hit) && (hit === btn || btn.contains(hit)),
+        inViewport: rect.bottom <= window.innerHeight,
+        disabled: btn.disabled,
+        hit: hit ? hit.id || hit.className : null,
+        bottom: Math.round(rect.bottom), innerHeight: window.innerHeight,
+      };
+    })()`);
+    check(reachable.ok, '选中 WiFi 后主动作仍在视口内且可点', JSON.stringify(reachable));
+    await shot('network-wifi-selected-1024x768');
+
+    win.setContentSize(1440, 900);
+    await sleep(360);
+    await run('window.__mipl.setAdvanced(false)');
+
     // ---------------------------------------------------------- 7. reduced-motion
     try {
       win.webContents.debugger.attach('1.3');

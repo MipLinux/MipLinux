@@ -206,6 +206,11 @@ class App {
       },
       /** 页面内容变了（例如扫描结果回来）：整页重画，但不跑进场动效。 */
       rerender: () => this.renderPage({ animate: false }),
+      scanWifi: async () => {
+        await this.mock.scanWifi();
+        this.renderPage({ animate: false });
+        return this.mock.network.wifi.map((w) => w.ssid);
+      },
       dialog: (options) => this.openDialog(options),
       closeDialog: (result) => this.closeDialog(result),
       snackbar: (text) => this.showSnackbar(text),
@@ -421,6 +426,12 @@ class App {
       setData: (key, value) => {
         this.setup.set(key, value);
         return this.setup.data[key];
+      },
+      rerender: () => this.renderPage({ animate: false }),
+      scanWifi: async () => {
+        await this.mock.scanWifi();
+        this.renderPage({ animate: false });
+        return this.mock.network.wifi.map((w) => w.ssid);
       },
       fillAccount: ({ user = 'mipluser', password = 'mipl123456', confirm = password } = {}) => {
         this.setup.set('user', user);

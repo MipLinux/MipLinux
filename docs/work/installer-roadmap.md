@@ -177,7 +177,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | 失败模式 | 兜底 / 验收 |
 |---|---|
 | NVRAM 写不进（主板满 / 只读） | 复制到 `\EFI\BOOT\BOOTX64.EFI`（可移除介质路径），并在界面上说明 |
-| 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续） |
+| 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续）　✅ 2026-10-04 QEMU 实测（[tech/04 §8.2](tech/04-安装逻辑与实测.md)） |
 | `pacman-key` 没初始化 | 检查点 6 会暴露 —— M1 的 `configure.py` 必须做 `--init` / `--populate` |
 | `reflector` 覆盖 mirrorlist | 装后系统不启用它的 timer（#23 已经踩过） |
 | 安装器崩溃 | `OnFailure=` 拉起 `mipl-installer-tty.service`，把 tty1 交回 `getty`（**不自动重启**安装器）；日志看 `journalctl -u mipl-installer` 与 `journalctl -u mipl-installer-tty` |
@@ -185,7 +185,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | Electron 以 root 身份起不来 | Chromium 沙箱在 root 下拒绝启动 → 启动器固定加 `--no-sandbox`（整个 Live 就是可信 kiosk 场景，风险写入 D14 条目） |
 | Electron 在 cage 里不走 Wayland | 启动器固定 `--ozone-platform=wayland`；XWayland **不在** Live 清单里，不许依赖它兜底 |
 | 中文 SSID / 密码 | `nmcli` 走 UTF-8；界面 CJK 字体已在 Live 清单里 |
-| 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次 |
+| 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次　✅ 2026-10-04 QEMU 实测（[tech/04 §8.1](tech/04-安装逻辑与实测.md)） |
 
 ---
 

@@ -153,11 +153,75 @@ def parse_a3_pairs(doc_text: str) -> list[tuple[str, str, float, float, float]]:
 
 
 # ---------------------------------------------------------------- 主流程
+
+
+# ------------------------------------------------- 设计 token（tech/10 §7）
+
+#: (前景 token, 背景 token, 最低对比度, 用途)
+DESIGN_PAIRS = [
+    ("--text", "--bg", 4.5, "正文 / 页面底"),
+    ("--text", "--surface-solid", 4.5, "正文 / 面板"),
+    ("--text-muted", "--surface-solid", 4.5, "次要文字 / 面板"),
+    ("--text-faint", "--surface-solid", 3.0, "提示文字（大字/图标级）"),
+    ("--on-accent", "--accent", 4.5, "主按钮文字"),
+    ("--on-danger", "--danger", 4.5, "危险按钮文字"),
+    ("--danger", "--surface-solid", 3.0, "错误文字（图标级）"),
+    ("--success", "--surface-solid", 3.0, "成功标记（图标级）"),
+    ("--warning", "--surface-solid", 3.0, "警告标记（图标级）"),
+]
+
+
+def parse_theme_tokens(css_text):
+    """从 tokens.css 里取出 [data-theme='x'] 块内的 `--token: #hex`。"""
+    themes = {}
+    for match in re.finditer(r"\[data-theme='(dark|light)'\]\s*\{([\s\S]*?)\}", css_text):
+        theme, block = match.group(1), match.group(2)
+        values = {}
+        for hit in re.finditer(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})\s*;", block):
+            values[hit.group(1)] = hit.group(2).lower()
+        themes[theme] = values
+    return themes
+
+
+def check_design_tokens(path, ratio_fn):
+    """tech/10 的设计 token 的对比度硬判据（正文 4.5 / 大字与图标 3.0）。"""
+    failures = []
+    try:
+        themes = parse_theme_tokens(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return ["读不到 %s：%s" % (path, exc)], 0
+    missing = [t for t in ("dark", "light") if t not in themes]
+    if missing:
+        return ["tokens.css 缺主题块：%s" % ", ".join(missing)], 0
+
+    checked = 0
+    print()
+    print("%-34s %-8s %-10s %-10s" % ("设计 token（前景 / 背景）", "要求", "dark", "light"))
+    for fg_name, bg_name, minimum, label in DESIGN_PAIRS:
+        row = []
+        for theme in ("dark", "light"):
+            tokens = themes[theme]
+            if fg_name not in tokens or bg_name not in tokens:
+                failures.append("%s 缺 %s / %s" % (theme, fg_name, bg_name))
+                row.append("缺 token")
+                continue
+            value = ratio_fn(tokens[fg_name], tokens[bg_name])
+            checked += 1
+            row.append("%.2f" % value)
+            if value < minimum:
+                failures.append("%s %s / %s = %.2f < %.1f（%s）" % (theme, fg_name, bg_name, value, minimum, label))
+        print("%-34s %-8s %-10s %-10s" % ("%s / %s" % (fg_name, bg_name), "%.1f:1" % minimum, row[0], row[1]))
+    return failures, checked
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="V2：对比度断言（08 附录 A.3 的 14 组 × 亮/暗）")
+    parser = argparse.ArgumentParser(description="V2：对比度断言（08 附录 A.3 的 14 组 × 亮/暗 + tech/10 的设计 token 组）")
     here = Path(__file__).resolve()
-    parser.add_argument("--color-json", type=Path, default=here.parent.parent / "color.json",
-                        help="色板快照（默认：与本脚本同级的 ../color.json）")
+    app_dir = here.parents[1]  # tools -> app
+    parser.add_argument("--color-json", type=Path, default=app_dir / "design" / "color.json",
+                        help="色板快照（默认 app/design/color.json）")
+    parser.add_argument("--tokens-css", type=Path, default=app_dir / "renderer" / "css" / "tokens.css",
+                        help="设计 token 的 CSS（默认 renderer/css/tokens.css）")
     parser.add_argument("--doc", type=Path, default=None,
                         help="08 文档路径（默认自动从仓库根找 %s）" % DOC_REL)
     args = parser.parse_args()
@@ -206,18 +270,24 @@ def main() -> int:
                 failures.append("%s %s / %s = %.2f < %.1f" % (mode, fg, bg, value, minimum))
         print("%-46s %-9s %-22s %-22s" % ("%s / %s" % (fg, bg), "%.1f:1" % minimum, row[0], row[1]))
 
+    # ---- 第二轮：tech/10 的设计 token（品牌色板之外的那一层）----
+    # 这些值不在 08 的 A.3 表里，是新视觉自己的硬判据（正文 4.5 / 大字与图标 3.0）。
+    design_failures, design_checked = check_design_tokens(args.tokens_css, wcag_ratio)
+    failures.extend(design_failures)
+    checked += design_checked
+
     print()
-    print("重算组数: %d（14 组 × 亮/暗）" % checked)
+    print("重算组数: %d（08 A.3 的 28 组 + tech/10 设计 token 的 %d 组）" % (checked, design_checked))
     print("与 A.3 文档值的最大差异: %.3f（仅提示：口径差异照实打印，不判失败）" % max_delta)
     if failures:
         print("❌ 不合格 %d 组：" % len(failures))
         for item in failures:
             print("   - %s" % item)
         return 1
-    if checked != 28:
-        print("❌ 只算了 %d 组，期望 28 组" % checked)
+    if checked < 28:
+        print("❌ 只算了 %d 组，期望至少 28 组" % checked)
         return 1
-    print("✅ 28 组全过，0 组不合格（正文 ≥ 4.5:1；大字 / 图标 ≥ 3.0:1）")
+    print("✅ %d 组全过，0 组不合格（正文 ≥ 4.5:1；大字 / 图标 ≥ 3.0:1）" % checked)
     return 0
 
 

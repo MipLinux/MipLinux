@@ -1,0 +1,13 @@
+{
+  "name": "mipl-installer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MipLinux 安装器前端（Electron）：只画界面，安装逻辑在 installer/backend",
+  "main": "main.js",
+  "license": "GPL-3.0-or-later",
+  "comment": "没有 dependencies —— 第三方前端资源走 vendor/（见 vendor/README.md），构建不跑 npm install",
+  "scripts": {
+    "start": "electron .",
+    "probe": "node tools/probe-render.js"
+  }
+}

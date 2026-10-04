@@ -1,0 +1,409 @@
+/* ============================================================================
+ * pages.css —— 页面级编排（欢迎页主视觉 / 磁盘卡 / 危险区 / 进度 / 完成）
+ * ========================================================================= */
+
+/* ---------------------------------------------------------------- 欢迎 */
+
+/* 一屏一件事：文案列 + 主视觉列，整块在内容区垂直居中 */
+#page-welcome {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.welcome {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--space-6) * var(--ui-scale));
+  align-items: center;
+}
+
+@media (min-width: 1000px) {
+  .welcome {
+    grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
+    gap: calc(var(--space-8) * var(--ui-scale));
+  }
+}
+
+.welcome__copy {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space-4) * var(--ui-scale));
+}
+
+.welcome__toggle {
+  margin-top: calc(var(--space-2) * var(--ui-scale));
+  max-width: 460px;
+}
+
+.welcome__art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  isolation: isolate;
+}
+
+/* 主视觉的三层：柔光 → 细环 → logo（logo 略微前倾，像被托住） */
+.welcome__glow {
+  position: absolute;
+  width: min(560px, 96%);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 46% 44%,
+    color-mix(in srgb, var(--aurora-1) 34%, transparent),
+    color-mix(in srgb, var(--aurora-2) 18%, transparent) 46%,
+    transparent 70%
+  );
+  filter: blur(26px);
+  z-index: -1;
+}
+
+.welcome__logo {
+  width: min(370px, 72%);
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 34px 70px color-mix(in srgb, var(--aurora-1) 32%, transparent));
+  will-change: transform;
+}
+
+.welcome__ring {
+  position: absolute;
+  width: min(462px, 86%);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px solid var(--accent-line);
+  opacity: 0.45;
+  z-index: -1;
+}
+
+.welcome__features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---------------------------------------------------------------- 目标盘 */
+
+.disk-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: calc(var(--space-4) * var(--ui-scale));
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-field);
+  background: var(--surface-2);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease-in),
+    background-color var(--dur-fast) var(--ease-in),
+    transform var(--dur-fast) var(--ease-in);
+}
+
+.disk-card:hover {
+  border-color: var(--hairline-strong);
+}
+
+.disk-card[aria-selected='true'] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.disk-card__size {
+  font-size: calc(var(--t-h2) * var(--ui-scale));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.disk-card__bar {
+  display: flex;
+  gap: 3px;
+  height: 6px;
+  margin-top: 8px;
+  max-width: 240px;
+}
+
+.disk-card__seg {
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  min-width: 8px;
+}
+
+.disk-card__seg--esp {
+  background: var(--accent-line);
+}
+
+/* ---------------------------------------------------------------- 危险区 */
+
+.danger-zone {
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  background: var(--danger-soft);
+  border-radius: var(--r-field);
+  padding: calc(var(--space-4) * var(--ui-scale));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.danger-zone__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--danger);
+  font-size: calc(var(--t-h3) * var(--ui-scale));
+  font-weight: 600;
+}
+
+.danger-zone__title svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+/* ---------------------------------------------------------------- 进度 */
+
+.progress-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--space-5) * var(--ui-scale));
+  align-items: center;
+}
+
+@media (min-width: 1000px) {
+  .progress-layout {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: calc(var(--space-6) * var(--ui-scale));
+  }
+}
+
+.phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.phase {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px var(--space-3);
+  border-radius: var(--r-field);
+  color: var(--text-faint);
+  font-size: calc(var(--t-label) * var(--ui-scale));
+  transition: color var(--dur-base) var(--ease-in), background-color var(--dur-base) var(--ease-in);
+}
+
+.phase[data-state='active'] {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.phase[data-state='done'] {
+  color: var(--text-muted);
+}
+
+.phase__mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+}
+
+.phase[data-state='done'] .phase__mark {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.phase[data-state='active'] .phase__mark {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.phase__mark svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+.log {
+  font-family: var(--font-mono);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  line-height: 1.7;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-field);
+  padding: var(--space-4);
+  max-height: 190px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log__line--ok {
+  color: var(--success);
+}
+
+.log__line--warn {
+  color: var(--warning);
+}
+
+/* ---------------------------------------------------------------- 完成 */
+
+.finish {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: calc(var(--space-5) * var(--ui-scale));
+  padding: calc(var(--space-6) * var(--ui-scale)) 0;
+}
+
+.finish__logo {
+  width: 148px;
+  height: 148px;
+}
+
+.finish__check {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.finish__check svg {
+  width: 30px;
+  height: 30px;
+  fill: currentColor;
+}
+
+/* ---------------------------------------------------------------- 杂项 */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: calc(var(--space-6) * var(--ui-scale));
+  text-align: center;
+  color: var(--text-faint);
+  border: 1px dashed var(--hairline-strong);
+  border-radius: var(--r-field);
+}
+
+.empty svg {
+  width: 26px;
+  height: 26px;
+  fill: currentColor;
+}
+
+.net-item__signal {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+}
+
+.net-item__signal i {
+  width: 3px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+.net-item__signal i:nth-child(1) {
+  height: 5px;
+}
+
+.net-item__signal i:nth-child(2) {
+  height: 9px;
+}
+
+.net-item__signal i:nth-child(3) {
+  height: 13px;
+}
+
+.net-item__signal i:nth-child(4) {
+  height: 16px;
+}
+
+.net-item__signal[data-level='1'] i:nth-child(-n + 1),
+.net-item__signal[data-level='2'] i:nth-child(-n + 2),
+.net-item__signal[data-level='3'] i:nth-child(-n + 3),
+.net-item__signal[data-level='4'] i:nth-child(-n + 4) {
+  opacity: 1;
+}
+
+.pw-meter {
+  display: flex;
+  gap: 4px;
+  margin-top: var(--space-2);
+  width: 132px;
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-in);
+}
+
+.pw-meter[data-level='1'],
+.pw-meter[data-level='2'],
+.pw-meter[data-level='3'] {
+  opacity: 1;
+}
+
+.pw-meter i {
+  flex: 1;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  transition: background-color var(--dur-base) var(--ease-in);
+}
+
+.pw-meter[data-level='1'] i:nth-child(1) {
+  background: var(--danger);
+}
+
+.pw-meter[data-level='2'] i:nth-child(-n + 2) {
+  background: var(--warning);
+}
+
+.pw-meter[data-level='3'] i {
+  background: var(--success);
+}
+
+.key-preview {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-radius: var(--r-field);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  font-family: var(--font-mono);
+  font-size: calc(var(--t-h3) * var(--ui-scale));
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.tz-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.tz-row__offset {
+  font-family: var(--font-mono);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}

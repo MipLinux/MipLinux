@@ -1,0 +1,197 @@
+/* ============================================================================
+ * tokens.css —— 安装器界面 token（视觉准据：docs/work/tech/10-安装器界面视觉方向.md）
+ *
+ * 分层：
+ *   1. 字体（vendored Geist 拉丁子集；中文走 Live 自带的 noto-fonts-cjk）
+ *   2. 尺度：间距 / 圆角 / 字阶 / 动效（与主题无关）
+ *   3. 主题色：暗＝极光玻璃、亮＝柔性结构（--bg / --surface / --text / --accent …）
+ *   4. 品牌色板：由 palette.css 提供（--md-*，从 design/color.json 生成）
+ *
+ * 纪律：圆角只用下面这几档；动效时长只用这四档；缓动不用 linear / ease-in-out。
+ * ========================================================================= */
+
+/* ---------------------------------------------------------------- 1. 字体 */
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../../vendor/fonts/geist-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../../vendor/fonts/geist-latin-wght-italic.woff2') format('woff2-variations');
+}
+
+:root {
+  --font-sans: 'Geist', 'Noto Sans CJK SC', 'Noto Sans SC', 'Noto Sans', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'Noto Sans Mono CJK SC', monospace;
+
+  /* ------------------------------------------------------------ 2. 尺度 */
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* 圆角：一条锁死的规则（tech/10 §4） */
+  --r-shell: 26px;
+  --r-core: 18px;
+  --r-field: 14px;
+  --r-dialog: 24px;
+  --r-pill: 999px;
+
+  /* 字阶：40 / 30 / 22 / 18 / 17 / 15 / 13.5 / 12.5 */
+  --t-display: 40px;
+  --t-h1: 30px;
+  --t-h2: 22px;
+  --t-h3: 18px;
+  --t-lead: 17px;
+  --t-body: 15px;
+  --t-label: 13.5px;
+  --t-caption: 12.5px;
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.35;
+  --lh-body: 1.55;
+
+  /* 版式：断点只看逻辑宽；内容最大宽 */
+  --content-max: 1120px;
+  --rail-w: 300px;
+
+  /* 动效：四档时长 + 两条缓动（tech/10 §5） */
+  --dur-fast: 140ms;
+  --dur-base: 240ms;
+  --dur-slow: 420ms;
+  --dur-page: 480ms;
+  --ease-in: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out: cubic-bezier(0.4, 0, 1, 1);
+
+  /* 界面缩放（tech/10 §6：用户可选的 0.85 / 1 / 1.15 / 1.3，乘在字阶与间距上） */
+  --ui-scale: 1;
+
+  /* 亮色是主主题；暗色是显式选择（或 auto 到夜间） */
+  color-scheme: light;
+}
+
+/* ---------------------------------------------------------------- 3. 主题 */
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #06070b;
+  --bg-gradient: linear-gradient(180deg, #080a12 0%, #06070b 55%, #05060a 100%);
+  --bg-elevated: #0b0e15;
+  --surface: rgba(255, 255, 255, 0.045);
+  --surface-solid: #0d1017;
+  --surface-2: #131a26;
+  --surface-3: #1a2231;
+  --hairline: rgba(255, 255, 255, 0.1);
+  --hairline-strong: rgba(255, 255, 255, 0.18);
+  --highlight: rgba(255, 255, 255, 0.14);
+
+  --text: #eef1f8;
+  --text-muted: #9aa4bb;
+  --text-faint: #6b7488;
+
+  --accent: #5b8dff;
+  --accent-hover: #7aa3ff;
+  --accent-press: #4b7bf0;
+  --on-accent: #06122e;
+  --accent-soft: rgba(91, 141, 255, 0.16);
+  --accent-line: rgba(91, 141, 255, 0.42);
+
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #ff6b6b;
+  --on-danger: #2a0505;
+  --danger-soft: rgba(255, 107, 107, 0.14);
+
+  --aurora-1: #2f6bff;
+  --aurora-2: #35d0ff;
+  --aurora-3: #1b2a6b;
+  --aurora-opacity: 0.22;
+  --grain-opacity: 0.035;
+
+  --shadow-1: 0 1px 2px rgba(3, 6, 18, 0.5);
+  --shadow-2: 0 18px 48px rgba(3, 6, 18, 0.55);
+  --shadow-3: 0 32px 90px rgba(3, 6, 18, 0.65);
+  --focus-ring: rgba(122, 163, 255, 0.75);
+}
+
+/* 亮色是**主**主题（维护者 2026-10-04）：柔白结构 + 极光底噪，层次靠阴影与描边拉开，
+ * 不靠灰度差 —— 亮色最容易做成「一片灰白」，这里刻意给了三层：底 / 纸面 / 浮起。 */
+[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f7f8fb;
+  --bg-gradient: linear-gradient(180deg, #ffffff 0%, #f5f7fb 46%, #eceff7 100%);
+  --bg-elevated: #ffffff;
+  --surface: rgba(255, 255, 255, 0.86);
+  --surface-solid: #ffffff;
+  --surface-2: #f2f4f9;
+  --surface-3: #e7ebf4;
+  --hairline: rgba(15, 23, 42, 0.08);
+  --hairline-strong: rgba(15, 23, 42, 0.16);
+  --highlight: rgba(255, 255, 255, 1);
+
+  --text: #0b1220;
+  --text-muted: #4b5568;
+  --text-faint: #737e93;
+
+  /* 比品牌种子色深一档：白字压在 #2f6bff 上刚够 4.5:1，没有余量 —— 取到 5.5:1 */
+  --accent: #2560e0;
+  --accent-hover: #1c4fc4;
+  --accent-press: #15409f;
+  --on-accent: #ffffff;
+  --accent-soft: rgba(37, 96, 224, 0.09);
+  --accent-line: rgba(37, 96, 224, 0.38);
+
+  --success: #0f7a3d;
+  --warning: #8a5a00;
+  --danger: #c62f24;
+  --on-danger: #ffffff;
+  --danger-soft: rgba(198, 47, 36, 0.08);
+
+  --aurora-1: #3f7bff;
+  --aurora-2: #5ed0f0;
+  --aurora-3: #a9bdf7;
+  --aurora-opacity: 0.2;
+  --grain-opacity: 0.018;
+
+  /* 阴影染色（不用纯黑）：亮色下用冷调深蓝，叠两层让「浮起」看得出 */
+  --shadow-1: 0 1px 2px rgba(19, 32, 63, 0.06), 0 1px 1px rgba(19, 32, 63, 0.04);
+  --shadow-2: 0 2px 6px rgba(19, 32, 63, 0.05), 0 18px 40px -18px rgba(19, 32, 63, 0.22);
+  --shadow-3: 0 4px 12px rgba(19, 32, 63, 0.08), 0 32px 80px -24px rgba(19, 32, 63, 0.3);
+  --focus-ring: rgba(37, 96, 224, 0.55);
+}
+
+/* ------------------------------------------------------------ 4. 动效降级 */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur-base: 1ms;
+    --dur-slow: 1ms;
+    --dur-page: 1ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -98,19 +98,21 @@ export default {
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('disk.title'), desc: t('disk.desc') }),
       callout({ tone: 'warn', icon: 'warning', text: t('disk.willDo') }),
-      panel(
-        {
-          actions: button({
+      panel({}, [
+        body,
+        // 扫描动作跟在列表后面，而不是浮在标题行右侧（维护者 2026-10-04）——
+        // 它是「对下面这份列表」的动作，位置就该在列表之后
+        h('div', { class: 'row', style: { 'margin-top': '4px' } }, [
+          button({
             id: 'disk-rescan',
             label: t('nav.refresh'),
-            variant: 'ghost',
+            variant: 'tonal',
             icon: 'arrows-clockwise',
             disabled: mock.diskScanning,
             onClick: () => rescan(ctx),
           }),
-        },
-        body
-      ),
+        ]),
+      ]),
       divider(),
     ]);
   },

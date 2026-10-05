@@ -160,8 +160,8 @@
 }
 
 .danger-zone__title svg {
-  width: 20px;
-  height: 20px;
+  width: var(--icon-md);
+  height: var(--icon-md);
   fill: currentColor;
 }
 
@@ -208,8 +208,8 @@
 }
 
 .phase__mark {
-  width: 20px;
-  height: 20px;
+  width: var(--icon-md);
+  height: var(--icon-md);
   flex: none;
   display: grid;
   place-items: center;
@@ -229,8 +229,8 @@
 }
 
 .phase__mark svg {
-  width: 12px;
-  height: 12px;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
   fill: currentColor;
 }
 
@@ -299,16 +299,16 @@
 .finish__check {
   display: grid;
   place-items: center;
-  width: 64px;
-  height: 64px;
+  width: calc(64px * var(--ui-scale));
+  height: calc(64px * var(--ui-scale));
   border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--success) 18%, transparent);
   color: var(--success);
 }
 
 .finish__check svg {
-  width: 30px;
-  height: 30px;
+  width: var(--icon-xl);
+  height: var(--icon-xl);
   fill: currentColor;
 }
 
@@ -327,8 +327,8 @@
 }
 
 .empty svg {
-  width: 26px;
-  height: 26px;
+  width: var(--icon-lg);
+  height: var(--icon-lg);
   fill: currentColor;
 }
 

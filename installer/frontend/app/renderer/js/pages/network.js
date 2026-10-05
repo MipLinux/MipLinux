@@ -65,19 +65,7 @@ export default {
         net.ipv4 ? h('span', { class: 'mono muted', text: net.ipv4 }) : null,
         net.connected && net.ssid ? h('span', { class: 'muted', text: net.ssid }) : null,
         h('span', { class: 'panel__spacer' }),
-        net.scanning
-          ? h('span', { class: 'label faint', text: t('network.scanning') })
-          : button({
-              id: 'wifi-scan',
-              label: t('nav.refresh'),
-              variant: 'tonal',
-              icon: 'arrows-clockwise',
-              onClick: async () => {
-                ctx.rerender();
-                await mock.scanWifi();
-                ctx.rerender();
-              },
-            }),
+        net.scanning ? h('span', { class: 'label faint', text: t('network.scanning') }) : null,
       ]),
     ]);
 

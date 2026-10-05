@@ -22,6 +22,8 @@ const config = {
   // 界面层缩放的推荐值（启动器算的）；0 = 自动档但没拿到推荐值 → 渲染层退 100%
   uiScale: Number.parseInt(argValue('--mipl-ui-scale=') || '0', 10) || 0,
   probe: argValue('--mipl-probe=') === '1',
+  // 渲染模式由启动器判定：software 时渲染层走「低配模式」（关掉模糊/极光等重效果）
+  renderer: argValue('--mipl-renderer=') === 'software' ? 'software' : 'gpu',
   electron: process.versions.electron,
 };
 

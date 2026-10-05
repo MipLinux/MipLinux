@@ -181,8 +181,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: var(--icon-lg);
+  height: var(--icon-lg);
   margin-right: calc(var(--space-1) * -1);
   border-radius: var(--r-pill);
   background: color-mix(in srgb, currentColor 14%, transparent);
@@ -194,16 +194,16 @@
 }
 
 .btn__icon svg {
-  width: 15px;
-  height: 15px;
+  width: var(--icon-sm);
+  height: var(--icon-sm);
 }
 
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: var(--hit-target);
+  height: var(--hit-target);
   border: 1px solid transparent;
   border-radius: var(--r-pill);
   background: transparent;
@@ -233,8 +233,8 @@
 }
 
 .icon-btn svg {
-  width: 20px;
-  height: 20px;
+  width: var(--icon-md);
+  height: var(--icon-md);
 }
 
 .btn svg,
@@ -322,8 +322,8 @@
 }
 
 .field__error svg {
-  width: 14px;
-  height: 14px;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
   fill: currentColor;
   flex: none;
 }
@@ -353,8 +353,8 @@
 }
 
 .search svg {
-  width: 18px;
-  height: 18px;
+  width: var(--icon-md);
+  height: var(--icon-md);
   fill: currentColor;
   color: var(--text-faint);
   flex: none;
@@ -393,8 +393,8 @@
 
 .check__box {
   flex: none;
-  width: 22px;
-  height: 22px;
+  width: var(--control-sm);
+  height: var(--control-sm);
   margin-top: 1px;
   border: 1.5px solid var(--hairline-strong);
   border-radius: 7px;
@@ -412,8 +412,8 @@
 }
 
 .check__box svg {
-  width: 14px;
-  height: 14px;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
   fill: currentColor;
   opacity: 0;
   transform: scale(0.6);
@@ -505,8 +505,8 @@
 }
 
 .chip svg {
-  width: 14px;
-  height: 14px;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
   fill: currentColor;
 }
 
@@ -583,16 +583,16 @@
   flex: none;
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: var(--control-lg);
+  height: var(--control-lg);
   border-radius: var(--r-field);
   background: var(--surface-3);
   color: var(--text-muted);
 }
 
 .option__icon svg {
-  width: 20px;
-  height: 20px;
+  width: var(--icon-md);
+  height: var(--icon-md);
   fill: currentColor;
 }
 
@@ -678,8 +678,8 @@
 .rings {
   --p: 0;
   position: relative;
-  width: 140px;
-  height: 140px;
+  width: calc(140px * var(--ui-scale));
+  height: calc(140px * var(--ui-scale));
   flex: none;
   border-radius: 50%;
   padding: 11px;
@@ -771,8 +771,8 @@
   flex: none;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: var(--control-md);
+  height: var(--control-md);
   border-radius: var(--r-pill);
   border: 1px solid var(--hairline);
   font-size: 11px;
@@ -806,8 +806,8 @@
 }
 
 .step__dot svg {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-xs);
+  height: var(--icon-xs);
   fill: currentColor;
 }
 
@@ -900,8 +900,8 @@
 
 .callout svg {
   flex: none;
-  width: 18px;
-  height: 18px;
+  width: var(--icon-md);
+  height: var(--icon-md);
   fill: currentColor;
   margin-top: 1px;
 }
@@ -976,8 +976,8 @@
 }
 
 .menu__item svg {
-  width: 15px;
-  height: 15px;
+  width: var(--icon-sm);
+  height: var(--icon-sm);
   flex: none;
   fill: currentColor;
   color: var(--text-faint);
@@ -1008,8 +1008,8 @@
 }
 
 .spinner {
-  width: 18px;
-  height: 18px;
+  width: var(--icon-md);
+  height: var(--icon-md);
   flex: none;
   fill: currentColor;
   animation: spin 1s linear infinite;

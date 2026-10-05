@@ -52,6 +52,17 @@ ELECTRON_CANDIDATES = ("/usr/lib/electron44/electron", "/usr/bin/electron")
 
 #: sysfs DRM 连接器目录：/sys/class/drm/card0-HDMI-A-1/{status,modes,edid}。
 DRM_SYSFS = Path("/sys/class/drm")
+#: DRI 设备目录（有 renderD* 才说明这台机器有可用的 3D 节点）。
+DRI_DIR = Path("/dev/dri")
+
+#: 虚拟 / 无 3D 加速的 GPU 厂商号 —— 这些环境下 Chromium 拿不到可用的 GL，
+#: 只能走 SwiftShader 软渲染（QEMU 里就是这样）。
+#:   0x1af4 virtio-gpu · 0x1234 QEMU stdvga · 0x15ad VMware · 0x1b36 QXL
+#:   0x1ab8 Parallels · 0x1414 Microsoft Basic Render
+VIRTUAL_GPU_VENDORS = {"0x1af4", "0x1234", "0x15ad", "0x1b36", "0x1ab8", "0x1414"}
+
+#: 渲染器策略：auto = 按 GPU 探测；gpu = 强制硬件；software = 强制软渲染（排查用）
+RENDERER_CHOICES = ("auto", "gpu", "software")
 _MODE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
 
 
@@ -131,6 +142,54 @@ def read_display_info(sysfs: Path = DRM_SYSFS):
 
 # ───────────────────────────── 主题（纯计算）─────────────────────────────
 
+def detect_gpu(sysfs: Path = DRM_SYSFS, dri: Path = DRI_DIR):
+    """探测可用的 GPU。
+
+    返回 `(vendor_id, card_name)`；只有**非虚拟**厂商、且存在 `renderD*` 节点才算数 ——
+    光有 `/dev/dri/card0`（KMS）不等于 Chromium 能拿到 GL。
+    没有任何可用 GPU → `None`（调用方走软渲染）。
+    """
+    try:
+        render_nodes = sorted(dri.glob("renderD*"))
+    except OSError:
+        render_nodes = []
+    if not render_nodes:
+        return None
+
+    for card in sorted(sysfs.glob("card[0-9]*")):
+        try:
+            vendor = (card / "device" / "vendor").read_text(encoding="ascii").strip().lower()
+        except OSError:
+            continue
+        if not vendor:
+            continue
+        if vendor in VIRTUAL_GPU_VENDORS:
+            LOG.info("跳过虚拟 GPU %s（%s）", card.name, vendor)
+            continue
+        return (vendor, card.name)
+    return None
+
+
+def renderer_switches(policy: str, gpu) -> list[str]:
+    """按策略/探测结果给出 Chromium 的渲染开关。
+
+    **为什么默认不写死 SwiftShader**：曾经为了 QEMU 把 `--use-gl=angle --use-angle=swiftshader`
+    写死，结果真机（NVIDIA 驱动装好）也在软件渲染 —— 动画卡顿、操作延迟全从这里来。
+    现在只有「没有可用 GPU」或显式要求时才软渲染。
+    """
+    if policy == "software" or (policy == "auto" and gpu is None):
+        LOG.warning("渲染：SwiftShader 软件渲染（%s）", "显式指定" if policy == "software" else "没有可用的 GPU/render 节点")
+        return ["--use-gl=angle", "--use-angle=swiftshader"]
+
+    LOG.info("渲染：硬件加速（GPU %s %s）", gpu[0] if gpu else "?", gpu[1] if gpu else "-")
+    # NVIDIA 的专有驱动常年在 Chromium 的 blocklist 上：不忽略就悄悄退回软件合成
+    return [
+        "--enable-gpu-rasterization",
+        "--ignore-gpu-blocklist",
+        "--enable-zero-copy",
+    ]
+
+
 def decide_initial_theme(theme_mode, theme_arg: str, now):
     """返回 `(theme, theme_source)`：显式 light/dark 走 manual，auto 走时间。"""
     if theme_arg == "auto":
@@ -156,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="界面语言：zh_CN（源语言，默认）/ en_US")
     parser.add_argument("--electron", default=None,
                         help="Electron 可执行文件（默认 /usr/lib/electron44/electron，再退 PATH）")
+    parser.add_argument("--renderer", choices=RENDERER_CHOICES, default="auto",
+                        help="渲染器：auto（默认，按 GPU 探测）/ gpu / software（排查用）")
     parser.add_argument("--print-plan", action="store_true",
                         help="只打印将要执行的命令与判定依据后退出（宿主机排查用，不启动界面）")
     return parser
@@ -219,19 +280,20 @@ def main(argv=None) -> int:
                   "、".join(ELECTRON_CANDIDATES))
         return 1
 
+    gpu = detect_gpu()
+    render_mode = "software" if (args.renderer == "software" or (args.renderer == "auto" and gpu is None)) else "gpu"
     command = [
         electron,
         str(app_dir),
         f"--theme={theme}",
         f"--lang={args.lang}",
         f"--ui-scale={ui_scale}",
+        f"--renderer-mode={render_mode}",
         # kiosk 场景的开关写死在启动器里，不散到别处：
         "--no-sandbox",                     # Live 里安装器就是 root，Chromium 沙箱在 root 下拒绝启动
         "--ozone-platform=wayland",         # cage 是 Wayland 合成器；Live 里没有 XWayland 可退
         "--force-device-scale-factor=1",    # 缩放统一由界面层承担，见上
-        # QEMU 无 GPU：用 Chromium 自带的 SwiftShader 软渲染，不额外装驱动
-        "--use-gl=angle",
-        "--use-angle=swiftshader",
+        *renderer_switches(args.renderer, gpu),
     ]
     LOG.info("exec：%s", " ".join(command))
     if args.print_plan:

@@ -175,8 +175,8 @@ select {
 }
 
 .brand__mark {
-  width: 34px;
-  height: 34px;
+  width: calc(34px * var(--ui-scale));
+  height: calc(34px * var(--ui-scale));
   flex: none;
   background: url('../assets/logo/logo-128.png') center / contain no-repeat;
   filter: drop-shadow(0 4px 12px rgba(37, 118, 233, 0.35));
@@ -372,4 +372,37 @@ textarea,
 [contenteditable='true'] {
   user-select: text;
   -webkit-user-select: text;
+}
+
+
+/* ------------------------------------------------------------ 低配模式 */
+
+/* 软件渲染（SwiftShader / virtio GPU）下，模糊与大面积阴影是纯 CPU 开销 ——
+ * 实机上表现为「动画卡顿 + 操作延迟」。这里按启动器判定的渲染模式自动降级：
+ * **布局、字号、交互一律不变**，只去掉氛围层与高斯模糊。 */
+[data-renderer='software'] .aurora,
+[data-renderer='software'] .grain,
+[data-renderer='software'] .welcome__glow {
+  display: none;
+}
+
+[data-renderer='software'] .welcome__logo,
+[data-renderer='software'] .finish__logo,
+[data-renderer='software'] .brand__mark {
+  filter: none;
+}
+
+[data-renderer='software'] .welcome__ring {
+  opacity: 0.3;
+}
+
+[data-renderer='software'] .scrim {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+}
+
+[data-renderer='software'] .panel,
+[data-renderer='software'] .steps {
+  box-shadow: var(--shadow-1);
 }

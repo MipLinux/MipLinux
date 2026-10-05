@@ -36,6 +36,29 @@ if [ -S /run/seatd.sock ] && ! fuser -s /run/seatd.sock 2>/dev/null; then
     rm -f /run/seatd.sock
 fi
 
+# ── GPU 渲染：别让 wlroots 悄悄退回软件渲染 ────────────────────────────────
+# cage 基于 wlroots：拿不到可用的 EGL 时会**静默退回 pixman（纯 CPU）**，
+# 整机动画立刻卡顿 —— 而日志里只会说一句「using pixman renderer」。
+# 有真实 GPU（非虚拟厂商）时显式要求 GLES2；虚拟 GPU（QEMU/QXL/VMware）保持默认，
+# 那里本来就没有可用的 GL，pixman 反而是对的。
+gpu_vendor=""
+for vendor_file in /sys/class/drm/card[0-9]*/device/vendor; do
+    [ -r "$vendor_file" ] || continue
+    gpu_vendor="$(cat "$vendor_file")"
+    case "$gpu_vendor" in
+        0x1af4|0x1234|0x15ad|0x1b36|0x1ab8|0x1414) gpu_vendor="" ;;   # 虚拟 GPU
+        *) break ;;
+    esac
+done
+if [ -n "$gpu_vendor" ]; then
+    export WLR_RENDERER=gles2
+    # NVIDIA + wlroots 的已知问题：硬件光标会让光标与输入明显延迟
+    export WLR_NO_HARDWARE_CURSORS=1
+    echo "mipl-kiosk: GPU $gpu_vendor → WLR_RENDERER=gles2" >&2
+else
+    echo "mipl-kiosk: 没有可用 GPU（或为虚拟 GPU）→ 用 wlroots 默认渲染器" >&2
+fi
+
 # `--` 之后是 cage 的命令行：-s = allow VT switching；再往后是 cage 的客户端。
 # 多余参数透传给安装器，方便在 Live 里手工试 --theme=dark / --scale=2 / --self-test。
 exec "$SEATD_LAUNCH" -- "$CAGE" -s "$INSTALLER" "$@"

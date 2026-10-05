@@ -77,8 +77,20 @@
   --ease-in: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-out: cubic-bezier(0.4, 0, 1, 1);
 
-  /* 界面缩放（tech/10 §6：用户可选的 0.85 / 1 / 1.15 / 1.3，乘在字阶与间距上） */
+  /* 界面缩放：100% / 167% / 200% + 自动（tech/10 §6）。**所有**尺寸都要乘它 ——
+   * 图标曾经是固定 px，一缩放就比文字小一圈（2026-10-04 实机反馈）。 */
   --ui-scale: 1;
+
+  /* 图标与控件的尺寸档：全部乘 --ui-scale */
+  --icon-xs: calc(12px * var(--ui-scale));
+  --icon-sm: calc(15px * var(--ui-scale));
+  --icon-md: calc(20px * var(--ui-scale));
+  --icon-lg: calc(26px * var(--ui-scale));
+  --icon-xl: calc(32px * var(--ui-scale));
+  --control-sm: calc(22px * var(--ui-scale));
+  --control-md: calc(24px * var(--ui-scale));
+  --control-lg: calc(40px * var(--ui-scale));
+  --hit-target: calc(44px * var(--ui-scale));
 
   /* 亮色是主主题；暗色是显式选择（或 auto 到夜间） */
   color-scheme: light;

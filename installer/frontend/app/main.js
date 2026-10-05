@@ -35,14 +35,16 @@ const APP_THEME_BG = { dark: '#06070b', light: '#f7f8fb' };
 // ---------------------------------------------------------------- 启动参数
 
 function parseLaunchArgs(argv) {
-  const wanted = { theme: 'auto', uiScale: 0, lang: 'zh_CN' };
+  const wanted = { theme: 'auto', uiScale: 0, lang: 'zh_CN', renderer: 'gpu' };
   for (const raw of argv) {
-    const match = /^--(theme|ui-scale|lang)=(.+)$/.exec(raw);
+    const match = /^--(theme|ui-scale|lang|renderer-mode)=(.+)$/.exec(raw);
     if (!match) continue;
     const [, key, value] = match;
     if (key === 'ui-scale') {
       const parsed = Number.parseInt(value, 10);
       wanted.uiScale = [100, 167, 200].includes(parsed) ? parsed : 0;
+    } else if (key === 'renderer-mode') {
+      wanted.renderer = value === 'software' ? 'software' : 'gpu';
     } else {
       wanted[key] = value;
     }
@@ -133,6 +135,7 @@ function createWindow(launch) {
         `--mipl-theme-source=${launch.theme}`,
         `--mipl-lang=${launch.lang}`,
         `--mipl-ui-scale=${launch.uiScale || 0}`,
+        `--mipl-renderer=${launch.renderer}`,
         `--mipl-probe=${process.env.MIPL_PROBE ? '1' : '0'}`,
       ],
     },
@@ -156,10 +159,41 @@ function createWindow(launch) {
 
 // ---------------------------------------------------------------- main
 
-app.whenReady().then(() => {
+/**
+ * 把 GPU 的状态写进日志：实机上 `journalctl -u mipl-installer` 至少能看到设备与特性状态。
+ *
+ * **别指望这一行能判出软渲染**：Chromium 的 `gpu_compositing` 对 SwiftShader 也报 enabled，
+ * 而 `auxAttributes` 里那组 GL 字段各平台/版本不一致（本机实测给的是 `gl=none`）。
+ * 「到底走没走显卡」的权威证据在另外两行：
+ *   - `mipl-kiosk: GPU … → WLR_RENDERER=gles2`（合成器侧有没有退回 pixman）
+ *   - `mipl-installer: 渲染：硬件加速 / SwiftShader 软件渲染`（启动器的判定）
+ */
+async function logGpuStatus() {
+  try {
+    const basic = await app.getGPUInfo('basic');
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const status = app.getGPUFeatureStatus();
+    const gpu = (basic.gpuDevice || []).map((device) => `${device.vendorId || '?'}:${device.deviceId || '?'}`);
+    console.log(
+      `[mipl-installer] GPU: ${gpu.join(', ') || '未识别'} | 合成器=${status.gpu_compositing || '?'}` +
+        ` | WebGL=${status.webgl || '?'} | 光栅化=${status.rasterization || '?'}`
+    );
+  } catch (error) {
+    console.log(`[mipl-installer] GPU 状态读取失败：${error.message}`);
+  }
+}
+
+app.whenReady().then(async () => {
   protocol.handle(SCHEME, serveRenderer);
 
   const launch = parseLaunchArgs(process.argv);
+  const gpuCheck = Boolean(process.env.MIPL_GPU_CHECK);
+  await logGpuStatus();
+  // `MIPL_GPU_CHECK=1`：只打印 GPU 状态就退出（在实机上排查「到底用没用上显卡」）
+  if (gpuCheck) {
+    app.exit(0);
+    return;
+  }
   const win = createWindow(launch);
 
   ipcMain.handle('mipl:reboot', () => {

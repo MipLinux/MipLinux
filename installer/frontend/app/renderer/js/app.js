@@ -30,7 +30,8 @@ const launch = (window.mipl && window.mipl.config) || {
   theme: 'dark',
   themeSource: 'auto',
   lang: 'zh_CN',
-  scale: 0,
+  uiScale: 0,
+  renderer: 'gpu',
   probe: false,
 };
 
@@ -54,6 +55,8 @@ class App {
   /* ------------------------------------------------------------ 启动 */
 
   async boot() {
+    // 渲染模式：software（SwiftShader）时走「低配模式」，见 base.css 的 [data-renderer='software']
+    document.documentElement.dataset.renderer = launch.renderer === 'software' ? 'software' : 'gpu';
     await this.i18n.load();
     this.theme.start();
     this.scale.apply();

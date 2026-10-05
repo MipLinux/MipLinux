@@ -268,6 +268,56 @@ module.exports = async function probe({ app, win, launch }) {
       const applied = await run('getComputedStyle(document.documentElement).getPropertyValue("--ui-scale").trim()');
       check(Math.abs(Number(applied) - mode / 100) < 0.001, `界面缩放 ${mode}% 生效`, `实际 ${applied}`);
     }
+    // 图标必须跟着缩放走（实机反馈：167% 下图标显得小 —— 曾经是固定 px）
+    const iconAt100 = await run(`(() => { window.__mipl.setScale(100); const el = document.querySelector('.icon-btn svg') || document.querySelector('.menu__item svg'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()`);
+    await sleep(120);
+    const iconAt200 = await run(`(() => { window.__mipl.setScale(200); const el = document.querySelector('.icon-btn svg') || document.querySelector('.menu__item svg'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()`);
+    check(
+      iconAt100 > 0 && iconAt200 >= iconAt100 * 1.8,
+      '图标随界面缩放一起变大（100% → 200% 约翻倍）',
+      JSON.stringify({ iconAt100, iconAt200 })
+    );
+
+    // 软渲染下的低配模式：氛围层必须被关掉（否则 CPU 光栅化要糊一堆大模糊）
+    const lowPower = await run(`(() => {
+      document.documentElement.dataset.renderer = 'software';
+      const aurora = getComputedStyle(document.querySelector('.aurora')).display;
+      const grain = getComputedStyle(document.querySelector('.grain')).display;
+      const shadow = getComputedStyle(document.querySelector('.panel')).boxShadow;
+      document.documentElement.dataset.renderer = 'gpu';
+      return { aurora, grain, shadow };
+    })()`);
+    check(
+      lowPower.aurora === 'none' && lowPower.grain === 'none',
+      '软渲染时自动关掉极光与噪点（低配模式）',
+      JSON.stringify(lowPower)
+    );
+
+    // 动画期间的帧间隔基线（离屏渲染，只作仓内回归基线，不代表实机）
+    const perf = await run(`new Promise((resolve) => {
+      const frames = [];
+      let last = performance.now();
+      let count = 0;
+      window.__mipl.goTo('welcome');
+      function tick(now) {
+        frames.push(now - last);
+        last = now;
+        count += 1;
+        if (count === 2) window.__mipl.goTo('network');
+        if (count >= 90) {
+          const sorted = [...frames.slice(1)].sort((a, b) => a - b);
+          const pick = (q) => Math.round(sorted[Math.floor(sorted.length * q)]);
+          resolve({ frames: sorted.length, p50: pick(0.5), p95: pick(0.95), max: Math.round(sorted[sorted.length - 1]) });
+          return;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    })`);
+    console.log(`  ℹ️  帧间隔基线（离屏，仅供参考）：p50=${perf.p50}ms p95=${perf.p95}ms max=${perf.max}ms`);
+    notes.push(`帧间隔基线（离屏）：p50=${perf.p50}ms p95=${perf.p95}ms max=${perf.max}ms`);
+    check(perf.p95 <= 120, '离屏帧间隔基线正常（p95 ≤ 120ms）', JSON.stringify(perf));
+
     const autoPercent = await run('window.__mipl.setScale("auto")');
     check([100, 167, 200].includes(autoPercent), `自动档落到白名单档位（${autoPercent}%）`, `实际 ${autoPercent}`);
 

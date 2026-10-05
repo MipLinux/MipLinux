@@ -340,6 +340,8 @@ render() {
   {
     echo "# 受理前质检的上下文"
     echo
+    echo "**本次任务：A（受理前质检）** —— 按 docs/work/ai-review-rubric.md 第七节的输出契约回答。"
+    echo
     echo "## 主体 issue #$number"
     echo "- 标题：$title"
     echo "- labels：${labels:-（无）}"

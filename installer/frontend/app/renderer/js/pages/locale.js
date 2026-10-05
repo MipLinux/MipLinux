@@ -44,7 +44,7 @@ export default {
 
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('locale.title'), desc: t('locale.desc') }),
-      panel({}, list),
+      panel({ fill: true }, list),
     ]);
   },
 

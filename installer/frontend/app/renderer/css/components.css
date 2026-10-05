@@ -540,11 +540,42 @@
 
 /* 列表 / 可选项 */
 
-/* 列表：内容区统一滚；列表自己只在必要时滚，且**滚动条不可见、不占位** */
+/* 列表外层：撑满可用高度，让里面的 .list 成为唯一的滚动容器 */
+.list-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 列表是**自己滚**的那个组件（维护者 2026-10-05）：页面本体不滚，
+ * 长列表在面板内部滚动 —— 页头、搜索框、动作区都保持不动。
+ * 滚动条仍然不可见、不占位。 */
 .list {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: calc(var(--space-1) * var(--ui-scale));
+  /* 滚动条不可见时，「下面还有」只能靠底部渐隐说 —— 与步骤轨道同一套语言 */
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent 100%);
+}
+
+/* 「填满内容区」的面板：内部列表滚动，面板本身不动 */
+.panel--fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel--fill .panel__core {
+  flex: 1;
+  min-height: 0;
 }
 
 .option {

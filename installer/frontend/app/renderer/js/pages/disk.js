@@ -79,7 +79,7 @@ export default {
           })
         : h(
             'div',
-            { class: 'stack', style: { marginTop: '4px' } },
+            { class: 'list', style: { marginTop: '4px' } },
             mock.disks.map((disk) =>
               diskCard(
                 disk,
@@ -98,7 +98,7 @@ export default {
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('disk.title'), desc: t('disk.desc') }),
       callout({ tone: 'warn', icon: 'warning', text: t('disk.willDo') }),
-      panel({}, [
+      panel({ fill: true }, [
         body,
         // 扫描动作跟在列表后面，而不是浮在标题行右侧（维护者 2026-10-04）——
         // 它是「对下面这份列表」的动作，位置就该在列表之后

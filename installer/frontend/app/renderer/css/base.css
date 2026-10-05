@@ -153,8 +153,8 @@ select {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: calc(var(--space-5) * var(--ui-scale));
-  gap: calc(var(--space-5) * var(--ui-scale));
+  padding: var(--gutter);
+  gap: var(--gutter);
 }
 
 .topbar {
@@ -204,7 +204,7 @@ select {
 .shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: calc(var(--space-6) * var(--ui-scale));
+  gap: var(--gutter);
   min-height: 0;
 }
 
@@ -234,7 +234,7 @@ select {
   overflow-x: hidden;
   overscroll-behavior: contain;
   /* 给最后一个面板的阴影留出空间 —— 否则会被滚动容器切出一条硬边 */
-  padding-bottom: calc(var(--space-5) * var(--ui-scale));
+  padding-bottom: calc(var(--space-3) * var(--ui-scale));
 }
 
 .stage__inner {
@@ -242,8 +242,16 @@ select {
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: calc(var(--space-5) * var(--ui-scale));
-  padding-bottom: var(--space-4);
+  gap: var(--gutter);
+  min-height: 0;
+  height: 100%;
+}
+
+/* 页面的根节点填满内容区 —— 不然「面板填满 + 列表自己滚」这条链在根节点就断了
+ * （面板会按内容高度长，把整个页面撑出滚动条）。 */
+.stage__inner > * {
+  flex: 1;
+  min-height: 0;
 }
 
 /* 窄屏时的步骤条（宽屏由 rail 承担） */
@@ -263,7 +271,8 @@ select {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding-top: calc(var(--space-4) * var(--ui-scale));
+  /* 分隔线两侧的留白也走 --gutter，跟窗口四周同一套 */
+  padding-top: var(--gutter);
   border-top: 1px solid var(--hairline);
 }
 

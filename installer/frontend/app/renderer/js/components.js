@@ -31,7 +31,7 @@ export function divider() {
 
 /* -------------------------------------------------------------- 面板 */
 
-export function panel({ title, sub, actions, quiet = false, flush = false, narrow = false } = {}, ...children) {
+export function panel({ title, sub, actions, quiet = false, flush = false, narrow = false, fill = false } = {}, ...children) {
   const head =
     title || actions
       ? h('div', { class: 'panel__head' }, [
@@ -43,7 +43,7 @@ export function panel({ title, sub, actions, quiet = false, flush = false, narro
       : null;
   return h(
     'section',
-    { class: `panel${quiet ? ' panel--quiet' : ''}${flush ? ' panel--flush' : ''}${narrow ? ' panel--narrow' : ''}`, 'data-anim': '' },
+    { class: `panel${quiet ? ' panel--quiet' : ''}${flush ? ' panel--flush' : ''}${narrow ? ' panel--narrow' : ''}${fill ? ' panel--fill' : ''}`, 'data-anim': '' },
     h('div', { class: 'panel__core' }, head, ...children)
   );
 }

@@ -165,6 +165,21 @@ export function countTo(el, from, to, format = (v) => String(Math.round(v))) {
   });
 }
 
+/** 单个元素「出现」：淡入 + 轻微上浮（条件渲染的组件用它，别让它硬跳出来）。 */
+export function reveal(el) {
+  if (!el) return;
+  if (prefersReduced()) {
+    utils.set(el, { opacity: 1, translateY: 0 });
+    return;
+  }
+  animate(el, {
+    opacity: [0, 1],
+    translateY: [-6, 0],
+    duration: durations().base,
+    ease: 'out(3)',
+  });
+}
+
 /** 列表项交错进场（网络列表、磁盘列表这种「一次出现一批」）。 */
 export function staggerIn(items) {
   if (!items || !items.length) return;

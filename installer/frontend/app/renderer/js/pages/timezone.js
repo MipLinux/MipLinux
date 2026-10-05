@@ -48,7 +48,7 @@ export default {
 
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('timezone.title'), desc: t('timezone.desc') }),
-      panel({}, list),
+      panel({ fill: true }, list),
     ]);
   },
 

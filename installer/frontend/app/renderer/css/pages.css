@@ -429,6 +429,10 @@
   background: var(--success);
 }
 
+.key-preview[hidden] {
+  display: none;
+}
+
 .key-preview {
   display: grid;
   gap: var(--space-2);

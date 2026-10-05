@@ -545,6 +545,79 @@ module.exports = async function probe({ app, win, launch }) {
     }
     await run('window.__mipl.setScale(100)');
 
+    // ---------------------------------------------------------- 6.7 滚动归属与留白一致性
+    // 维护者 2026-10-05：允许滚动的是**列表**，不是整个页面；上下左右留白必须一致。
+    const padding = await run(`(() => {
+      const app = getComputedStyle(document.getElementById('app'));
+      return [app.paddingTop, app.paddingRight, app.paddingBottom, app.paddingLeft];
+    })()`);
+    check(new Set(padding).size === 1, '窗口四周留白一致（上下左右同值）', JSON.stringify(padding));
+
+    await run('window.__mipl.goTo("timezone")');   // 26 个时区：一定长过一屏
+    await sleep(340);
+    await settle();
+    const scrollState = await run(`(() => {
+      const stage = document.getElementById('stage');
+      const list = document.querySelector('#timezone-list .list');
+      const wrap = document.getElementById('timezone-list');
+      return {
+        stageFits: stage.scrollHeight <= stage.clientHeight + 1,
+        listScrolls: list ? list.scrollHeight > list.clientHeight + 1 : false,
+        listScrollbarGap: list ? Math.round(list.offsetWidth - list.clientWidth - parseFloat(getComputedStyle(list).borderLeftWidth) * 2) : -1,
+        wrapFits: wrap ? Math.round(wrap.getBoundingClientRect().height) : -1,
+      };
+    })()`);
+    check(scrollState.stageFits, '长列表页：页面本体不滚动', JSON.stringify(scrollState));
+    check(scrollState.listScrolls, '长列表页：列表自己滚', JSON.stringify(scrollState));
+    check(scrollState.listScrollbarGap === 0, '列表的滚动条不占位', JSON.stringify(scrollState));
+    await shot('scroll-timezone-1024x768');
+
+    // 键盘页：试打区在列表上方；预览按需出现
+    await run('window.__mipl.goTo("keymap")');
+    await sleep(340);
+    await settle();
+    const keymapBefore = await run(`(() => {
+      const tryInput = document.getElementById('keymap-try');
+      const preview = document.getElementById('keymap-preview');
+      const list = document.querySelector('#keymap-list .list');
+      const stage = document.getElementById('stage');
+      const tryBox = tryInput.getBoundingClientRect();
+      const listBox = list ? list.getBoundingClientRect() : null;
+      return {
+        previewHidden: preview.hidden,
+        tryAboveList: listBox ? tryBox.top < listBox.top : false,
+        stageFits: stage.scrollHeight <= stage.clientHeight + 1,
+      };
+    })()`);
+    check(keymapBefore.previewHidden, '没有输入时预览不显示', JSON.stringify(keymapBefore));
+    check(keymapBefore.tryAboveList, '试打框在列表上方', JSON.stringify(keymapBefore));
+    check(keymapBefore.stageFits, '键盘页：页面本体不滚动', JSON.stringify(keymapBefore));
+
+    const keymapAfter = await run(`(() => {
+      const input = document.getElementById('keymap-try');
+      input.value = 'qwertz';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const preview = document.getElementById('keymap-preview');
+      return { hidden: preview.hidden, text: preview.textContent };
+    })()`);
+    await sleep(280);
+    const previewVisible = await run(`(() => {
+      const preview = document.getElementById('keymap-preview');
+      const style = getComputedStyle(preview);
+      return { opacity: style.opacity, transform: style.transform, text: preview.textContent };
+    })()`);
+    check(!keymapAfter.hidden && keymapAfter.text === 'qwertz', '输入后预览出现并显示所打内容', JSON.stringify(keymapAfter));
+    check(Number(previewVisible.opacity) > 0.95, '预览淡入完成（出现有动画）', JSON.stringify(previewVisible));
+    await shot('keymap-preview-1024x768');
+
+    const keymapCleared = await run(`(() => {
+      const input = document.getElementById('keymap-try');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return document.getElementById('keymap-preview').hidden;
+    })()`);
+    check(keymapCleared, '清空输入后预览消失', String(keymapCleared));
+
     win.setContentSize(1440, 900);
     await sleep(360);
     await run('window.__mipl.setAdvanced(false)');

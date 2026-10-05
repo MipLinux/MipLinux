@@ -23,7 +23,8 @@ import { searchInput, option, emptyState, listBox } from '../components.js';
  */
 export function selectableList(config, ctx) {
   const t = ctx.t;
-  const wrapper = h('div', { class: 'stack', id: config.id });
+  // 外层撑满面板：搜索框固定，只有下面的列表滚（页面本体不滚）
+  const wrapper = h('div', { class: 'list-wrap', id: config.id });
   let query = '';
 
   const renderItems = () => {
@@ -45,7 +46,7 @@ export function selectableList(config, ctx) {
           )
         : emptyState({ icon: 'magnifying-glass', text: config.emptyText() });
     const old = wrapper.querySelector('[data-list]');
-    const fresh = h('div', { dataset: { list: '1' } }, box);
+    const fresh = h('div', { class: 'list-wrap', dataset: { list: '1' } }, box);
     if (old) old.replaceWith(fresh);
     else wrapper.append(fresh);
   };
@@ -59,7 +60,7 @@ export function selectableList(config, ctx) {
     },
   });
 
-  wrapper.append(search, h('div', { dataset: { list: '1' } }));
+  wrapper.append(search, h('div', { class: 'list-wrap', dataset: { list: '1' } }));
   wrapper.__renderItems = renderItems;
   renderItems();
   return wrapper;

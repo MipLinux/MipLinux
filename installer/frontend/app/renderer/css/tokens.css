@@ -51,9 +51,13 @@
   --r-dialog: 24px;
   --r-pill: 999px;
 
+  /* 大字号的缩放斜率**放缓**（--scale-tight）：标题这类已经很大的字，跟着 1.67× 一起长
+   * 会把一屏撑满（实机反馈「欢迎页整个组件都胖了」）。正文与控件仍然线性缩放。 */
+  --scale-tight: calc(1 + (var(--ui-scale) - 1) * 0.45);
+
   /* 字阶：40 / 30 / 22 / 18 / 17 / 15 / 13.5 / 12.5 */
-  --t-display: 40px;
-  --t-h1: 30px;
+  --t-display: calc(40px * var(--scale-tight));
+  --t-h1: calc(30px * var(--scale-tight));
   --t-h2: 22px;
   --t-h3: 18px;
   --t-lead: 17px;

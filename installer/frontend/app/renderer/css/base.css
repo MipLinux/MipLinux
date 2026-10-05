@@ -287,7 +287,7 @@ select {
 }
 
 .page-title {
-  font-size: calc(var(--t-h1) * var(--ui-scale));
+  font-size: var(--t-h1);
   line-height: var(--lh-tight);
   letter-spacing: -0.02em;
   font-weight: 600;
@@ -301,11 +301,16 @@ select {
 }
 
 .lead {
-  font-size: calc(var(--t-display) * var(--ui-scale));
+  font-size: var(--t-display);
   line-height: var(--lh-tight);
   letter-spacing: -0.025em;
   font-weight: 600;
-  max-width: 22ch;
+  max-width: 26ch;
+  /* 真要折行时让两行长度相近，而不是「欢迎使用 / MipLinux」这种一头沉 */
+  text-wrap: balance;
+  /* 中文标题不许在词中间断开（`word-break: break-all` 会出现「欢迎使 / 用」） */
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .muted {

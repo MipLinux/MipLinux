@@ -10,7 +10,6 @@
   "account.title": "Account",
   "account.user": "Username",
   "account.userHint": "Starts with a lowercase letter; lowercase letters, digits, underscore and hyphen; added to the wheel group (sudo)",
-  "advanced.hint": "Enabled",
   "advanced.toggle": "Advanced setup",
   "app.title": "MipLinux Installer",
   "cancel.body": "The target disk may already have been modified. To use this machine again, reinstall.",

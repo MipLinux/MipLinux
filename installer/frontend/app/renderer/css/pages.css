@@ -21,8 +21,9 @@
 
 @media (min-width: 1000px) {
   .welcome {
-    grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
-    gap: calc(var(--space-8) * var(--ui-scale));
+    /* 文案列比主视觉列宽一点：大标题需要横向余量，窄了就会在中途断行 */
+    grid-template-columns: minmax(0, 1.14fr) minmax(0, 0.86fr);
+    gap: calc(var(--space-7) * var(--ui-scale));
   }
 }
 
@@ -32,9 +33,15 @@
   gap: calc(var(--space-4) * var(--ui-scale));
 }
 
+/* 高级安装开关：一条细边行，不套整块面板（实机反馈：欢迎页组件「胖」） */
 .welcome__toggle {
   margin-top: calc(var(--space-2) * var(--ui-scale));
-  max-width: 460px;
+  max-width: calc(420px * var(--ui-scale));
+  padding: calc(var(--space-1) * var(--ui-scale)) calc(var(--space-2) * var(--ui-scale));
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-field);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow-1);
 }
 
 .welcome__art {
@@ -123,9 +130,9 @@
 .disk-card__bar {
   display: flex;
   gap: 3px;
-  height: 6px;
-  margin-top: 8px;
-  max-width: 240px;
+  height: calc(6px * var(--ui-scale));
+  margin-top: calc(8px * var(--ui-scale));
+  max-width: calc(240px * var(--ui-scale));
 }
 
 .disk-card__seg {
@@ -399,7 +406,7 @@
 
 .pw-meter i {
   flex: 1;
-  height: 4px;
+  height: calc(4px * var(--ui-scale));
   border-radius: var(--r-pill);
   background: var(--surface-3);
   transition: background-color var(--dur-base) var(--ease-in);

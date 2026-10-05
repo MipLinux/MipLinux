@@ -268,6 +268,40 @@ module.exports = async function probe({ app, win, launch }) {
       const applied = await run('getComputedStyle(document.documentElement).getPropertyValue("--ui-scale").trim()');
       check(Math.abs(Number(applied) - mode / 100) < 0.001, `界面缩放 ${mode}% 生效`, `实际 ${applied}`);
     }
+    // 控件尺寸体系（实机反馈：167% 下按钮「太扁」、图标没有呼吸空间、目录数字小）
+    const metrics = async () => {
+      return run(`(() => {
+        const btn = document.getElementById('nav-primary');
+        const dot = document.querySelector('.step__dot');
+        const title = document.querySelector('.lead') || document.querySelector('.page-title');
+        const num = (el, prop) => (el ? Math.round(parseFloat(getComputedStyle(el)[prop])) : -1);
+        return {
+          buttonHeight: btn ? Math.round(btn.getBoundingClientRect().height) : -1,
+          dotFont: num(dot, 'fontSize'),
+          titleFont: num(title, 'fontSize'),
+        };
+      })()`);
+    };
+    await run('window.__mipl.setScale(100)');
+    await sleep(180);
+    const at100 = await metrics();
+    await run('window.__mipl.setScale(200)');
+    await sleep(180);
+    const at200 = await metrics();
+    check(
+      at100.buttonHeight > 0 && at200.buttonHeight >= at100.buttonHeight * 1.8,
+      '按钮高度跟着界面缩放（不再「扁」）',
+      JSON.stringify({ at100, at200 })
+    );
+    check(at100.dotFont > 0 && at200.dotFont >= at100.dotFont * 1.8, '步骤序号跟着缩放', JSON.stringify({ dot: [at100.dotFont, at200.dotFont] }));
+    check(
+      at100.titleFont > 0 && at200.titleFont <= at100.titleFont * 1.7,
+      '大标题缩放放缓（不把一屏撑满）',
+      JSON.stringify({ title: [at100.titleFont, at200.titleFont] })
+    );
+    await run('window.__mipl.setScale(100)');
+    await sleep(150);
+
     // 图标必须跟着缩放走（实机反馈：167% 下图标显得小 —— 曾经是固定 px）
     const iconAt100 = await run(`(() => { window.__mipl.setScale(100); const el = document.querySelector('.icon-btn svg') || document.querySelector('.menu__item svg'); return el ? Math.round(el.getBoundingClientRect().width) : -1; })()`);
     await sleep(120);
@@ -283,7 +317,8 @@ module.exports = async function probe({ app, win, launch }) {
       document.documentElement.dataset.renderer = 'software';
       const aurora = getComputedStyle(document.querySelector('.aurora')).display;
       const grain = getComputedStyle(document.querySelector('.grain')).display;
-      const shadow = getComputedStyle(document.querySelector('.panel')).boxShadow;
+      const panel = document.querySelector('.panel');
+      const shadow = panel ? getComputedStyle(panel).boxShadow : '（本页无面板）';
       document.documentElement.dataset.renderer = 'gpu';
       return { aurora, grain, shadow };
     })()`);
@@ -498,6 +533,17 @@ module.exports = async function probe({ app, win, launch }) {
     // 全站图片都不该可拖（拖出去会变成复制图片）
     const draggable = await run(`[...document.images].map((img) => ({ src: img.currentSrc.split('/').pop(), draggable: img.draggable, drag: getComputedStyle(img).webkitUserDrag }))`);
     check(draggable.every((item) => item.draggable === false && (item.drag === 'none' || item.drag === '')), '所有图片都不可拖拽', JSON.stringify(draggable));
+
+    // 「实机比例」留档：2560×1600 @167% → 逻辑 1533×958（维护者那台机器的等效视口）
+    win.setContentSize(1533, 958);
+    await run('window.__mipl.setScale(167)');
+    for (const id of ['welcome', 'disk', 'account', 'finish']) {
+      await run(`window.__mipl.goTo(${JSON.stringify(id)})`);
+      await sleep(320);
+      await settle();
+      await shot(`real2k-${id}`);
+    }
+    await run('window.__mipl.setScale(100)');
 
     win.setContentSize(1440, 900);
     await sleep(360);

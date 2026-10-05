@@ -10,7 +10,6 @@
   "account.title": "账户",
   "account.user": "用户名",
   "account.userHint": "以小写字母开头（可用小写字母、数字、下划线、连字符）；会加入 wheel 组（可用 sudo）",
-  "advanced.hint": "已启用",
   "advanced.toggle": "高级安装",
   "app.title": "MipLinux 安装器",
   "cancel.body": "目标盘可能已经被改动。要继续使用这台机器，请重新安装。",

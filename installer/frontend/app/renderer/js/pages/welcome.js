@@ -5,7 +5,7 @@
  */
 
 import { h } from '../dom.js';
-import { lead, panel, checkbox } from '../components.js';
+import { checkbox } from '../components.js';
 import { float } from '../motion.js';
 
 export default {
@@ -24,11 +24,11 @@ export default {
     // 主视觉轻微漂浮：幅度 6px、周期 5.2s —— 让 kiosk 看起来「活着」但不抢注意力
     queueMicrotask(() => float(logo));
 
+    // 不再挂 `advanced.hint`（「已启用」）：勾选状态本身就是提示，多一行反而像残留
     const advancedToggle = checkbox({
       id: 'advanced-toggle',
       checked: setup.advanced,
       label: t('advanced.toggle'),
-      hint: setup.advanced ? t('advanced.hint') : '',
       onChange: (checked) => {
         setup.setAdvanced(checked);
         ctx.rerender();
@@ -39,7 +39,7 @@ export default {
       h('div', { class: 'welcome__copy' }, [
         h('p', { class: 'lead', 'data-anim': '', text: t('welcome.title') }),
         h('p', { class: 'page-desc', 'data-anim': '', text: t('welcome.body') }),
-        h('div', { class: 'welcome__toggle', 'data-anim': '' }, panel({ quiet: true }, advancedToggle)),
+        h('div', { class: 'welcome__toggle', 'data-anim': '' }, advancedToggle),
       ]),
       h('div', { class: 'welcome__art', 'data-anim': '' }, [
         h('span', { class: 'welcome__glow' }),

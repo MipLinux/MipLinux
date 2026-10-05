@@ -9,7 +9,7 @@
 
 .panel {
   position: relative;
-  padding: 8px;
+  padding: calc(8px * var(--ui-scale));
   border-radius: var(--r-shell);
   background: var(--surface);
   border: 1px solid var(--hairline);
@@ -102,8 +102,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
-  min-height: 48px;
+  gap: calc(var(--space-3) * var(--ui-scale));
+  min-height: calc(48px * var(--ui-scale));
   padding: 0 calc(var(--space-5) * var(--ui-scale));
   border: 1px solid transparent;
   border-radius: var(--r-pill);
@@ -272,7 +272,7 @@
 
 .input {
   width: 100%;
-  min-height: 48px;
+  min-height: calc(48px * var(--ui-scale));
   padding: 0 calc(var(--space-4) * var(--ui-scale));
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-field);
@@ -340,7 +340,7 @@
   align-items: center;
   gap: var(--space-3);
   padding: 0 calc(var(--space-4) * var(--ui-scale));
-  min-height: 48px;
+  min-height: calc(48px * var(--ui-scale));
   border: 1px solid var(--hairline);
   border-radius: var(--r-pill);
   background: var(--surface-2);
@@ -448,7 +448,7 @@
 
 .segmented {
   display: inline-flex;
-  padding: 4px;
+  padding: calc(4px * var(--ui-scale));
   gap: 4px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-pill);
@@ -460,7 +460,7 @@
   background: none;
   color: var(--text-muted);
   padding: 0 calc(var(--space-4) * var(--ui-scale));
-  min-height: 38px;
+  min-height: calc(38px * var(--ui-scale));
   border-radius: var(--r-pill);
   font-size: calc(var(--t-label) * var(--ui-scale));
   font-weight: 550;
@@ -552,7 +552,7 @@
   align-items: center;
   gap: var(--space-4);
   width: 100%;
-  min-height: 64px;
+  min-height: calc(64px * var(--ui-scale));
   padding: calc(var(--space-3) * var(--ui-scale)) calc(var(--space-4) * var(--ui-scale));
   border: 1px solid var(--hairline);
   border-radius: var(--r-field);
@@ -647,7 +647,7 @@
 
 .meter {
   position: relative;
-  height: 8px;
+  height: calc(8px * var(--ui-scale));
   border-radius: var(--r-pill);
   background: var(--surface-3);
   overflow: hidden;
@@ -682,7 +682,7 @@
   height: calc(140px * var(--ui-scale));
   flex: none;
   border-radius: 50%;
-  padding: 11px;
+  padding: calc(11px * var(--ui-scale));
   background: conic-gradient(
     from -90deg,
     var(--accent) calc(var(--p) * 1%),
@@ -775,7 +775,7 @@
   height: var(--control-md);
   border-radius: var(--r-pill);
   border: 1px solid var(--hairline);
-  font-size: 11px;
+  font-size: calc(12px * var(--ui-scale));
   font-variant-numeric: tabular-nums;
   transition:
     background-color var(--dur-base) var(--ease-in),
@@ -828,7 +828,7 @@
 .dialog {
   width: min(560px, 100%);
   border-radius: var(--r-dialog);
-  padding: 22px;
+  padding: calc(22px * var(--ui-scale));
   background: var(--surface-solid);
   border: 1px solid var(--hairline);
   box-shadow: var(--shadow-3);
@@ -877,8 +877,8 @@
 .tooltip {
   position: fixed;
   z-index: 60;
-  max-width: 280px;
-  padding: 6px 10px;
+  max-width: calc(280px * var(--ui-scale));
+  padding: calc(4px * var(--ui-scale)) calc(10px * var(--ui-scale));
   border-radius: 10px;
   background: var(--surface-3);
   border: 1px solid var(--hairline);
@@ -940,8 +940,8 @@
   top: calc(100% + 8px);
   right: 0;
   z-index: 70;
-  min-width: 176px;
-  padding: 6px;
+  min-width: calc(176px * var(--ui-scale));
+  padding: calc(6px * var(--ui-scale));
   display: flex;
   flex-direction: column;
   gap: 2px;

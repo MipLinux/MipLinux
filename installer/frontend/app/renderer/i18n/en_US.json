@@ -43,7 +43,6 @@
   "keymap.desc": "Console keyboard layout for the installed system.",
   "keymap.search": "Search",
   "keymap.title": "Keyboard layout",
-  "keymap.try": "Try it here",
   "lang.toggle": "中文",
   "lang.tooltip": "Installer language: %1",
   "locale.desc": "Language and regional settings for the installed system.",

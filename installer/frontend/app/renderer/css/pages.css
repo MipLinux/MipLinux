@@ -423,21 +423,64 @@
   background: var(--success);
 }
 
-.key-preview[hidden] {
-  display: none;
-}
-
-.key-preview {
+/* 键位预览：主键区示意图（Issue #65 用它替掉了原来的试打框）。
+ *
+ * **纯 DOM + CSS 画的，不引图片资源**：252 份映射各配一张位图既不可能维护，
+ * 而画一张「通用键盘图」又和所选映射无关 —— 那正是「界面在描述它没做的事」。
+ * 每个键帽上的字都来自 --print-keymap 解析出的那份映射。
+ *
+ * 键帽宽度用 `--key-w`（flex 份数，keymap-rows.js 给）：1 = 普通键，
+ * 空格 6、Shift 2.2、Backspace 1.8 —— 不按比例画的话，整排会看起来像错位。 */
+.keyblock-wrap {
   display: grid;
   gap: var(--space-2);
   padding: var(--space-4);
   border-radius: var(--r-field);
   background: var(--surface-2);
   border: 1px solid var(--hairline);
-  font-family: var(--font-mono);
-  font-size: calc(var(--t-h3) * var(--ui-scale));
-  letter-spacing: 0.06em;
-  text-align: center;
+  overflow: hidden;
+}
+
+.keyblock {
+  display: grid;
+  gap: calc(var(--space-1) * var(--ui-scale));
+}
+
+.keyblock__row {
+  display: flex;
+  gap: calc(var(--space-1) * var(--ui-scale));
+}
+
+.keycap {
+  flex: var(--key-w, 1) 1 0;
+  min-width: 0;
+  height: var(--control-lg);
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 0 calc(var(--space-1) * var(--ui-scale));
+  border-radius: var(--r-field);
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+  color: var(--text);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  line-height: var(--lh-tight);
+}
+
+.keycap__label,
+.keycap__shift {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Shift 层画在左上角（键帽的通行画法），默认层居中 —— 两层的**位置**本身
+ * 就说明了哪个是哪个，不必再加一行说明文字。 */
+.keycap__shift {
+  justify-self: start;
+  color: var(--text-faint);
+  font-size: calc(var(--t-caption) * var(--ui-scale) * 0.85);
 }
 
 .tz-row {

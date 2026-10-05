@@ -4,7 +4,12 @@
  * 分工：
  *   - 页面（pages/*.js）只画内容、只表达「能不能走」；
  *   - 外壳决定导航、渲染动作区、跑页面切换动效、管对话框与提示；
- *   - 状态在 setup，候选数据在 mock，文案在 i18n —— 外壳自己不存业务状态。
+ *   - 状态在 setup，候选数据在 **backend**，文案在 i18n —— 外壳自己不存业务状态。
+ *
+ * 「候选数据」那个数据源有两个实现，**同形**：
+ *   - `Backend`（`backend.js`）—— 产品路径，问真后端；
+ *   - `Mock`（`mock.js`）—— 只在 `MIPL_PROBE=1` 的离屏自检里出场。
+ * 页面只认 `ctx.backend`，不知道自己在跟哪一个说话。
  */
 
 import { h, mount, clear, attachScrollFade } from './dom.js';
@@ -13,7 +18,8 @@ import { ThemeController } from './theme.js';
 import { ScaleController, SCALE_AUTO, SCALE_PERCENTS } from './scale.js';
 import { Setup } from './setup.js';
 import { Mock } from './mock.js';
-import { STEP_TITLE_KEY, NO_BACK } from './steps.js';
+import { Backend } from './backend.js';
+import { STEP_TITLE_KEY, NO_BACK, shouldRestartRun } from './steps.js';
 import * as motion from './motion.js';
 import {
   button,
@@ -42,7 +48,9 @@ class App {
     // 缩放：默认自动档；推荐值由启动器算（device_scale.py 的纯函数），这里不复制判据
     this.scale = new ScaleController({ mode: SCALE_AUTO, recommended: launch.uiScale || 0 });
     this.setup = new Setup();
-    this.mock = new Mock();
+    // 离屏探针跑 Mock（可复现、不碰真设备）；产品路径一律走真后端。
+    // 两个实现同形，页面读的键一个不差 —— 见 `backend.js` 的文件头。
+    this.backend = launch.probe ? new Mock() : new Backend();
     this.page = null;
     this.nodes = {};
     this.snackbarTimer = null;
@@ -69,9 +77,19 @@ class App {
     this.renderShell();
     await this.renderPage({ animate: false });
 
+    // 首帧**已经出来了**才去取真数据：问后端要盘、要三份名单、要网络状态
+    // 加起来是几百毫秒，压在首帧前面就是一块白屏。取回来再重画一次，
+    // 中途用户看到的是欢迎页（数据还没用上）。
+    if (typeof this.backend.load === 'function') {
+      this.backend
+        .load()
+        .then(() => this.renderPage({ animate: false }))
+        .catch((error) => console.error('[mipl-installer] 取候选数据失败', error));
+    }
+
     // 首帧之后再扫 Wi-Fi（页面自己会显示「正在扫描…」）
     if (this.page && this.page.wantsWifiScan) {
-      this.mock.scanWifi().then(() => this.renderPage({ animate: false }));
+      this.backend.scanWifi().then(() => this.renderPage({ animate: false }));
     }
 
     if (launch.probe) this.exposeProbeApi();
@@ -241,7 +259,14 @@ class App {
       t: (key, ...args) => this.i18n.t(key, ...args),
       i18n: this.i18n,
       setup: this.setup,
-      mock: this.mock,
+      /**
+       * 候选数据（运行系统的现状：候选盘 / 网络 / 三份名单）。**产品路径上它来自真后端**；
+       * 名字不叫 `mock` 了 —— 那个名字只在探针里成立，留着会让下一个人以为数据是假的。
+       *
+       * 注意别与 `window.mipl.backend` 混了：那个是**通道**（怎么问），
+       * 这个是**数据**（问到了什么）。页面只读这个。
+       */
+      backend: this.backend,
       theme: this.theme,
       scale: this.scale,
       /** 页面内部状态变了：只刷新动作区与轨道，不重画页面（不丢输入焦点）。 */
@@ -252,9 +277,9 @@ class App {
       /** 页面内容变了（例如扫描结果回来）：整页重画，但不跑进场动效。 */
       rerender: () => this.renderPage({ animate: false }),
       scanWifi: async () => {
-        await this.mock.scanWifi();
+        await this.backend.scanWifi();
         this.renderPage({ animate: false });
-        return this.mock.network.wifi.map((w) => w.ssid);
+        return this.backend.network.wifi.map((w) => w.ssid);
       },
       dialog: (options) => this.openDialog(options),
       closeDialog: (result) => this.closeDialog(result),
@@ -268,9 +293,14 @@ class App {
   async renderPage({ animate = true } = {}) {
     const token = (this.renderToken += 1);
     const id = this.setup.stepId;
-    // 重新进入进度页 = 重跑一轮安装：不清掉上一轮的 100% 与 startedAt，环形进度会停在终点
-    if (id === 'progress' && (this.setup.data.progress.done || this.setup.data.progress.cancelled)) {
-      this.setup.data.progress = { percent: 0, phase: 0, done: false, cancelled: false };
+    // 「**重新进入**进度页 = 重跑一轮安装」：不清掉上一轮的终态，环形进度会停在终点、
+    // `startedAt` 还在，于是新的一轮根本不会开始。
+    //
+    // 关键在那个「重新」：只有**从别的页走过来**才算重跑。判据与理由都写在
+    // `steps.shouldRestartRun()` 上（那里有测试 —— 这条写错会变成失败后无限重装）。
+    const progress = this.setup.data.progress;
+    if (id === 'progress' && shouldRestartRun(progress, { cameFromProgress: this.page?.id === 'progress' })) {
+      this.setup.data.progress = { percent: 0, phase: 0, done: false, cancelled: false, failed: false };
     }
     const page = PAGES[id];
     if (!page) throw new Error(`没有这个页面模块：${id}`);
@@ -331,11 +361,28 @@ class App {
     );
 
     if (isProgress) {
+      // 装失败了要留一条出路：进度页在 `NO_BACK` 里，不特判的话人会被卡在一个
+      // 不会再动的页面上。**不给「重试」** —— 盘上已经是半成品，
+      // 在残骸上接着装是这个项目明令禁止的事（`pipeline.run` 的失败收尾）。
+      if (setup.data.progress && setup.data.progress.failed) {
+        actions.append(
+          button({
+            id: 'nav-back',
+            label: t('nav.back'),
+            variant: 'tonal',
+            icon: 'arrow-left',
+            onClick: () => this.back(),
+          })
+        );
+        return;
+      }
+      const cancelling = Boolean(setup.data.progress && setup.data.progress.cancelRequested);
       actions.append(
         button({
           id: 'nav-cancel',
           label: t('progress.cancel'),
           variant: 'tonal',
+          disabled: cancelling,
           onClick: () => this.confirmCancel(),
         })
       );
@@ -398,7 +445,13 @@ class App {
     if (scrim) await motion.popOut(scrim);
   }
 
-  /** 进度页的「取消安装」：二次确认（不可逆动作用 danger 变体）。 */
+  /**
+   * 进度页的「取消安装」：二次确认（不可逆动作用 danger 变体）。
+   *
+   * 确认之后**不立刻翻页**：这里只是把请求写进状态，真正送出去（`SIGUSR1` → 后端在
+   * **阶段之间**停）由进度页做。后端回了退出码 130 才回摘要页 ——
+   * 提前跳走会让人以为已经停了，而盘上的 `pacstrap` 还在跑。
+   */
   confirmCancel() {
     const t = (key, ...args) => this.i18n.t(key, ...args);
     const scrim = this.openDialog({
@@ -417,7 +470,7 @@ class App {
           variant: 'danger',
           onClick: () => {
             this.closeDialog();
-            this.setup.data.progress = { ...this.setup.data.progress, cancelled: true };
+            this.setup.data.progress = { ...this.setup.data.progress, cancelRequested: true };
             this.renderPage({ animate: false });
           },
         }),
@@ -493,9 +546,9 @@ class App {
       },
       rerender: () => this.renderPage({ animate: false }),
       scanWifi: async () => {
-        await this.mock.scanWifi();
+        await this.backend.scanWifi();
         this.renderPage({ animate: false });
-        return this.mock.network.wifi.map((w) => w.ssid);
+        return this.backend.network.wifi.map((w) => w.ssid);
       },
       countUndefinedStrings: () => {
         const html = document.getElementById('root').innerText || '';

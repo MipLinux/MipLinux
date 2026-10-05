@@ -14,7 +14,7 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
+    const { setup, backend } = ctx;
 
     const list = selectableList(
       {
@@ -22,7 +22,7 @@ export default {
         searchId: 'locale-search',
         searchKey: 'locale.search',
         selected: setup.data.locale,
-        items: mock.locales.map((locale) => ({
+        items: backend.locales.map((locale) => ({
           value: locale.id,
           display: locale.name,
           meta: locale.id,

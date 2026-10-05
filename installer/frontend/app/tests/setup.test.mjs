@@ -1,5 +1,6 @@
 /**
- * 向导状态机与三条校验规则（用户名按后端规则、密码 6 位只是界面防呆、主机名规则）。
+ * 向导状态机与三条校验规则（用户名按后端规则、密码 6 位只是界面防呆、
+ * 主机名由后端判定 —— 状态机只缓存它的结论，见 Issue #97）。
  */
 
 import { test } from 'node:test';
@@ -61,14 +62,39 @@ test('普通模式下主机名跟着用户名走；用户改过之后不再跟�
   assert.equal(setup.data.hostname, 'my-host');
 });
 
-test('主机名规则：字母数字连字符、不以连字符开头/结尾、最长 63', () => {
+test('主机名：规则在后端，状态机只负责「把后端的话翻成文案键」', () => {
+  const setup = new Setup();
+
+  // 还没问到（或根本问不到）：**不算错**。把它当错会让人卡在一台起不了后端的机器上
+  setup.set('hostname', 'mipl-pc');
+  assert.equal(setup.data.hostnameOk, null);
+  assert.equal(setup.hostnameError, null);
+
+  // 后端说不合规 → 报错
+  setup.data.hostnameOk = false;
+  assert.equal(setup.hostnameError, 'hostname.err.format');
+
+  // 后端说合规 → 放行
+  setup.data.hostnameOk = true;
+  assert.equal(setup.hostnameError, null);
+
+  // 空值不报错（「必填」由页面用 isComplete 表达，不是格式错）
+  setup.set('hostname', '');
+  assert.equal(setup.hostnameError, null);
+});
+
+test('主机名一改，上一次的后端判定就作废（否则会拿旧结论说新值）', () => {
   const setup = new Setup();
   setup.set('hostname', 'mipl-pc');
-  assert.equal(setup.hostnameError, null);
-  for (const bad of ['-mipl', 'mipl-', 'mipl pc', 'mipl.pc', 'a'.repeat(64)]) {
-    setup.set('hostname', bad);
-    assert.equal(setup.hostnameError, 'hostname.err.format', `${bad} 应该被拒`);
-  }
+  setup.data.hostnameOk = true;
+  setup.set('hostname', 'mipl-pc-2');
+  assert.equal(setup.data.hostnameOk, null, '改过之后必须是「还没问到」');
+
+  // 普通模式下主机名跟着用户名走，那条路径同样要作废判定
+  setup.data.hostnameOk = true;
+  setup.set('user', 'someone');
+  assert.equal(setup.data.hostname, 'someone');
+  assert.equal(setup.data.hostnameOk, null);
 });
 
 test('擦除确认：必须与所选磁盘逐字一致（大小写不敏感）', () => {

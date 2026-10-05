@@ -1,7 +1,7 @@
 /**
  * 摘要页（5）—— 确认所有选择 + 「我已了解」勾选
  *
- * 只读：把 setup/mock 里的选择摊开给用户看。**不改任何状态**（除了那个勾选）。
+ * 只读：把 setup/backend 里的选择摊开给用户看。**不改任何状态**（除了那个勾选）。
  */
 
 import { h } from '../dom.js';
@@ -13,13 +13,13 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
+    const { setup, backend } = ctx;
     const data = setup.data;
 
-    const disk = mock.diskById(data.disk);
-    const zone = mock && data.timezone ? { id: data.timezone, offset: offsetOf(mock, data.timezone) } : null;
-    const networkLabel = mock.network.connected
-      ? mock.network.ssid || mock.network.ipv4 || t('network.connected')
+    const disk = backend.diskById(data.disk);
+    const zone = backend && data.timezone ? { id: data.timezone, offset: offsetOf(backend, data.timezone) } : null;
+    const networkLabel = backend.network.connected
+      ? backend.network.ssid || backend.network.ipv4 || t('network.connected')
       : t('network.disconnected');
 
     const rows = [
@@ -35,7 +35,7 @@ export default {
         [t('hostname.title'), data.hostname || data.user || '—']
       );
     }
-    rows.push([t('disk.willDo'), `${mock.plan.filesystem} · ${mock.plan.boot}`]);
+    rows.push([t('disk.willDo'), `${backend.plan.filesystem} · ${backend.plan.boot}`]);
 
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('summary.title'), desc: t('summary.desc') }),
@@ -64,7 +64,7 @@ export default {
   },
 };
 
-function offsetOf(mock, id) {
-  const zone = mock.timezones ? mock.timezones.find((z) => z.id === id) : null;
+function offsetOf(backend, id) {
+  const zone = backend.timezones ? backend.timezones.find((z) => z.id === id) : null;
   return zone ? zone.offset : '+00:00';
 }

@@ -11,8 +11,6 @@ import { flowFor } from './steps.js';
 
 /** 后端 `validate_user()` 的规则（tech/09 待确认 2：文案按后端写，别放宽）。 */
 const USER_RE = /^[a-z][a-z0-9_-]*$/;
-/** 主机名：字母数字连字符，不能以连字符开头/结尾，最长 63。 */
-const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
 
 export const PASSWORD_MIN = 6;
 
@@ -31,6 +29,15 @@ export class Setup {
       rootPassword: '',
       hostname: '',
       hostnameTouched: false,
+      /**
+       * 后端对当前主机名的判定：`null` = 还没问到 / 问不到，`true` / `false` = 后端说的。
+       *
+       * **这条替换掉了界面自己那份 RFC 1123 正则**（Issue #97）：主机名规则原来在
+       * 这里是第二份实现（第一份在后端 `options.validate_hostname()`），
+       * 两份迟早不一致 —— 而不一致的表现是「界面放行、动盘后被后端拒」。
+       * 现在界面只**缓存后端的话**，规则只有一处。
+       */
+      hostnameOk: null,
       understood: false,
       confirmText: '',
       wifiPassword: '',
@@ -74,9 +81,12 @@ export class Setup {
   set(key, value) {
     if (this.data[key] === value) return;
     this.data[key] = value;
+    // 主机名一变，上一次的后端判定就作废了 —— 留着它，界面会拿旧结论说新值
+    if (key === 'hostname') this.data.hostnameOk = null;
     // 普通模式下主机名默认跟用户名（技术审稿：普通模式主机名 = 用户名）
     if (key === 'user' && !this.advanced && !this.data.hostnameTouched) {
       this.data.hostname = value;
+      this.data.hostnameOk = null;
     }
     this.emit();
   }
@@ -138,10 +148,25 @@ export class Setup {
     return password === confirm ? null : 'account.err.pwMismatch';
   }
 
+  /**
+   * 主机名合不合规 —— **后端说了算**（`options.validate_hostname()`），
+   * 这里只把它的结论翻成文案键。
+   *
+   * 三种状态要分清：
+   *   - `hostnameOk === false`（后端说不合规）→ 报错，`下一步` 拦住；
+   *   - `hostnameOk === true`（后端说合规）→ 放行；
+   *   - `hostnameOk === null`（还没问到，或后端够不着）→ **不算错**。
+   *
+   * 最后那条是有意的：「问不到」不等于「不合法」，把它当错会让人卡在一台
+   * 起不了后端的机器上出不去。真正的守卫在 `pipeline.preflight()` ——
+   * 它在**动盘之前**跑，所以漏网的名字会在盘被擦之前被拒。
+   */
   get hostnameError() {
     const value = this.data.hostname;
     if (!value) return null;
-    return HOSTNAME_RE.test(value) ? null : 'hostname.err.format';
+    // 后端目前对主机名只有一条规则，`reason` 只有 `format` 一种；
+    // 将来多了别的 reason，在这里加映射，别把界面文案塞回后端。
+    return this.data.hostnameOk === false ? 'hostname.err.format' : null;
   }
 
   /** 密码强度只用于界面提示（0–3），不是安全判据。 */

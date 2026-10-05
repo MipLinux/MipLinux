@@ -3,12 +3,14 @@
  * MipLinux 安装器 · Electron 主进程
  * ==================================
  *
- * 它只做四件事，**不实现任何安装逻辑**：
+ * 它只做五件事，**不实现任何安装逻辑**：
  *   1. 注册 `mipl://` 私有协议，把 `renderer/` 当静态站点端出来（这样 ES module 与 fetch 才有
  *      正常的 origin —— `file://` 下两者都会被 Chromium 拦掉）。
  *   2. 开一个 kiosk 窗口：无边框、全屏、深色底（首帧不闪白）。
  *   3. 把启动器算好的三件事（主题 / 设备缩放 / 界面语言）透给渲染层。
  *   4. 封死出口：不允许导航到外部 URL、不允许开新窗口。
+ *   5. 经 `child_process` 拉起后端（`python3 -m mipl_installer`）—— 只读出口一问一答、
+ *      安装一条长跑的事件流；密码只走 stdin。见下面「后端通道」一节。
  *
  * 启动参数（由 `installer/frontend/mipl-installer` 传进来）
  * -------------------------------------------------------
@@ -23,6 +25,7 @@
 const { app, BrowserWindow, ipcMain, protocol } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { spawn } = require('node:child_process');
 
 // 协议根目录 = 应用目录：这样 `../../vendor/...` 这种相对路径在浏览器与 Node 里语义一致
 const ROOT_DIR = __dirname;
@@ -105,6 +108,243 @@ function serveRenderer(request) {
     console.error(`[mipl-installer] 取不到资源 ${relative} → ${target}（${error.code}）`);
     return new Response(`not found: ${relative}`, { status: 404 });
   }
+}
+
+// ---------------------------------------------------------------- 后端通道
+
+/**
+ * 安装器后端 = `python3 -m mipl_installer`（`installer/backend/mipl_installer/`）。
+ *
+ * **这一节是界面与后端之间唯一的通道**（Issue #97 的「只建一处」）。渲染层拿不到
+ * `child_process`（`contextIsolation: true`），它只知道几个**出口名**；把名字翻成
+ * 命令行是这里的事。所以「界面上多一个出口」= 在这里加一行，而不是让渲染层拼 argv ——
+ * 拼 argv 的那条路一旦开了，`--disk` 后面接什么就不是这张表说了算了。
+ *
+ * 后端目录由**相对位置**推出来，不写死绝对路径：开发树里是
+ * `<仓库>/installer/backend`，Live 里构建脚本把整个 `installer/` 拷到
+ * `/usr/local/lib/mipl-installer/`，两种布局下 `app/../../backend` 都对得上。
+ */
+const BACKEND_MODULE = 'mipl_installer';
+
+function backendDir() {
+  return process.env.MIPL_BACKEND_DIR || path.resolve(__dirname, '..', '..', 'backend');
+}
+
+function pythonBin() {
+  return process.env.MIPL_PYTHON || 'python3';
+}
+
+function backendSpawnOptions() {
+  // 后端不在 site-packages 里，靠 PYTHONPATH 找得到它自己（`-m` 需要包能被 import）
+  const dir = backendDir();
+  const existing = process.env.PYTHONPATH;
+  return {
+    cwd: dir,
+    env: { ...process.env, PYTHONPATH: existing ? `${dir}${path.delimiter}${existing}` : dir },
+  };
+}
+
+/**
+ * 只读出口的白名单：出口名 → 拼命令行。
+ *
+ * 一律用 `--开关=值` 而不是 `--开关 值`：值以 `-` 开头时（`-bad-` 这种主机名
+ * 是**测试用例**里就有的），分开写会被 argparse 当成另一个开关，然后报一句
+ * 与事实无关的错。
+ *
+ * `connectWifi` 的密码不在这里 —— 它走 stdin（见 `runQuery`）。
+ */
+const QUERY_ARGV = {
+  disks: () => ['--print-disks'],
+  network: () => ['--print-network'],
+  wifi: (options) => (options && options.rescan ? ['--print-wifi', '--rescan'] : ['--print-wifi']),
+  timezones: () => ['--print-timezones'],
+  locales: () => ['--print-locales'],
+  keymaps: () => ['--print-keymaps'],
+  plan: () => ['--print-plan'],
+  keymap: (options) => [`--print-keymap=${str(options, 'name')}`],
+  checkHostname: (options) => [`--check-hostname=${str(options, 'value')}`],
+  checkLocale: (options) => [`--check-locale=${str(options, 'value')}`],
+  checkKeymap: (options) => [`--check-keymap=${str(options, 'value')}`],
+  checkTimezone: (options) => [`--check-timezone=${str(options, 'value')}`],
+  connectWifi: (options) => [`--connect-wifi=${str(options, 'ssid')}`],
+};
+
+function str(options, key) {
+  const value = options && options[key];
+  if (typeof value !== 'string' || !value) throw new Error(`出口参数 ${key} 必须是非空字符串`);
+  return value;
+}
+
+/**
+ * 跑一个只读出口，回 `{ok, data}` 或 `{ok: false, error}`。
+ *
+ * **不 reject**：失败是这一层的正常返回值之一（后端不在、JSON 坏了、参数不对），
+ * 让渲染层的每个调用点都包 try/catch 只会把错误处理写散。渲染层看到 `ok:false`
+ * 就知道该显示「这个环境列不出名单」而不是崩掉。
+ */
+function runQuery(name, options, stdinText) {
+  return new Promise((resolve) => {
+    const build = QUERY_ARGV[name];
+    if (!build) {
+      resolve({ ok: false, error: `没有这个只读出口：${name}` });
+      return;
+    }
+    let argv;
+    try {
+      argv = build(options);
+    } catch (error) {
+      resolve({ ok: false, error: error.message });
+      return;
+    }
+
+    const child = spawn(pythonBin(), ['-m', BACKEND_MODULE, ...argv], backendSpawnOptions());
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk) => {
+      out += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      err += chunk;
+    });
+    child.on('error', (error) => {
+      resolve({ ok: false, error: `起不了后端（${pythonBin()}）：${error.message}` });
+    });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        resolve({ ok: false, error: err.trim() || `后端退出码 ${code}`, code });
+        return;
+      }
+      try {
+        resolve({ ok: true, data: JSON.parse(out) });
+      } catch (error) {
+        // 把开头一段原文带回去：多半是后端往 stdout 里混了别的东西，
+        // 而「JSON 解析失败」这句话本身对排查毫无用处。
+        resolve({ ok: false, error: `后端输出不是 JSON：${error.message}`, raw: out.slice(0, 2000) });
+      }
+    });
+    child.stdin.end(typeof stdinText === 'string' ? stdinText : '');
+  });
+}
+
+/**
+ * 渲染层给的 `Plan` → 命令行。**字段白名单**，未知字段直接忽略。
+ *
+ * 界面上的「高级安装」只决定**走哪几页**，不改变装盘的四个阶段 ——
+ * 所以 `--steps` 不在这里：它永远是全部四段，省得界面上少勾一个就装出半成品。
+ * `--yes` 是**擦除页已经确认过**的结论（`confirm.js` 那道逐字输入），
+ * 后端因此不再问第二遍；守卫没有减少，只是换了个人回答。
+ */
+const PLAN_FLAGS = {
+  disk: '--disk',
+  target: '--target',
+  hostname: '--hostname',
+  user: '--user',
+  locale: '--locale',
+  timezone: '--timezone',
+  keymap: '--keymap',
+};
+
+function installArgv(plan) {
+  if (!plan || typeof plan !== 'object') throw new Error('没有安装计划');
+  if (typeof plan.disk !== 'string' || !plan.disk) throw new Error('计划里没有目标盘');
+  const argv = ['-m', BACKEND_MODULE, '--json-events', '--yes'];
+  for (const [key, flag] of Object.entries(PLAN_FLAGS)) {
+    const value = plan[key];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string') throw new Error(`计划字段 ${key} 必须是字符串`);
+    argv.push(`${flag}=${value}`);
+  }
+  argv.push('--password-stdin');
+  return argv;
+}
+
+/** 正在跑的那一次安装。同一时刻只允许一个 —— 两个 `pacstrap` 抢同一块盘没有意义。 */
+let installRun = null;
+
+function startInstall(win, plan, secrets) {
+  if (installRun) return { ok: false, error: '已经有一次安装在进行中' };
+  // 两行密码的顺序固定：用户在前、root 在后（cli.py 的红线）。root 不给就
+  // **不加**那个开关 —— 后端据此保持 root 锁定，只用 sudo 提权。
+  const user = typeof secrets.user === 'string' ? secrets.user : '';
+  const root = typeof secrets.rootPassword === 'string' && secrets.rootPassword ? secrets.rootPassword : null;
+
+  let argv;
+  try {
+    argv = installArgv(plan);
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+  if (root !== null) argv.push('--root-password-stdin');
+
+  const child = spawn(pythonBin(), argv, backendSpawnOptions());
+  installRun = { child, cancelled: false, finished: false };
+
+  const send = (record) => {
+    if (!win.isDestroyed()) win.webContents.send('mipl:backend:event', record);
+  };
+
+  // 后端一行一个 JSON 对象（`events.JsonReporter`）。半行要留着跟下一块拼 ——
+  // 管道切分不保证按行，直接 `split('\n')` 迟早会在某个中文消息中间断开。
+  let buffered = '';
+  const flush = (text) => {
+    const body = text.trim();
+    if (!body) return;
+    try {
+      send(JSON.parse(body));
+    } catch (error) {
+      // 解析不了的一行也要给渲染层看：静默丢掉会让「进度页停在某一步」变成悬案
+      send({ kind: 'note', message: `[后端输出无法解析] ${body.slice(0, 500)}` });
+    }
+  };
+  child.stdout.on('data', (chunk) => {
+    buffered += chunk;
+    // 半行要留着跟下一块拼 —— 管道切分不保证按行，直接 `split('\n')` 迟早会在
+    // 某个中文消息中间断开（多字节字符被切开时更隐蔽）
+    const lines = buffered.split('\n');
+    buffered = lines.pop();
+    for (const line of lines) flush(line);
+  });
+
+  let stderrTail = '';
+  child.stderr.on('data', (chunk) => {
+    stderrTail = (stderrTail + chunk).slice(-4000);
+    if (!win.isDestroyed()) win.webContents.send('mipl:backend:stderr', String(chunk));
+  });
+
+  child.on('error', (error) => {
+    send({ kind: 'error', code: -1, message: `起不了后端（${pythonBin()}）：${error.message}`, hint: null });
+    send({ kind: 'end', code: -1 });
+    // **必须清掉**：留着的话 `startInstall` 会一直回「已经有一次安装在进行中」，
+    // 而实际上一个进程都没起来 —— 界面从此再也开不了工，只能重启安装器。
+    if (installRun && installRun.child === child) installRun = null;
+  });
+
+  child.on('close', (code) => {
+    // 进程没了但缓冲区里还留着最后半行（没有以换行收尾的输出）：冲掉再收尾，
+    // 否则「end 发出来了、end 后面那条却丢了」。`JsonReporter` 每条都带换行，
+    // 所以这是给「将来某个往 stdout 里写别的东西的人」留的坑位。
+    flush(buffered);
+    buffered = '';
+    if (installRun) installRun.finished = true;
+    // `stderr` 尾巴附在收尾那条上：装到一半失败时，真正的原因常在后端的 stderr 里
+    send({ kind: 'exit', code, cancelled: Boolean(installRun && installRun.cancelled), stderr: stderrTail });
+    installRun = null;
+  });
+
+  // 密码只走 stdin，绝不进 argv。
+  child.stdin.end(root === null ? `${user}\n` : `${user}\n${root}\n`);
+
+  return { ok: true };
+}
+
+function cancelInstall() {
+  if (!installRun) return { ok: false, error: '没有正在进行的安装' };
+  installRun.cancelled = true;
+  // `SIGUSR1` 而不是 `SIGINT`/`SIGKILL`：后两个会当场打断 `pacstrap`，留下一个
+  // 谁都说不清的半成品。这个信号只是「举手」，取消发生在**阶段之间**
+  // （`pipeline.run(should_cancel=…)`），退出码 130、并按失败的同一条路卸载目标。
+  installRun.child.kill('SIGUSR1');
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------- 窗口
@@ -207,12 +447,29 @@ app.whenReady().then(async () => {
     bounds: win.getBounds(),
   }));
 
+  // ── 后端通道（渲染层唯一的取数入口，见 preload.js 的 `window.mipl.backend`）──
+  // 三个 handler 的名字是冻结接口的一部分（app/README.md）。
+  ipcMain.handle('mipl:backend:query', (_event, name, options, stdinText) =>
+    runQuery(name, options, stdinText)
+  );
+  ipcMain.handle('mipl:backend:start', (_event, plan, secrets) => startInstall(win, plan, secrets || {}));
+  ipcMain.handle('mipl:backend:cancel', () => cancelInstall());
+
   if (process.env.MIPL_PROBE) {
     // 探针只在显式要求时加载；生产路径不会碰它
     require('./tools/probe-main.js')({ app, win, launch });
   }
 
   app.on('window-all-closed', () => app.quit());
+
+  // 退出时不要留下一个还在擦盘的孤儿进程。只用 `SIGUSR1`（阶段之间取消），
+  // 所以这一步是**尽力而为**：真在 `pacstrap` 里的话，它会跑完当前阶段才停 ——
+  // 这正是我们要的，宁可多跑一会儿，也不要一个半个装完的目标系统。
+  app.on('will-quit', () => {
+    if (!installRun) return;
+    console.log('[mipl-installer] 退出时仍有安装在进行，请求阶段之间取消');
+    cancelInstall();
+  });
 });
 
 // 单实例：kiosk 里被拉起两次时，第二次直接退出，不要叠两个全屏窗口

@@ -1,5 +1,10 @@
 /**
- * mock.js —— 候选数据替身（真后端耦合层是后续独立工作）
+ * mock.js —— 候选数据替身（**只给离线自检用**，Issue #97）
+ *
+ * 产品路径上，候选数据来自真后端（`backend.js`）；这个类只在 `MIPL_PROBE=1`
+ * 的离屏探针里出场。它因此有一个必须守住的职责：**与 `Backend` 同形**。
+ * 探针跑的是同一份页面代码，契约一旦漂移（少一个键、方法签名变了），
+ * 探针会先红 —— 这正是留着它的理由，不是历史包袱。
  *
  * 页面**只读**这里的数据；用户选择一律写 `setup.data`。本模块不持有任何用户状态。
  *
@@ -12,6 +17,57 @@
  */
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 阶段名与「正在做什么」的离线替身。
+ *
+ * **与后端逐字同源**：`mipl_installer/events.py` 的 `PHASES` 与 `pipeline.py` 的
+ * `PHASE_ACTIONS`。这里抄一份是为了让探针在没有后端的环境里也能跑完整条进度；
+ * 真跑时这些字段由事件流带过来，页面用的是**翻译键**（`progress.phase.*`），
+ * 不是这里的句子 —— 所以这份抄写不会漂成第二份用户可见文案。
+ */
+const PHASES = ['start', 'disk', 'packages', 'configure', 'boot'];
+const PHASE_ACTIONS = {
+  start: '正在准备安装环境',
+  disk: '正在重新分区并创建文件系统',
+  packages: '正在从镜像源下载并安装软件包',
+  configure: '正在写入系统配置与账户',
+  boot: '正在安装引导',
+};
+
+/**
+ * 离线自检用的主键区（QWERTY）。
+ *
+ * 真数据来自 `--print-keymap`，那份是**跑得出来的**：`us`/`de`/`fr`/`dvorak`
+ * 各自不同，一眼可辨。这里只要「能画出一张图」就够了 —— 探针验的是画法，
+ * 不是某一份映射的内容。
+ */
+const MOCK_KEYMAP = {
+  1: 'Escape', 41: 'grave', 2: 'one', 3: 'two', 4: 'three', 5: 'four', 6: 'five',
+  7: 'six', 8: 'seven', 9: 'eight', 10: 'nine', 11: 'zero', 12: 'minus', 13: 'equal',
+  14: 'BackSpace', 15: 'Tab',
+  16: 'q', 17: 'w', 18: 'e', 19: 'r', 20: 't', 21: 'y', 22: 'u', 23: 'i', 24: 'o', 25: 'p',
+  26: 'bracketleft', 27: 'bracketright', 28: 'Return',
+  29: 'Control', 30: 'a', 31: 's', 32: 'd', 33: 'f', 34: 'g', 35: 'h', 36: 'j', 37: 'k',
+  38: 'l', 39: 'semicolon', 40: 'apostrophe', 43: 'backslash',
+  42: 'Shift', 86: 'less', 44: 'z', 45: 'x', 46: 'c', 47: 'v', 48: 'b', 49: 'n', 50: 'm',
+  51: 'comma', 52: 'period', 53: 'slash', 54: 'Shift',
+  56: 'Alt', 57: 'space', 100: 'AltGr',
+};
+
+/**
+ * 换布局时**键位跟着换**的那几个（Dvorak 的上排，与真 `dvorak.map.gz` 一致）。
+ *
+ * 探针要验的是「图来自所选映射」，而不是「一张通用键盘图」——
+ * 没有这一小张差异表，那个断言就只能验「图还在」，
+ * 而「换布局图不变」正是这个功能最可能的坏法（把图画死在页面里）。
+ */
+const MOCK_KEYMAP_VARIANTS = {
+  dvorak: {
+    16: 'apostrophe', 17: 'comma', 18: 'period', 19: 'p', 20: 'y',
+    21: 'f', 22: 'g', 23: 'c', 24: 'r', 25: 'l',
+  },
+};
 
 const CANDIDATE_DISKS = [
   {
@@ -49,12 +105,13 @@ const CANDIDATE_WIFI = [
 ];
 
 export const KEYMAPS = [
-  { id: 'us', name: 'English (US)' },
-  { id: 'de', name: 'Deutsch' },
-  { id: 'fr', name: 'Français' },
-  { id: 'es', name: 'Español' },
-  { id: 'ru', name: 'Русский' },
-  { id: 'be-latin1', name: 'Belge (latin1)' },
+  { id: 'us', name: 'us' },
+  { id: 'de', name: 'de' },
+  { id: 'fr', name: 'fr' },
+  { id: 'dvorak', name: 'dvorak' },
+  { id: 'es', name: 'es' },
+  { id: 'ru', name: 'ru' },
+  { id: 'be-latin1', name: 'be-latin1' },
 ];
 
 export const LOCALES = [
@@ -113,8 +170,90 @@ export class Mock {
       failure: '',
       wifi: [],
     };
-    /** 安装计划摘要（真后端接上后由 packages.py 给出）。 */
-    this.plan = { packages: 412, download: '1.9 GiB', filesystem: 'ext4', boot: 'systemd-boot' };
+    /**
+     * 安装计划摘要 —— 字段与 `queries.plan_summary()`（`--print-plan`）**逐字一致**。
+     *
+     * 刻意**不**放包数与下载量：那要读包清单、真的去问仓库（M4 的事）。
+     * 编一个「412 个包 / 1.9 GiB」摆上去，就是界面在描述它没做过的事 ——
+     * 而这正是这一层存在的理由（同形），不是可以各自发挥的地方。
+     */
+    this.plan = { filesystem: 'ext4', boot: 'systemd-boot', esp: '512.0 MiB', pacman_conf: '/etc/pacman.conf' };
+    /** 装不装得成这件事在这里不重要（探针不装盘），但接口要与 Backend 同形。 */
+    this.errors = {};
+    this._installListeners = new Set();
+    this._installTimers = [];
+  }
+
+  /* ---------------------------------------------------------- 安装事件流 */
+
+  /**
+   * 假的安装：按 `events.PHASES` 的顺序推一串事件，形状与 `events.JsonReporter`
+   * 的行**逐字一致**（`kind` / `phase` / `percent` / `detail`）。
+   *
+   * 慢到足够被看见：探针每页等 200ms，太快的话进度页会在截图前就跳走 ——
+   * 那样「渲染了进度页」这条断言就变成了在测运气。
+   */
+  async startInstall() {
+    this.stopInstall();
+    const emit = (record) => {
+      for (const listener of this._installListeners) listener(record);
+    };
+    emit({ kind: 'hello', protocol: 1, version: 'mock' });
+
+    PHASES.forEach((phase, index) => {
+      this._installTimers.push(
+        setTimeout(() => {
+          emit({ kind: 'event', phase, message: PHASE_ACTIONS[phase], percent: null, detail: null });
+          if (index === PHASES.length - 1) {
+            emit({ kind: 'event', phase: 'done', message: '装完了', percent: 100, detail: null });
+            emit({ kind: 'end', code: 0 });
+            this._installTimers.push(
+              setTimeout(() => emit({ kind: 'exit', code: 0, cancelled: this._cancelled === true }), 200)
+            );
+          }
+        }, 400 * index)
+      );
+    });
+    this._cancelled = false;
+    return { ok: true };
+  }
+
+  async cancelInstall() {
+    this._cancelled = true;
+    this.stopInstall();
+    return { ok: true };
+  }
+
+  onInstallEvent(listener) {
+    this._installListeners.add(listener);
+    return () => this._installListeners.delete(listener);
+  }
+
+  stopInstall() {
+    for (const timer of this._installTimers) clearTimeout(timer);
+    this._installTimers = [];
+  }
+
+  /** 键位预览的离线替身（`Backend.keymapView` 的同形实现）。 */
+  async keymapView(name) {
+    if (!name) return null;
+    const overrides = MOCK_KEYMAP_VARIANTS[name] || {};
+    return {
+      name,
+      source: `mock:${name}`,
+      lines: [],
+      includes: [],
+      keys: Object.entries(MOCK_KEYMAP).map(([code, plain]) => ({
+        code: Number(code),
+        plain: overrides[code] || plain,
+        shift: '',
+      })),
+    };
+  }
+
+  async checkHostname() {
+    // 离线自检不判主机名：返回「问不到」，页面据此放行（真守卫在 pipeline.preflight）
+    return { ok: null, reason: null };
   }
 
   diskById(id) {

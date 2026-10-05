@@ -1,7 +1,9 @@
 /**
  * 目标盘页（2）—— 整块磁盘的选择
  *
- * 数据来自 `mock.disks`（真后端接上后由 `disk.py` 的候选枚举给出）。
+ * 数据来自 `backend.disks`（真跑时是 `disk.list_candidates()` 经 `--print-disks` 报上来的；
+ * 离屏探针里是 Mock）。**只列能装的盘** —— 取舍在 `backend.js` 的 `_setDisks()`，
+ * 理由写在那个文件头上（选中一块装不成的盘，要等到动盘前的守卫才被拒绝）。
  * 这一页是**危险动作的前一页**：真正的不可逆确认在下一页（`confirm.js`）。
  */
 
@@ -58,14 +60,14 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
+    const { setup, backend } = ctx;
 
-    const body = mock.diskScanning
+    const body = backend.diskScanning
       ? h('div', { class: 'stack' }, [
           h('div', { class: 'skeleton', style: { height: '92px' } }),
           h('div', { class: 'skeleton', style: { height: '92px' } }),
         ])
-      : mock.disks.length === 0
+      : backend.disks.length === 0
         ? emptyState({
             icon: 'hard-drives',
             text: t('disk.empty'),
@@ -80,7 +82,7 @@ export default {
         : h(
             'div',
             { class: 'list', style: { marginTop: '4px' } },
-            mock.disks.map((disk) =>
+            backend.disks.map((disk) =>
               diskCard(
                 disk,
                 setup.data.disk === disk.id,
@@ -108,7 +110,7 @@ export default {
             label: t('nav.refresh'),
             variant: 'tonal',
             icon: 'arrows-clockwise',
-            disabled: mock.diskScanning,
+            disabled: backend.diskScanning,
             onClick: () => rescan(ctx),
           }),
         ]),
@@ -124,6 +126,6 @@ export default {
 
 async function rescan(ctx) {
   ctx.rerender();
-  await ctx.mock.rescanDisks();
+  await ctx.backend.rescanDisks();
   ctx.rerender();
 }

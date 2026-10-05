@@ -17,9 +17,9 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
+    const { setup, backend } = ctx;
 
-    const zones = dedupeZones(mock.timezones, ctx.i18n);
+    const zones = dedupeZones(backend.timezones, ctx.i18n);
 
     const list = selectableList(
       {

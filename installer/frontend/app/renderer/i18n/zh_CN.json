@@ -43,7 +43,6 @@
   "keymap.desc": "装好之后系统的控制台键盘布局。",
   "keymap.search": "搜索",
   "keymap.title": "键盘布局",
-  "keymap.try": "在这里试打",
   "lang.toggle": "EN",
   "lang.tooltip": "安装器界面语言：%1",
   "locale.desc": "装好之后系统的语言与区域设置。",

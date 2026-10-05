@@ -624,51 +624,65 @@ module.exports = async function probe({ app, win, launch }) {
     })()`);
     check(focusRing.focused && focusRing.inputOutline === 'none', '搜索框焦点只有一层（容器），内层不再叠 outline', JSON.stringify(focusRing));
 
-    // 键盘页：试打区在列表上方；预览按需出现
+    // 键盘页：主键区图在列表上方，且画的是**真布局**（Issue #65 用它替掉了试打框）
     await run('window.__mipl.goTo("keymap")');
-    await sleep(340);
+    await sleep(420);
     await settle();
     const keymapBefore = await run(`(() => {
-      const tryInput = document.getElementById('keymap-try');
-      const preview = document.getElementById('keymap-preview');
+      const block = document.getElementById('keymap-block');
       const list = document.querySelector('#keymap-list .list');
       const stage = document.getElementById('stage');
-      const tryBox = tryInput.getBoundingClientRect();
+      if (!block) return { missing: true };
+      const blockBox = block.getBoundingClientRect();
       const listBox = list ? list.getBoundingClientRect() : null;
+      const caps = [...block.querySelectorAll('.keycap')];
       return {
-        previewHidden: preview.hidden,
-        tryAboveList: listBox ? tryBox.top < listBox.top : false,
+        rows: block.querySelectorAll('.keyblock__row').length,
+        caps: caps.length,
+        labelled: caps.filter((cap) => (cap.textContent || '').trim()).length,
+        width: Math.round(blockBox.width),
+        height: Math.round(blockBox.height),
+        aboveList: listBox ? blockBox.bottom <= listBox.top + 1 : false,
         stageFits: stage.scrollHeight <= stage.clientHeight + 1,
       };
     })()`);
-    check(keymapBefore.previewHidden, '没有输入时预览不显示', JSON.stringify(keymapBefore));
-    check(keymapBefore.tryAboveList, '试打框在列表上方', JSON.stringify(keymapBefore));
+    check(!keymapBefore.missing, '键盘页画出了主键区图', JSON.stringify(keymapBefore));
+    check(
+      keymapBefore.rows >= 5 && keymapBefore.labelled >= 30,
+      `主键区图有 5 行、至少 30 个键有字（实际 ${keymapBefore.rows} 行 / ${keymapBefore.labelled} 个）`,
+      JSON.stringify(keymapBefore)
+    );
+    check(keymapBefore.aboveList, '键位图在列表上方', JSON.stringify(keymapBefore));
     check(keymapBefore.stageFits, '键盘页：页面本体不滚动', JSON.stringify(keymapBefore));
 
-    const keymapAfter = await run(`(() => {
-      const input = document.getElementById('keymap-try');
-      input.value = 'qwertz';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      const preview = document.getElementById('keymap-preview');
-      return { hidden: preview.hidden, text: preview.textContent };
+    // 换一份布局，图要跟着变 —— 这是「图来自所选映射」而不是「一张通用键盘图」的证据
+    const labelAt = (code) =>
+      run(`(() => {
+        const cap = document.querySelector('.keycap[data-code="${code}"]');
+        return cap ? cap.querySelector('.keycap__label').textContent : null;
+      })()`);
+    const qwertyQ = await labelAt(16);
+    const switched = await run(`(() => {
+      const item = [...document.querySelectorAll('#keymap-list .option')].find((el) => el.textContent.includes('dvorak'));
+      if (!item) return false;
+      item.click();
+      return true;
     })()`);
-    await sleep(280);
-    const previewVisible = await run(`(() => {
-      const preview = document.getElementById('keymap-preview');
-      const style = getComputedStyle(preview);
-      return { opacity: style.opacity, transform: style.transform, text: preview.textContent };
-    })()`);
-    check(!keymapAfter.hidden && keymapAfter.text === 'qwertz', '输入后预览出现并显示所打内容', JSON.stringify(keymapAfter));
-    check(Number(previewVisible.opacity) > 0.95, '预览淡入完成（出现有动画）', JSON.stringify(previewVisible));
-    await shot('keymap-preview-1024x768');
+    await sleep(420);
+    await settle();
+    const dvorakAt16 = await labelAt(16);
+    check(switched, '键盘页列表里找得到 dvorak', String(switched));
+    check(
+      qwertyQ && dvorakAt16 && qwertyQ !== dvorakAt16,
+      `换布局之后同一个键位的字跟着变（q → ${dvorakAt16}）`,
+      `qwerty=${qwertyQ} dvorak=${dvorakAt16}`
+    );
+    await shot('keymap-block-1024x768');
 
-    const keymapCleared = await run(`(() => {
-      const input = document.getElementById('keymap-try');
-      input.value = '';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      return document.getElementById('keymap-preview').hidden;
-    })()`);
-    check(keymapCleared, '清空输入后预览消失', String(keymapCleared));
+    // 提交回来的布局名要真的写进 setup（后端 `Plan.keymap` 读的就是它）
+    const pickedKeymap = await run('window.__mipl.state().data.keymap');
+    check(pickedKeymap === 'dvorak', '选中的布局写进了状态', String(pickedKeymap));
+    await run('window.__mipl.setData("keymap", "us")');
 
     win.setContentSize(1440, 900);
     await sleep(360);

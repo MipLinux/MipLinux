@@ -2,7 +2,7 @@
  * 网络页（1）—— 状态 + Wi-Fi 选择 + 连接
  *
  * 门禁：没联网就过不去（`network.needNetwork`）。失败用**错误码**拼句子：
- * mock 只给 `auth` / `notFound` / `timeout` / `other`，句子一律走 `network.err.*`。
+ * 后端只给 `auth` / `notFound` / `timeout` / `other`，句子一律走 `network.err.*`。
  */
 
 import { h, attachScrollFade } from '../dom.js';
@@ -38,8 +38,8 @@ function signalBars(level) {
 }
 
 async function connect(ctx, item) {
-  const { mock, setup } = ctx;
-  await mock.connectWifi(item.ssid, setup.data.wifiPassword || '');
+  const { setup, backend } = ctx;
+  await backend.connectWifi(item.ssid, setup.data.wifiPassword || '');
   ctx.rerender();
 }
 
@@ -49,8 +49,8 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
-    const net = mock.network;
+    const { setup, backend } = ctx;
+    const net = backend.network;
 
     // 状态条：连上了就报「已连接 + 介质 + IP」，右侧永远只有「重新扫描」。
     // **不要**把「未连接」这种状态串做成按钮（2026-10-04 实机反馈：读起来像可以点，
@@ -150,11 +150,11 @@ export default {
 
   /** 门禁：没联网不许继续（文案 `network.needNetwork`）。 */
   isComplete(ctx) {
-    return Boolean(ctx.mock.network.connected);
+    return Boolean(ctx.backend.network.connected);
   },
 
   blockedReason(ctx) {
-    return ctx.mock.network.connected ? '' : ctx.t('network.needNetwork');
+    return ctx.backend.network.connected ? '' : ctx.t('network.needNetwork');
   },
 
   primaryLabel() {

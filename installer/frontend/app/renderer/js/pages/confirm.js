@@ -15,8 +15,8 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
-    const disk = mock.diskById(setup.data.disk);
+    const { setup, backend } = ctx;
+    const disk = backend.diskById(setup.data.disk);
     const typed = setup.data.confirmText || '';
     const mismatch = typed.length > 0 && !setup.confirmTextMatches();
 

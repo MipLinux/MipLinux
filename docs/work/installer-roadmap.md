@@ -56,8 +56,8 @@ installer/
 │   ├── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage）
 │   ├── theme/               theme_mode.py / device_scale.py 纯函数 + 单测（不依赖界面栈）
 │   └── app/                 Electron 应用；接口准据见 app/README.md
-│       ├── main.js / preload.js   kiosk 窗口与启动参数；不实现安装逻辑
-│       ├── renderer/              HTML/CSS/JS：12 个页面、i18n、Mock、时区名表
+│       ├── main.js / preload.js   kiosk 窗口、启动参数与后端通道；不实现安装逻辑
+│       ├── renderer/              HTML/CSS/JS：12 个页面、i18n、backend.js（真数据）/ mock.js（离屏自检）、时区名表
 │       ├── design/color.json      唯一色源（由 tools 下的断言脚本与 08 对齐）
 │       └── tools/                 check-tokens.py / check-contrast.py / probe-*.js
 ├── tests/                   单测 test_*.py + Live 内排练脚本（*.sh）
@@ -122,7 +122,12 @@ installer/
 
 页面流：普通 8 步（欢迎 → 网络 → 目标盘 → 账户 → 摘要 → 擦除确认 → 进度 → 完成）/ 高级 12 步
 （多出语言 / 键盘 / 时区 / 主机名四页）—— 步骤表与全部过审文案见
-[tech/09 §二 · 流程](tech/09-安装器界面文案.md)。数据先用 Mock；真后端耦合层是后续独立工作。
+[tech/09 §二 · 流程](tech/09-安装器界面文案.md)。
+
+**已经是真数据了**（#97，2026-10-06）：12 页吃 `--print-*` 只读出口报上来的运行系统事实，
+进度来自 `events.JsonReporter` 的 JSON 行事件流，选择经 `pipeline.Plan` 真的写进目标系统；
+`mock.js` 退成**只给离屏探针**用的替身（两者同形）。耦合层的冻结接口见
+[frontend/app/README.md](../../installer/frontend/app/README.md) §7。
 
 **进度来自 `core/events.py` 的事件流** —— 界面层不许出现分区或装包逻辑，否则 M1 的测试就白做了。
 

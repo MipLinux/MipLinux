@@ -131,12 +131,6 @@ export class Setup {
     return value.length >= PASSWORD_MIN ? null : 'account.err.pwShort';
   }
 
-  get passwordConfirmError() {
-    const { password, rootPassword } = this.data;
-    if (!password) return null;
-    return rootPassword !== undefined && rootPassword !== '' ? null : null;
-  }
-
   /** 二次输入（确认密码）由页面自己存，这里只给规则。 */
   confirmMismatch(confirm) {
     const { password } = this.data;

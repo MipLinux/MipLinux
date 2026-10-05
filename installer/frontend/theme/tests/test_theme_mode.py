@@ -2,8 +2,8 @@
 
 跑法（任务验收命令）::
 
-    python3 -m unittest discover -s installer/frontend/qml/Mipl/theme/tests \
-        -t installer/frontend/qml/Mipl/theme
+    python3 -m unittest discover -s installer/frontend/theme/tests \
+        -t installer/frontend/theme
 """
 
 import datetime

@@ -2,7 +2,7 @@
 
 准据：
 - `docs/work/tech/08-界面设计方向.md` §3.9（主题模式：亮 / 暗 / 跟随时间）
-- `installer/frontend/qml/README.md` §2（`MiplLaunch.theme` 是 `str`）与 §3.7（`MiplTheme`）
+- `installer/frontend/app/README.md`（启动注入：`window.mipl.config.theme` 是 `str`）
 
 纪律
 ----

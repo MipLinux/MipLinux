@@ -1,6 +1,6 @@
 # 安装器前端（Electron）· 接口冻结
 
-> 状态：**2026-10-04 冻结**（随技术栈由 Qt Quick/QML 改为 Electron）。视觉准据是
+> 状态：**2026-10-05 冻结**（随技术栈由 Qt Quick/QML 改为 Electron；实机反馈七轮已收敛）。视觉准据是
 > [tech/10](../../../docs/work/tech/10-安装器界面视觉方向.md)；文案准据是
 > [tech/09](../../../docs/work/tech/09-安装器界面文案.md)；技术栈见 [D14](../../../docs/knowledge/06-待定事项.md)（P6）。
 > 改本文件里冻结的**名字与结构** = 改接口，要先过维护者。
@@ -13,7 +13,7 @@
 | `renderer/index.html` | 唯一的 HTML 入口（CSP 只允许本地资源） |
 | `renderer/css/tokens.css` | 设计 token（双主题、字阶、圆角、动效）；`palette.css` 是生成物 |
 | `renderer/css/{base,components,pages}.css` | 外壳版式 / 组件 / 页面编排 |
-| `renderer/js/app.js` | 外壳：顶栏、步骤轨道、动作区、页面生命周期、对话框 |
+| `renderer/js/app.js` | 外壳：顶栏（语言 / 主题菜单 / 缩放菜单）、步骤轨道、动作区、页面生命周期、对话框 |
 | `renderer/js/{setup,steps,mock}.js` | 状态机 / 步骤表 / 候选数据替身 |
 | `renderer/js/pages/*.js` | 12 个页面，一个页面一个文件 |
 | `renderer/js/{i18n,tz-names}.js` | 文案与运行时语言 / 时区显示名 |
@@ -30,9 +30,10 @@
 | 键 | 取值 | 谁定的 |
 |---|---|---|
 | `theme` | `light` / `dark` | 启动器（**默认 light**；`auto` 才按本地时间） |
-| `themeSource` | `light` / `dark` / `auto` | 启动器（`auto` 时渲染层会 30s 重算） |
+| `themeSource` | `light` / `dark` / `auto` | 启动器（**默认 auto**：07:00–18:59 亮；渲染层 30s 重算） |
 | `lang` | `zh_CN` / `en_US` | 启动器 `--lang` |
-| `scale` | `0` = 未指定，否则 1/2/3 | **设备层**缩放；界面层缩放由渲染层自己管（`--ui-scale`） |
+| `uiScale` | `0` = 自动档但没推荐值，否则 100/167/200 | **界面层**缩放档位（启动器按分辨率推荐；自动档读它） |
+| `renderer` | `gpu` / `software` | 启动器的 GPU 探测结果；`software` 时渲染层走低配模式（关掉极光/噪点/大模糊） |
 | `probe` | `true` 时渲染层挂出 `window.__mipl` | 只在 `MIPL_PROBE=1` 时 |
 
 `mipl://app/...` 是主进程注册的私有协议（根目录 = `app/`），静态端出 `renderer/`、`vendor/`、`design/`。
@@ -84,6 +85,17 @@ export default {
 - 图标：只用 vendored Phosphor（`vendor/icons/` → `renderer/js/icons.js`），不混家族、不手画路径。
 - 动效：`motion.js` 包住 anime.js；只动 `transform` / `opacity`；`prefers-reduced-motion` 下不做位移。
 
+## 5.1 版式与滚动的三条硬规则（实机定的，别改回去）
+
+1. **一个 `--gutter` 管所有留白**：窗口四周、行列间距、面板内边距、动作区分隔线两侧 ——
+   上下与左右必须同值。
+2. **滚动的应该是列表，不是页面**：长列表页用 `panel({ fill: true })`，链条
+   `panel--fill → .panel__core → .list-wrap → .list` 每一环都要 `flex: 1; min-height: 0`；
+   页头、搜索框、扫描按钮、动作区固定不动。
+3. **滚动渐隐按位置生效**：`dom.js: attachScrollFade()` 打 `data-scroll-fade`；
+   不用滚的列表一律 `none`（固定遮罩会啃掉最后一项）。挂载点：可搜索列表、Wi-Fi 列表、
+   磁盘卡列表、步骤轨道。
+
 ## 6. 验收怎么跑（都不需要 root / Live）
 
 ```bash
@@ -94,8 +106,10 @@ python3 installer/frontend/app/tools/gen-icons.py --check                 # 图�
 python3 installer/frontend/app/tools/check-tokens.py                      # 色板三方 + token 结构
 python3 installer/frontend/app/tools/check-contrast.py                    # 对比度 46 组
 python3 -m unittest discover -s installer/frontend/theme/tests -t installer/frontend/theme
-MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js
+MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js   # 84 项断言 + 截图
 ```
+
+详细的实测结果与**未实测清单**见 [tech/11](../../../docs/work/tech/11-安装器前端实测.md)。
 
 **口径：以上全是离屏旁证。** 真 ISO / `cage` 里的 V3（键盘全流程）、V5（视觉基线）、V7 / V8（缩放）
 仍未实测 —— 要 `mipl build` + `qemu`，且需要 root。

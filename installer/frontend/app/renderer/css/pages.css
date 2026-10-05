@@ -91,12 +91,6 @@
   z-index: -1;
 }
 
-.welcome__features {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
 /* ---------------------------------------------------------------- 目标盘 */
 
 .disk-card {

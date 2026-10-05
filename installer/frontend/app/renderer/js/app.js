@@ -497,11 +497,6 @@ class App {
         this.renderPage({ animate: false });
         return this.mock.network.wifi.map((w) => w.ssid);
       },
-      fillAccount: ({ user = 'mipluser', password = 'mipl123456', confirm = password } = {}) => {
-        this.setup.set('user', user);
-        this.setup.set('password', password);
-        this.setup.set('confirm', confirm);
-      },
       countUndefinedStrings: () => {
         const html = document.getElementById('root').innerText || '';
         return (html.match(/⟨[^⟩]+⟩/g) || []).length;

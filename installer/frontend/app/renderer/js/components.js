@@ -56,10 +56,6 @@ export function row(...children) {
   return h('div', { class: 'row' }, ...children);
 }
 
-export function grid2(...children) {
-  return h('div', { class: 'grid-2' }, ...children);
-}
-
 /* -------------------------------------------------------------- 按钮 */
 
 export function button({ label, variant = 'tonal', icon: iconName, onClick, disabled, id, type = 'button' }) {
@@ -76,22 +72,6 @@ export function button({ label, variant = 'tonal', icon: iconName, onClick, disa
       label ? h('span', { text: label }) : null,
       iconName ? h('span', { class: 'btn__icon' }, icon(iconName)) : null,
     ]
-  );
-}
-
-export function iconButton({ name, label, onClick, pressed, id }) {
-  return h(
-    'button',
-    {
-      id,
-      type: 'button',
-      class: 'icon-btn',
-      title: label,
-      'aria-label': label,
-      'aria-pressed': pressed === undefined ? null : String(Boolean(pressed)),
-      onclick: onClick,
-    },
-    icon(name)
   );
 }
 
@@ -174,22 +154,6 @@ export function checkbox({ id, checked, label, onChange, hint }) {
       hint ? h('span', { class: 'caption', text: hint }) : null,
     ]),
   ]);
-}
-
-export function segmented({ items, value, onChange, ariaLabel }) {
-  return h(
-    'div',
-    { class: 'segmented', role: 'group', 'aria-label': ariaLabel },
-    items.map((item) =>
-      h('button', {
-        type: 'button',
-        class: 'segmented__item',
-        'aria-pressed': String(item.value === value),
-        onclick: () => onChange(item.value),
-        text: item.label,
-      })
-    )
-  );
 }
 
 export function chip({ label, icon: iconName, pressed, onClick }) {

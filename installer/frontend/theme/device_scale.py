@@ -2,7 +2,7 @@
 
 准据：
 - `docs/work/tech/08-界面设计方向.md` §3.10（缩放与高分屏）
-- `installer/frontend/qml/README.md` §2（`MiplLaunch.deviceScale` = 实际写进 `QT_SCALE_FACTOR` 的值）
+- `installer/frontend/app/README.md`（启动注入：界面缩放档位经 `--ui-scale` 传入渲染层）
 
 四级判定次序（08 §3.10 的「目标值怎么算」行 + 维护者 2026-10-01 裁决）
 --------------------------------------------------------------------

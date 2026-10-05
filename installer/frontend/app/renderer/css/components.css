@@ -67,18 +67,6 @@
   flex: 1;
 }
 
-.grid-2 {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: calc(var(--space-4) * var(--ui-scale));
-}
-
-@media (min-width: 1100px) {
-  .grid-2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
 .stack {
   display: flex;
   flex-direction: column;

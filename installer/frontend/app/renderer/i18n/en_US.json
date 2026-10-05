@@ -135,6 +135,6 @@
   "timezone.search": "Search",
   "timezone.title": "Timezone",
   "welcome.begin": "Get started",
-  "welcome.body": "This installer installs MipLinux to a whole disk on this machine.",
+  "welcome.body": "Built on Arch Linux, with NVIDIA drivers and Chinese support out of the box",
   "welcome.title": "Welcome to MipLinux"
 }

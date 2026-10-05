@@ -298,6 +298,10 @@ select {
   color: var(--text-muted);
   font-size: calc(var(--t-lead) * var(--ui-scale));
   line-height: var(--lh-snug);
+  /* 中文段落也不许在词中间断开（「中文本地 / 化」这种） */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  text-wrap: pretty;
 }
 
 .lead {

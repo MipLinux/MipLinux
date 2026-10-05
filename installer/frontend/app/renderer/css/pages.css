@@ -33,6 +33,11 @@
   gap: calc(var(--space-4) * var(--ui-scale));
 }
 
+/* 欢迎页的正文降一档：它是英雄区副文案，跟页面描述同号会显得压过大标题 */
+.welcome__copy .page-desc {
+  font-size: calc(var(--t-body) * var(--ui-scale));
+}
+
 /* 高级安装开关：一条细边行，不套整块面板（实机反馈：欢迎页组件「胖」） */
 .welcome__toggle {
   margin-top: calc(var(--space-2) * var(--ui-scale));

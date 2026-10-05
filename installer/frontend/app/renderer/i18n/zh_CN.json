@@ -135,6 +135,6 @@
   "timezone.search": "搜索",
   "timezone.title": "时区",
   "welcome.begin": "开始",
-  "welcome.body": "这个安装器会把 MipLinux 装到这台机器的整块磁盘上。",
+  "welcome.body": "基于 Arch Linux，开箱可用的 NVIDIA 驱动与中文本地化。",
   "welcome.title": "欢迎使用 MipLinux"
 }

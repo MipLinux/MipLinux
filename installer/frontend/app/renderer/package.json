@@ -1,0 +1,6 @@
+{
+  "//": "渲染层是浏览器 ES module；这份 package.json 只是让 Node（单测、探针）也按 ESM 解析这里的 .js。Electron 主进程与 preload 在上一层，仍是 CommonJS。",
+  "name": "mipl-installer-renderer",
+  "private": true,
+  "type": "module"
+}

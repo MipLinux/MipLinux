@@ -1,0 +1,83 @@
+/* 品牌色板 · 由 app/tools/gen-tokens.py 从 design/color.json 生成 —— 不要手改。
+ *
+ * 35 个 MD3 角色 × 亮/暗，种子 #2576E9（取自 logo，官方算法离线生成）。
+ * 换色板 = 改 design/color.json（或它的生成脚本）→ 跑 `python3 app/tools/gen-tokens.py --write`
+ * → 跑 `python3 app/tools/check-tokens.py` 确认与 docs/work/tech/08 附录 A.2 仍然一致。
+ */
+
+[data-theme="dark"] {
+  --md-primary: #adc6ff;
+  --md-on-primary: #102f60;
+  --md-primary-container: #2b4678;
+  --md-on-primary-container: #d8e2ff;
+  --md-secondary: #bfc6dc;
+  --md-on-secondary: #283041;
+  --md-secondary-container: #3f4759;
+  --md-on-secondary-container: #dbe2f9;
+  --md-tertiary: #debcdf;
+  --md-on-tertiary: #402843;
+  --md-tertiary-container: #583e5b;
+  --md-on-tertiary-container: #fbd7fc;
+  --md-error: #ffb4ab;
+  --md-on-error: #690005;
+  --md-error-container: #93000a;
+  --md-on-error-container: #ffdad6;
+  --md-surface: #111318;
+  --md-on-surface: #e2e2e9;
+  --md-surface-variant: #44474f;
+  --md-on-surface-variant: #c4c6d0;
+  --md-surface-dim: #111318;
+  --md-surface-bright: #37393e;
+  --md-surface-container-lowest: #0c0e13;
+  --md-surface-container-low: #1a1b20;
+  --md-surface-container: #1e1f25;
+  --md-surface-container-high: #282a2f;
+  --md-surface-container-highest: #33353a;
+  --md-outline: #8e9099;
+  --md-outline-variant: #44474f;
+  --md-scrim: #000000;
+  --md-shadow: #000000;
+  --md-surface-tint: #adc6ff;
+  --md-inverse-surface: #e2e2e9;
+  --md-inverse-on-surface: #2f3036;
+  --md-inverse-primary: #445e91;
+}
+
+[data-theme="light"] {
+  --md-primary: #445e91;
+  --md-on-primary: #ffffff;
+  --md-primary-container: #d8e2ff;
+  --md-on-primary-container: #2b4678;
+  --md-secondary: #565e71;
+  --md-on-secondary: #ffffff;
+  --md-secondary-container: #dbe2f9;
+  --md-on-secondary-container: #3f4759;
+  --md-tertiary: #715574;
+  --md-on-tertiary: #ffffff;
+  --md-tertiary-container: #fbd7fc;
+  --md-on-tertiary-container: #583e5b;
+  --md-error: #ba1a1a;
+  --md-on-error: #ffffff;
+  --md-error-container: #ffdad6;
+  --md-on-error-container: #93000a;
+  --md-surface: #f9f9ff;
+  --md-on-surface: #1a1b20;
+  --md-surface-variant: #e1e2ec;
+  --md-on-surface-variant: #44474f;
+  --md-surface-dim: #d9d9e0;
+  --md-surface-bright: #f9f9ff;
+  --md-surface-container-lowest: #ffffff;
+  --md-surface-container-low: #f3f3fa;
+  --md-surface-container: #ededf4;
+  --md-surface-container-high: #e8e7ee;
+  --md-surface-container-highest: #e2e2e9;
+  --md-outline: #74777f;
+  --md-outline-variant: #c4c6d0;
+  --md-scrim: #000000;
+  --md-shadow: #000000;
+  --md-surface-tint: #445e91;
+  --md-inverse-surface: #2f3036;
+  --md-inverse-on-surface: #f0f0f7;
+  --md-inverse-primary: #adc6ff;
+}
+

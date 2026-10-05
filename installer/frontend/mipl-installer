@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""mipl-installer —— Live 侧安装器入口（Issue #79 的启动器接线）。
+"""mipl-installer —— Live 侧安装器入口（Electron）
 
 谁拉起它
 --------
 `profile/airootfs/etc/systemd/system/mipl-installer.service` → `/usr/local/bin/mipl-kiosk`
 → `seatd-launch -- cage -s /usr/local/bin/mipl-installer`。
 构建把整个 `installer/` 拷到 `/usr/local/lib/mipl-installer/`，再把
-`/usr/local/bin/mipl-{installer,kiosk}` 软链进去 —— 所以**本文件必须用
-`os.path.realpath(__file__)` 找自己**，否则软链路径下找不到同级 `qml/`。
+`/usr/local/bin/mipl-{installer,kiosk}` 软链过去 —— 所以**本文件必须用
+`os.path.realpath(__file__)` 找自己**，否则软链路径下找不到同级 `app/` 与 `theme/`。
 
-本文件干三件事（接口准据：`installer/frontend/qml/README.md` §2）：
-1. **Qt 初始化之前**算出主题与设备层缩放：
-   - 主题：`--theme=auto|light|dark`，auto 用 `Mipl/theme/theme_mode.py` 的纯函数按本地时间解析（08 §3.9）；
-   - 设备层缩放：`--scale=1|2|3` 覆盖一切，否则读 sysfs DRM（分辨率 + EDID 物理尺寸）
-     喂 `Mipl/theme/device_scale.py`（08 §3.10）。这一步**不依赖 Qt**，因为
-     `QT_SCALE_FACTOR` 必须在 Qt 初始化前写进环境。
-2. 用 `qmlRegisterSingletonInstance` 注册单例实例 `MiplLaunch`（`theme` / `themeSource` /
-   `deviceScale`），**顺序固定为 注册 → 建引擎 → load**（README §3.8 实测的两个坑：
-   注册必须早于本进程第一次编译任何 Mipl 类型；`property QtObject` 顺序敏感）。
-3. `auto` 下用 30s `QTimer` 重算 `MiplLaunch.theme`（08 §3.9）；界面在 `MiplTheme.locked`
-   之后不再理会它（`MiplTheme.qml` 自己管）。
+本文件只干三件事，**不实现任何安装逻辑**：
+1. **Chromium 初始化之前**算好首帧主题与设备层缩放（两者都必须在进程启动前定下来）；
+2. 把 `--theme` / `--scale` / `--lang` 透给 Electron 主进程；
+3. `exec` Electron —— 本进程被替换掉，信号直接落到 Electron 上，kiosk 的 stop/kill 语义才干净。
 
-`--self-test`：离屏加载根页面、把注入值从 QML 侧读回来断言，打印摘要后退出 ——
-这是本任务唯一能在宿主机（`QT_QPA_PLATFORM=offscreen`）自动验收的路径。
+主题与缩放都是**纯函数**（`frontend/theme/*.py`，有单测）：
+  - 主题：`--theme=auto|light|dark`；**默认 auto** —— 按本地时间（07:00–18:59 亮）；
+    亮色是设计基线，用户可以锁定；
+  - 缩放：`--scale=auto|100|167|200`；auto 由分辨率推荐（`recommend_ui_scale_percent`，
+    2560×1600 → 167%）。**只有界面层这一层缩放** —— 设备层相乘会把高分屏推爆。
 
-纪律：前端只画界面、不做安装逻辑；后端（`installer/backend/`）不碰 Qt，本文件也不碰它。
+纪律：前端只画界面、不做安装逻辑；`installer/backend/` 不碰界面技术栈。
+接口准据：`installer/frontend/app/README.md`。
 """
 
 from __future__ import annotations
@@ -36,62 +33,49 @@ import importlib.util
 import logging
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
 LOG = logging.getLogger("mipl-installer")
 
 THEME_CHOICES = ("auto", "light", "dark")
-SCALE_CHOICES = (1, 2, 3)
+#: 默认跟随时间（白天亮、入夜暗）——「亮色为主」指的是设计基线，不是锁死亮色
+DEFAULT_THEME = "auto"
+#: 界面层缩放的档位（百分数；`auto` 走 device_scale.recommend_ui_scale_percent）
+SCALE_CHOICES = ("auto", "100", "167", "200")
+LANGUAGES = ("zh_CN", "en_US")
+SOURCE_LANGUAGE = "zh_CN"
 
-#: 注入契约（qml/README.md §2）：URI / 版本 / 单例名固定。
-QML_URI = "Mipl"
-QML_VERSION_MAJOR = 1
-QML_VERSION_MINOR = 0
-LAUNCH_SINGLETON = "MiplLaunch"
-
-#: 08 §3.9 建议的低频重算间隔。
-THEME_RECHECK_MS = 30_000
-
-#: `--scale` 覆盖时写进判定依据的 source —— 不是 device_scale.py 的四个来源之一，
-#: 因为它根本没过纯函数（手动覆盖「覆盖一切」）。
-SOURCE_MANUAL_OVERRIDE = "manual-override"
+#: Electron 可执行文件：Live 里由 profile/packages.x86_64 的 electron44 提供。
+ELECTRON_CANDIDATES = ("/usr/lib/electron44/electron", "/usr/bin/electron")
 
 #: sysfs DRM 连接器目录：/sys/class/drm/card0-HDMI-A-1/{status,modes,edid}。
 DRM_SYSFS = Path("/sys/class/drm")
+#: DRI 设备目录（有 renderD* 才说明这台机器有可用的 3D 节点）。
+DRI_DIR = Path("/dev/dri")
+
+#: 虚拟 / 无 3D 加速的 GPU 厂商号 —— 这些环境下 Chromium 拿不到可用的 GL，
+#: 只能走 SwiftShader 软渲染（QEMU 里就是这样）。
+#:   0x1af4 virtio-gpu · 0x1234 QEMU stdvga · 0x15ad VMware · 0x1b36 QXL
+#:   0x1ab8 Parallels · 0x1414 Microsoft Basic Render
+VIRTUAL_GPU_VENDORS = {"0x1af4", "0x1234", "0x15ad", "0x1b36", "0x1ab8", "0x1414"}
+
+#: 渲染器策略：auto = 按 GPU 探测；gpu = 强制硬件；software = 强制软渲染（排查用）
+RENDERER_CHOICES = ("auto", "gpu", "software")
 _MODE_RE = re.compile(r"^\s*(\d+)\s*[xX]\s*(\d+)\s*$")
 
-#: self-test 探针：从 QML 侧读回注入值，别只信 Python 对象自己。
-SELF_TEST_QML = b"""
-import QtQml
-import Mipl 1.0
-
-QtObject {
-    property string theme: MiplLaunch.theme
-    property string themeSource: MiplLaunch.themeSource
-    property real deviceScale: MiplLaunch.deviceScale
-    property bool dark: MiplTheme.dark
-}
-"""
 
 
 # ───────────────────────────── 路径与纯函数模块 ─────────────────────────────
 
 def frontend_dir() -> Path:
-    """本文件所在目录（**realpath 之后**）。
-
-    软链 `/usr/local/bin/mipl-installer` → `/usr/local/lib/mipl-installer/frontend/mipl-installer`，
-    只有 realpath 才能找回同级 `qml/`。
-    """
+    """本文件所在目录（**realpath 之后**）—— 软链路径下只有 realpath 能找回同级目录。"""
     return Path(os.path.realpath(__file__)).parent
 
 
 def load_pure_module(module_name: str, path: Path):
-    """按路径加载 theme 线的纯函数模块。
-
-    不进 `sys.path`（`theme` 不是包，且 `theme_mode` / `device_scale` 这种通用名字
-    容易和别人撞）；模块内容只依赖标准库，不会连带 import Qt。
-    """
+    """按路径加载 theme 线的纯函数模块（不进 sys.path，避免通用名撞车）。"""
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"加载不了纯函数模块：{path}")
@@ -105,10 +89,9 @@ def load_pure_module(module_name: str, path: Path):
     return module
 
 
-# ───────────────────────────── 设备层缩放（不依赖 Qt）─────────────────────────────
+# ───────────────────────────── 设备层缩放（纯计算）─────────────────────────────
 
 def _read_first_mode(path: Path):
-    """`modes` 的首行是首选分辨率（`1920x1080`），拿来当 resolution。"""
     try:
         with path.open("r", encoding="ascii", errors="replace") as handle:
             for line in handle:
@@ -121,7 +104,7 @@ def _read_first_mode(path: Path):
 
 
 def _read_edid_size(path: Path):
-    """EDID 的 0x15 / 0x16 字节 = 最大横向 / 纵向图像尺寸，单位 cm → 返回 mm。"""
+    """EDID 的 0x15 / 0x16 字节 = 最大横向 / 纵向图像尺寸（cm）→ mm。"""
     try:
         data = path.read_bytes()
     except OSError:
@@ -135,14 +118,10 @@ def _read_edid_size(path: Path):
 
 
 def read_display_info(sysfs: Path = DRM_SYSFS):
-    """扫 sysfs DRM，返回 `(resolution, physical_size)`；拿不到的项给 `None`。
-
-    只认 `connected` 的连接器；物理尺寸可能拿不到（虚拟显示 / QEMU / EDID 缺失），
-    那正是 §3.10 ③ 分辨率兜底要处理的输入 —— **不编值**。
-    """
+    """扫 sysfs DRM，返回 `(resolution, physical_size)`；拿不到的项给 `None`（不编值）。"""
     try:
         status_paths = sorted(sysfs.glob("card*-*/status"))
-    except OSError as exc:  # 连 /sys 都没有的容器
+    except OSError as exc:
         LOG.debug("扫描 %s 失败：%s", sysfs, exc)
         return (None, None)
 
@@ -158,41 +137,65 @@ def read_display_info(sysfs: Path = DRM_SYSFS):
         if resolution is None:
             continue
         return (resolution, _read_edid_size(connector / "edid"))
-
     return (None, None)
 
 
-def decide_device_scale(device_scale_module, override, resolution, physical_size):
-    """`--scale` 覆盖一切；否则走 08 §3.10 的四级判定。
+# ───────────────────────────── 主题（纯计算）─────────────────────────────
 
-    合成器侧 `wl_output::scale` 这里**拿不到**：要知道它得连上 Wayland，而那时 Qt 已经
-    初始化、`QT_SCALE_FACTOR` 也早定了 —— 设备层缩放必须在那之前算。两边正好对齐：
-    cage 里 `wl_output::scale` 恒为 1，而 `device_scale()` 明确把 `== 1` 当「没有信息」
-    不短路（README §2）；所以传 `None` 与传 `1` 判定完全等价，传 `None` 更诚实。
+def detect_gpu(sysfs: Path = DRM_SYSFS, dri: Path = DRI_DIR):
+    """探测可用的 GPU。
+
+    返回 `(vendor_id, card_name)`；只有**非虚拟**厂商、且存在 `renderD*` 节点才算数 ——
+    光有 `/dev/dri/card0`（KMS）不等于 Chromium 能拿到 GL。
+    没有任何可用 GPU → `None`（调用方走软渲染）。
     """
-    if override is not None:
-        return device_scale_module.DeviceScale(
-            override,
-            source=SOURCE_MANUAL_OVERRIDE,
-            reason=f"--scale={override} 手动覆盖一切（08 §3.10「手动覆盖」档）",
-        )
-    return device_scale_module.device_scale(
-        output_scale=None,
-        physical_size=physical_size,
-        resolution=resolution,
-    )
+    try:
+        render_nodes = sorted(dri.glob("renderD*"))
+    except OSError:
+        render_nodes = []
+    if not render_nodes:
+        return None
+
+    for card in sorted(sysfs.glob("card[0-9]*")):
+        try:
+            vendor = (card / "device" / "vendor").read_text(encoding="ascii").strip().lower()
+        except OSError:
+            continue
+        if not vendor:
+            continue
+        if vendor in VIRTUAL_GPU_VENDORS:
+            LOG.info("跳过虚拟 GPU %s（%s）", card.name, vendor)
+            continue
+        return (vendor, card.name)
+    return None
 
 
-# ───────────────────────────── 主题（不依赖 Qt）─────────────────────────────
+def renderer_switches(policy: str, gpu) -> list[str]:
+    """按策略/探测结果给出 Chromium 的渲染开关。
+
+    **为什么默认不写死 SwiftShader**：曾经为了 QEMU 把 `--use-gl=angle --use-angle=swiftshader`
+    写死，结果真机（NVIDIA 驱动装好）也在软件渲染 —— 动画卡顿、操作延迟全从这里来。
+    现在只有「没有可用 GPU」或显式要求时才软渲染。
+    """
+    if policy == "software" or (policy == "auto" and gpu is None):
+        LOG.warning("渲染：SwiftShader 软件渲染（%s）", "显式指定" if policy == "software" else "没有可用的 GPU/render 节点")
+        return ["--use-gl=angle", "--use-angle=swiftshader"]
+
+    LOG.info("渲染：硬件加速（GPU %s %s）", gpu[0] if gpu else "?", gpu[1] if gpu else "-")
+    # NVIDIA 的专有驱动常年在 Chromium 的 blocklist 上：不忽略就悄悄退回软件合成
+    return [
+        "--enable-gpu-rasterization",
+        "--ignore-gpu-blocklist",
+        "--enable-zero-copy",
+    ]
+
 
 def decide_initial_theme(theme_mode, theme_arg: str, now):
-    """返回 `(theme, theme_source)`：`--theme=light|dark` 走 manual，auto 走时间。"""
+    """返回 `(theme, theme_source)`：显式 light/dark 走 manual，auto 走时间。"""
     if theme_arg == "auto":
         return (theme_mode.resolve_theme(now, theme_mode.SOURCE_AUTO), "auto")
     return (
-        theme_mode.resolve_theme(
-            now, theme_mode.SOURCE_MANUAL, manual_dark=(theme_arg == "dark")
-        ),
+        theme_mode.resolve_theme(now, theme_mode.SOURCE_MANUAL, manual_dark=(theme_arg == "dark")),
         "manual",
     )
 
@@ -202,235 +205,107 @@ def decide_initial_theme(theme_mode, theme_arg: str, now):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mipl-installer",
-        description="MipLinux Live 安装器入口（由 mipl-kiosk 经 seatd-launch + cage 拉起）",
+        description="MipLinux Live 安装器入口（Electron；由 mipl-kiosk 经 seatd-launch + cage 拉起）",
     )
-    parser.add_argument(
-        "--theme",
-        choices=THEME_CHOICES,
-        default="auto",
-        help="首帧主题：auto（按本地时间，07:00–18:59 亮）/ light / dark（默认 auto）",
-    )
-    parser.add_argument(
-        "--scale",
-        type=int,
-        choices=SCALE_CHOICES,
-        default=None,
-        help="设备层缩放 1|2|3，覆盖一切自动判定（默认按 DRM 信息算）",
-    )
-    parser.add_argument(
-        "--self-test",
-        action="store_true",
-        help="离屏加载根页面并断言注入值，打印摘要后退出（宿主机的自动验收路径）",
-    )
+    parser.add_argument("--theme", choices=THEME_CHOICES, default=DEFAULT_THEME,
+                        help="首帧主题：light（默认）/ dark / auto（按本地时间 07:00–18:59）")
+    parser.add_argument("--scale", choices=SCALE_CHOICES, default="auto",
+                        help="界面层缩放：auto（默认，按分辨率推荐）/ 100 / 167 / 200")
+    parser.add_argument("--lang", choices=LANGUAGES, default=SOURCE_LANGUAGE,
+                        help="界面语言：zh_CN（源语言，默认）/ en_US")
+    parser.add_argument("--electron", default=None,
+                        help="Electron 可执行文件（默认 /usr/lib/electron44/electron，再退 PATH）")
+    parser.add_argument("--renderer", choices=RENDERER_CHOICES, default="auto",
+                        help="渲染器：auto（默认，按 GPU 探测）/ gpu / software（排查用）")
+    parser.add_argument("--print-plan", action="store_true",
+                        help="只打印将要执行的命令与判定依据后退出（宿主机排查用，不启动界面）")
     return parser
+
+
+def find_electron(explicit):
+    if explicit:
+        return explicit
+    for candidate in ELECTRON_CANDIDATES:
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which("electron")
 
 
 # ───────────────────────────── main ─────────────────────────────
 
 def main(argv=None) -> int:
     argv = list(argv) if argv is not None else list(sys.argv)
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stderr,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     args = build_parser().parse_args(argv[1:])
 
     here = frontend_dir()
-    qml_dir = here / "qml"
-    theme_dir = qml_dir / "Mipl" / "theme"
-    main_qml = qml_dir / "Mipl" / "Main.qml"
-
-    if not main_qml.is_file():
-        LOG.error("找不到根页面：%s（本文件在 %s）", main_qml, here)
+    app_dir = here / "app"
+    theme_dir = here / "theme"
+    if not (app_dir / "main.js").is_file():
+        LOG.error("找不到 Electron 应用：%s（本文件在 %s）", app_dir, here)
         return 1
+
     try:
         theme_mode = load_pure_module("mipl_theme_mode", theme_dir / "theme_mode.py")
-        device_scale_module = load_pure_module(
-            "mipl_device_scale", theme_dir / "device_scale.py"
-        )
+        device_scale_module = load_pure_module("mipl_device_scale", theme_dir / "device_scale.py")
     except (OSError, ImportError) as exc:
         LOG.error("加载 theme 纯函数失败：%s", exc)
         return 1
 
-    # ---- ① 设备层缩放：先算、先写环境变量；此刻还没 import 任何 Qt ----
-    resolution, physical_size = read_display_info()
-    decision = decide_device_scale(
-        device_scale_module, args.scale, resolution, physical_size
-    )
-    if decision.log_required:
-        # 08 §3.10 ④ 的硬要求：拿不到任何信息时落 1x 也**必须**留一条日志，不静默。
-        LOG.warning(
-            "device scale 落到 %sx（来源 %s）：%s",
-            int(decision),
-            decision.source,
-            decision.reason,
+    # ---- ① 界面层缩放（**只有这一层**，维护者 2026-10-04）----
+    # 设备层（1x/2x/3x）不再单独生效：两层相乘会把 4K 屏推到 4x。
+    # 这里按分辨率推荐档位，渲染层的「自动检测」档读的就是这个值。
+    resolution, _physical_size = read_display_info()
+    if args.scale == "auto":
+        ui_scale = device_scale_module.recommend_ui_scale_percent(
+            resolution[0] if resolution else None,
+            resolution[1] if resolution else None,
         )
-        for note in decision.notes:
-            LOG.warning("device scale 备注：%s", note)
-    # Qt 初始化就吃这个变量，所以必须在 import PySide6 之前 set。
-    os.environ["QT_SCALE_FACTOR"] = str(int(decision))
-    LOG.info(
-        "设备层缩放 %sx（来源 %s）→ QT_SCALE_FACTOR=%s；判定：%s",
-        int(decision),
-        decision.source,
-        os.environ["QT_SCALE_FACTOR"],
-        decision.reason,
-    )
+        LOG.info("界面缩放 auto → %s%%（按分辨率 %s 推荐）", ui_scale,
+                 f"{resolution[0]}×{resolution[1]}" if resolution else "拿不到")
+    else:
+        ui_scale = int(args.scale)
+        LOG.info("界面缩放 %s%%（--scale 显式指定）", ui_scale)
 
-    # ---- ② 首帧主题：同样在 Qt 之前定（P5 / 08 §3.9）----
+    # ---- ② 首帧主题 ----
     now = datetime.datetime.now()
     theme, theme_source = decide_initial_theme(theme_mode, args.theme, now)
     LOG.info("首帧主题 %s（themeSource=%s，本地时间 %s）", theme, theme_source, now)
 
-    # ---- ③ Qt：到这里才 import，确保 QT_SCALE_FACTOR 已经生效 ----
-    try:
-        from PySide6.QtCore import Property, QObject, Qt, QTimer, QUrl, Signal, Slot
-        from PySide6.QtGui import QGuiApplication, QWindow
-        from PySide6.QtQml import QQmlApplicationEngine, QQmlComponent
-        from PySide6.QtQml import qmlRegisterSingletonInstance
-    except ImportError as exc:  # Live 里由 pyside6 提供
-        LOG.error("装不上 PySide6：%s（Live 里由 profile/packages.x86_64 的 pyside6 带进来）", exc)
+    # ---- ③ 组装 Electron 命令行 ----
+    electron = find_electron(args.electron)
+    if electron is None:
+        LOG.error("找不到 Electron（找过 %s 与 PATH）—— Live 里由 electron44 包提供",
+                  "、".join(ELECTRON_CANDIDATES))
         return 1
 
-    class MiplLaunch(QObject):
-        """注入给 QML 的启动期状态（qml/README.md §2 的三个属性）。"""
-
-        themeChanged = Signal()
-
-        def __init__(self, initial_theme, source, device_scale_value):
-            super().__init__()
-            self._theme = initial_theme
-            self._theme_source = source
-            self._device_scale = float(device_scale_value)
-
-        @Property(str, notify=themeChanged)
-        def theme(self):  # noqa: N802 —— QML 属性名就是 `theme`
-            return self._theme
-
-        @Property(str, constant=True)
-        def themeSource(self):
-            return self._theme_source
-
-        @Property(float, constant=True)
-        def deviceScale(self):
-            return self._device_scale
-
-        @Slot()
-        def refresh_theme(self):
-            """30s 定时器回调：只有 auto 才重算；界面锁定与否由 QML 侧管。"""
-            if self._theme_source != "auto":
-                return
-            new_theme = theme_mode.resolve_theme(
-                datetime.datetime.now(), theme_mode.SOURCE_AUTO
-            )
-            if new_theme != self._theme:
-                LOG.info("主题随定时重算切换：%s → %s", self._theme, new_theme)
-                self._theme = new_theme
-                self.themeChanged.emit()
-
-    app = QGuiApplication(argv)
-
-    launch = MiplLaunch(theme, theme_source, decision)
-
-    # 注册必须早于本进程第一次编译任何 Mipl 类型（README §3.8）→ 注册 → 建引擎 → load。
-    #
-    # ⚠️ PySide6 的绑定签名与 C++ 模板不同（6.11.2 运行时核对）：
-    #     C++ : qmlRegisterSingletonInstance<T>(uri, major, minor, name, obj)
-    #     PySide6: qmlRegisterSingletonInstance(type_obj, uri, major, minor, name, obj)
-    # 即把 T 作为**第一个位置实参**。README §2 里那行是 C++ 形态，照抄会 TypeError。
-    qmlRegisterSingletonInstance(
-        MiplLaunch, QML_URI, QML_VERSION_MAJOR, QML_VERSION_MINOR,
-        LAUNCH_SINGLETON, launch,
-    )
-
-    engine = QQmlApplicationEngine()
-    engine.addImportPath(str(qml_dir))
-    engine.load(QUrl.fromLocalFile(str(main_qml)))
-
-    if not engine.rootObjects():
-        LOG.error("根页面加载失败（0 个根对象）：%s", main_qml)
-        return 1
-
-    # ---- ③.5 根窗口按 kiosk 要求摆好：**无边框 + 全屏** ----
-    # QML 里已经写了 `flags` / `visibility`，这里再做一次是因为部分合成器要等窗口 show 之后
-    # 才认 `visibility: Window.FullScreen` —— 而 kiosk 不允许「先带标题栏闪一帧、再全屏」。
-    # 桌面合成器下没有这两句就会看到标题栏与最小化/最大化/关闭按钮（维护者 2026-10-02 指出）。
-    root_window = engine.rootObjects()[0]
-    if hasattr(root_window, "showFullScreen"):
-        root_window.setFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
-        root_window.showFullScreen()
-    else:
-        LOG.warning("根对象不是窗口（%s），跳过全屏设置", type(root_window).__name__)
-
-    # ---- ④ --self-test：从 QML 侧读回注入值再断言 ----
-    if args.self_test:
-        component = QQmlComponent(engine)
-        component.setData(SELF_TEST_QML, QUrl())
-        probe = component.create()
-        if probe is None:
-            errors = "; ".join(e.toString() for e in component.errors())
-            LOG.error("[self-test] 探针组件创建失败：%s", errors or "（无错误信息）")
-            return 1
-
-        expected_scale = os.environ["QT_SCALE_FACTOR"]
-        root = root_window
-
-        # 复核线 2026-10-02 的 F-B：只比 MiplLaunch.* 读不出「QT_SCALE_FACTOR 设晚了」——
-        # 那种情况下 devicePixelRatio 仍是 1，而下面 5 条断言照样全过。把 Qt **实际生效**的
-        # devicePixelRatio 也断言进来，这条自证缺口才闭上。
-        screen = QGuiApplication.primaryScreen()
-        screen_dpr = float(screen.devicePixelRatio()) if screen is not None else -1.0
-        window_dpr = float(root.devicePixelRatio())
-        expected_dpr = float(int(decision))
-
-        checks = [
-            ("MiplLaunch.theme", probe.property("theme"), launch.theme),
-            ("MiplLaunch.themeSource", probe.property("themeSource"), launch.themeSource),
-            ("MiplLaunch.deviceScale", probe.property("deviceScale"), launch.deviceScale),
-            ("MiplTheme.dark", probe.property("dark"), launch.theme == "dark"),
-            ("QT_SCALE_FACTOR", expected_scale, str(int(decision))),
-            ("屏幕 devicePixelRatio", screen_dpr, expected_dpr),
-            ("根窗口 devicePixelRatio", window_dpr, expected_dpr),
-            ("根窗口无边框", bool(root_window.flags() & Qt.WindowType.FramelessWindowHint), True),
-            ("根窗口全屏", root_window.visibility() == QWindow.Visibility.FullScreen, True),
-        ]
-        failed = [(name, got, want) for name, got, want in checks if got != want]
-
-        print(f"[self-test] 根页面：{main_qml}")
-        print(f"[self-test] 根对象：{root.metaObject().className()}（创建成功）")
-        print(f"[self-test] MiplLaunch.theme = {launch.theme!r}（themeSource={launch.themeSource!r}）")
-        print(f"[self-test] MiplTheme.dark = {probe.property('dark')}")
-        print(
-            f"[self-test] MiplLaunch.deviceScale = {launch.deviceScale}"
-            f"（QT_SCALE_FACTOR={expected_scale}，来源 {decision.source}）"
-        )
-        print(f"[self-test] 设备层判定：{decision.reason}")
-        print(
-            f"[self-test] devicePixelRatio = {screen_dpr}（屏幕）/ {window_dpr}（根窗口）"
-            f"，期望 {expected_dpr}"
-        )
-        print(
-            f"[self-test] 根窗口 visibility = {root_window.visibility()}"
-            f"，frameless = {bool(root_window.flags() & Qt.WindowType.FramelessWindowHint)}"
-        )
-        for name, got, want in failed:
-            print(f"[self-test] FAIL {name}: 实际 {got!r}，期望 {want!r}")
-        if failed:
-            return 1
-        print("[self-test] OK")
+    gpu = detect_gpu()
+    render_mode = "software" if (args.renderer == "software" or (args.renderer == "auto" and gpu is None)) else "gpu"
+    command = [
+        electron,
+        str(app_dir),
+        f"--theme={theme}",
+        f"--lang={args.lang}",
+        f"--ui-scale={ui_scale}",
+        f"--renderer-mode={render_mode}",
+        # kiosk 场景的开关写死在启动器里，不散到别处：
+        "--no-sandbox",                     # Live 里安装器就是 root，Chromium 沙箱在 root 下拒绝启动
+        "--ozone-platform=wayland",         # cage 是 Wayland 合成器；Live 里没有 XWayland 可退
+        "--force-device-scale-factor=1",    # 缩放统一由界面层承担，见上
+        *renderer_switches(args.renderer, gpu),
+    ]
+    LOG.info("exec：%s", " ".join(command))
+    if args.print_plan:
+        print(" ".join(command))
         return 0
 
-    # ---- ⑤ auto：30s 低频重算（08 §3.9）----
-    if theme_source == "auto":
-        timer = QTimer()
-        timer.setInterval(THEME_RECHECK_MS)
-        timer.timeout.connect(launch.refresh_theme)
-        timer.start()
-        launch._theme_timer = timer  # 绑定生命周期，防止被 GC
-
-    return app.exec()
+    # ---- ④ exec：本进程被 Electron 取代（信号直落 Electron，stop/kill 语义才干净）----
+    try:
+        os.execv(electron, command)
+    except OSError as exc:
+        LOG.error("启动 Electron 失败：%s", exc)
+        return 1
 
 
 if __name__ == "__main__":

@@ -140,11 +140,23 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual(code, EXIT_USAGE)
         self.assertIn("不认识的阶段", output)
 
-    def test_missing_disk_argument_is_argparse_error(self):
+    def test_missing_disk_argument_is_a_usage_error(self):
+        """`--disk` 不再是 argparse 的必填项（只读出口不该逼人先指一块盘），
+        但**安装模式**下缺了它照样是 `EXIT_USAGE`。
+
+        这条守的是「退出码没变」而不是「谁报的错」：脚本与文档按退出码分流，
+        从 `SystemExit(2)` 换成 `return 2` 如果顺手改成了别的码，外面看不出来。
+        """
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as ctx:
-                cli.main(["--dry-run"])
-        self.assertEqual(ctx.exception.code, EXIT_USAGE)
+            code = cli.main(["--dry-run"])
+        self.assertEqual(code, EXIT_USAGE)
+
+    def test_disk_is_still_required_for_installing(self):
+        """反过来钉一次：给了 `--disk` 就不再抱怨它 —— 否则上面那条可以被
+        「一律返回 EXIT_USAGE」蒙过去。"""
+        code, output = self._run(["--disk", "/dev/vda", "--yes", "--dry-run", "--steps", "disk"])
+        self.assertEqual(code, util.EXIT_OK, output)
+        self.assertNotIn("要装系统就得指出目标盘", output)
 
 
 if __name__ == "__main__":

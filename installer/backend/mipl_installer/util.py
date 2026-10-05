@@ -35,12 +35,26 @@ DRY = "<dry-run>"
 
 
 class InstallerError(Exception):
-    """带退出码的失败。消息面向用户，hint 是「接下来敲什么」。"""
+    """带退出码的失败。消息面向用户，hint 是「接下来敲什么」。
 
-    def __init__(self, message: str, exit_code: int = EXIT_UNEXPECTED, hint: str | None = None) -> None:
+    `reason` 是给**界面**用的机器可读代码（`format` / `notInList` / `notFound` …）：
+    界面有一份自己的文案表（中/英），不能把后端这句中文直接摆上去 —— 英文模式会露馅。
+    有 `reason` 时界面走它自己的句子，没有就当普通失败只显示消息。
+    **只有校验类失败需要它**；装包/引导那些失败的文案本来就不翻译。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        exit_code: int = EXIT_UNEXPECTED,
+        hint: str | None = None,
+        *,
+        reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         self.hint = hint
+        self.reason = reason
 
     def render(self) -> str:
         text = str(self)

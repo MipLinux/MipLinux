@@ -2,22 +2,42 @@
 
 M1 没有界面（界面是 M2），所以这个 CLI 就是 core 的第一个调用者 ——
 它只做三件事：解析参数、翻译成 `Plan`、把失败翻译成退出码。
-**逻辑一行都不许写在这里**（包括那段编排循环）：M2 的 Qt 前端要复用的正是它，
-在这儿再写一份就等于有了两份会漂移的真相。编排在 `pipeline.py`。
+**逻辑一行都不许写在这里**（包括那段编排循环）：安装器界面要复用的正是它，
+在这儿再写一份就等于有了两份会漂移的真相。编排在 `pipeline.py`，
+只读出口在 `queries.py`。
 
-密码只走 stdin，绝不进 argv —— argv 会留在进程列表与日志里。
+## 这个入口有两种用法
+
+| 用法 | 例子 | stdout 上是什么 |
+|---|---|---|
+| **安装**（默认） | `--disk /dev/vda --yes --password-stdin` | 人读的过程（`TextReporter`）或 JSON 行（`--json-events`） |
+| **只读出口** | `--print-disks` / `--print-keymap de` | **恰好一份 JSON 文档**，别的什么都没有 |
+
+只读出口的那一支里，`Runner` 的旁白走 **stderr** —— 混进 stdout 会让
+「读一份 JSON」变成「先剥掉几行人话」，那正是前端最不该做的事。
+
+## 两个不进 argv 的东西
+
+* **密码**只走 stdin（argv 会留在进程列表与日志里）。
+* **取消**走 `SIGUSR1`，不是 `SIGINT`/`SIGTERM`：后两个是「立刻去死」的语义，
+  而装盘装到一半被杀，留下的是一个谁都说不清的半成品。收到 `SIGUSR1` 只是
+  **举手**，真正的取消发生在**阶段之间**（`pipeline.run(should_cancel=…)`），
+  退出码 130、并按与失败相同的路径卸载目标。终端里按 Ctrl-C 的语义不变
+  （`SIGINT` 仍然立刻中断），因为敲键盘的人看得见自己打断了什么。
 """
 
 from __future__ import annotations
 
 import argparse
 import getpass
+import json
+import signal
 import sys
 
-from . import disk, packages, pipeline, util, __version__
-from .events import TextReporter
+from . import disk, packages, pipeline, queries, util, __version__
+from .events import JsonReporter, TextReporter
 from .pipeline import STEP_ORDER, Plan, parse_steps
-from .util import EXIT_GUARD, EXIT_USAGE, InstallerError
+from .util import EXIT_GUARD, EXIT_USAGE, InstallerError, Runner
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,9 +49,13 @@ def build_parser() -> argparse.ArgumentParser:
             "例：\n"
             "  python3 -m mipl_installer --disk /dev/vda --yes --password-stdin\n"
             "  python3 -m mipl_installer --disk /dev/vda --dry-run   # 只打印命令，不动盘\n"
+            "  python3 -m mipl_installer --print-disks               # 只读出口：候选人选一块盘\n"
+            "  python3 -m mipl_installer --print-keymap de           # 只读出口：键位预览\n"
         ),
     )
-    parser.add_argument("--disk", required=True, help="目标盘（整块盘，例如 /dev/vda）")
+    # `--disk` **不是** required：只读出口不该逼人先指一块盘。安装模式下缺了它
+    # 由 `queries.require_disk_argv()` 报错，文案与原来的 argparse 提示一致。
+    parser.add_argument("--disk", default=None, help="目标盘（整块盘，例如 /dev/vda）；安装模式下必填")
     parser.add_argument("--target", default="/mnt", help="目标系统的挂载点（默认 /mnt）")
     parser.add_argument("--hostname", default="mipl", help="装后系统的主机名")
     parser.add_argument("--user", default="mipl", help="要创建的用户（wheel 组，能 sudo）")
@@ -58,6 +82,36 @@ def build_parser() -> argparse.ArgumentParser:
                         help="不写固件引导项（只在非 Live 环境排练时用，避免动开发机的主板）")
     parser.add_argument("--keep-mounted", action="store_true", help="装完不卸载目标（调试用）")
     parser.add_argument("--log", default=None, help="把过程写一份日志到文件")
+    parser.add_argument("--json-events", action="store_true",
+                        help="进度走 JSON 行（安装器界面用的协议），而不是人读的文本")
+
+    # ── 只读出口 ──────────────────────────────────────────────────────
+    # 一次只跑一个：它们互为替代，同时给两个只会让人猜哪个生效。
+    # 名字与 queries.EXITS / queries 里的函数一一对应。
+    exits = parser.add_argument_group(
+        "只读出口",
+        "看一眼运行环境，不动盘、不需要 root（--connect-wifi 除外，它会真的联网）。"
+        "输出恰好一份 JSON 文档。",
+    )
+    pick = exits.add_mutually_exclusive_group()
+    pick.add_argument("--print-disks", action="store_true", help="候选盘（sysfs 枚举 + blkid）")
+    pick.add_argument("--print-network", action="store_true", help="网络现状（有线 / 无线）")
+    pick.add_argument("--print-wifi", action="store_true", help="周围的无线网络，按信号排序")
+    pick.add_argument("--print-timezones", action="store_true", help="时区名单 + 当前偏移")
+    pick.add_argument("--print-locales", action="store_true", help="语言名单（/usr/share/i18n/SUPPORTED）")
+    pick.add_argument("--print-keymaps", action="store_true", help="键盘映射名单（localectl 的写法）")
+    pick.add_argument("--print-keymap", metavar="名字", default=None,
+                      help="一份键盘映射解析完的样子：主键区要的 keycode → 字符")
+    pick.add_argument("--print-plan", action="store_true", help="摘要页要的「装成什么样」")
+    pick.add_argument("--check-hostname", metavar="名字", default=None, help="主机名合不合规")
+    pick.add_argument("--check-locale", metavar="名字", default=None, help="语言在不在名单里")
+    pick.add_argument("--check-keymap", metavar="名字", default=None, help="键盘映射在不在名单里")
+    pick.add_argument("--check-timezone", metavar="名字", default=None, help="时区存不存在")
+    pick.add_argument("--connect-wifi", metavar="SSID", default=None,
+                      help="连一个无线网络；密码从 stdin 读一行")
+    exits.add_argument("--rescan", action="store_true",
+                       help="配合 --print-wifi：让 NetworkManager 重新扫一遍（慢几秒）")
+
     parser.add_argument("--version", action="version", version=f"mipl_installer {__version__}")
     return parser
 
@@ -166,17 +220,130 @@ def confirm_hook(args: argparse.Namespace) -> pipeline.ConfirmHook:
     return hook
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    reporter = TextReporter(log_path=args.log)
+# ── 取消 ──────────────────────────────────────────────────────────────
+class CancelFlag:
+    """`SIGUSR1` 举手，阶段之间生效。
+
+    内容极简，但 `__call__` 是刻意的：`pipeline.run(should_cancel=…)` 要的就是一个
+    「问一下要不要停」的可调用对象，这个类本身就是那个对象，不用再包一层 lambda。
+    """
+
+    def __init__(self) -> None:
+        self.requested = False
+
+    def request(self, *_args: object) -> None:
+        self.requested = True
+
+    def __call__(self) -> bool:
+        return self.requested
+
+
+# ── 只读出口 ──────────────────────────────────────────────────────────
+def query_requested(args: argparse.Namespace) -> bool:
+    """这次调用是不是只读出口。**判断只写这一处** —— argparse 那边加一个开关、
+    这里忘了加，症状是那个开关被当成安装模式、然后抱怨没给 `--disk`。"""
+    return any(
+        (
+            args.print_disks,
+            args.print_network,
+            args.print_wifi,
+            args.print_timezones,
+            args.print_locales,
+            args.print_keymaps,
+            args.print_keymap is not None,
+            args.print_plan,
+            args.check_hostname is not None,
+            args.check_locale is not None,
+            args.check_keymap is not None,
+            args.check_timezone is not None,
+            args.connect_wifi is not None,
+        )
+    )
+
+
+def read_wifi_password() -> str:
+    """Wi-Fi 密码从 stdin 读一行；TTY 下改成不回显地问。
+
+    开放网络（无密码）就是空串 —— 所以这里不像 `--password-stdin` 那样拒绝空行。
+    """
+    if sys.stdin.isatty():
+        return getpass.getpass("Wi-Fi 密码（开放网络直接回车）：")
+    return sys.stdin.readline().rstrip("\n")
+
+
+def run_query(args: argparse.Namespace) -> int:
+    """跑一个只读出口，把结果打到 stdout。
+
+    stdout 上**恰好一份 JSON 文档**，所以 `Runner` 的旁白（`--print-disks` 会跑
+    `blkid`）走 stderr。混进 stdout 会让消费方「读一份 JSON」变成「先剥掉几行人话」，
+    而那正是前端最不该做的事。
+    """
+    narration = TextReporter(stream=sys.stderr, log_path=args.log)
+    runner = Runner(narration)
     try:
-        password, root_password = read_passwords(args)
+        if args.print_disks:
+            payload = queries.disks(runner)
+        elif args.print_network:
+            payload = queries.network_state(runner)
+        elif args.print_wifi:
+            payload = queries.wifi(runner, rescan=args.rescan)
+        elif args.print_timezones:
+            payload = queries.timezones()
+        elif args.print_locales:
+            payload = queries.locales()
+        elif args.print_keymaps:
+            payload = queries.keymaps()
+        elif args.print_keymap is not None:
+            payload = queries.keymap(args.print_keymap)
+        elif args.print_plan:
+            payload = queries.plan_summary(runner)
+        elif args.check_hostname is not None:
+            payload = queries.check_hostname(args.check_hostname)
+        elif args.check_locale is not None:
+            payload = queries.check_locale(args.check_locale)
+        elif args.check_keymap is not None:
+            payload = queries.check_keymap(args.check_keymap)
+        elif args.check_timezone is not None:
+            payload = queries.check_timezone(args.check_timezone)
+        elif args.connect_wifi is not None:
+            payload = queries.connect_wifi(runner, args.connect_wifi, read_wifi_password())
+        else:  # pragma: no cover - query_requested() 与上面这支必须同步
+            raise InstallerError(
+                "这个只读出口没有实现",
+                util.EXIT_UNEXPECTED,
+                hint="cli.query_requested() 与 cli.run_query() 的分支对不上了",
+            )
     except InstallerError as exc:
         print(f"[失败] {exc.render()}", file=sys.stderr)
-        reporter.close()
         return exc.exit_code
+    finally:
+        narration.close()
+
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return util.EXIT_OK
+
+
+# ── 安装 ──────────────────────────────────────────────────────────────
+def report_failure(reporter, exc: InstallerError, *, json_mode: bool) -> None:
+    """失败的两种说法：人读的进 stderr，界面读的进事件流（**两种都要**）。
+
+    JSON 模式下 stderr 也留着 —— 实机上 `journalctl -u mipl-installer` 收的是
+    子进程的 stderr，只发事件流的话，日志里就只剩一行行 JSON 了。
+    """
+    if json_mode:
+        reporter.error(exc.exit_code, str(exc), exc.hint)
+    print(f"[失败] {exc.render()}", file=sys.stderr)
+
+
+def run_install(args: argparse.Namespace) -> int:
+    json_mode = bool(args.json_events)
+    reporter = JsonReporter(log_path=args.log) if json_mode else TextReporter(log_path=args.log)
+    cancel = CancelFlag()
+    previous = signal.signal(signal.SIGUSR1, cancel.request)
+    code = util.EXIT_OK
     try:
+        queries.require_disk_argv(args.disk)
+        password, root_password = read_passwords(args)
         pipeline.run(
             build_plan(args),
             reporter,
@@ -184,16 +351,30 @@ def main(argv: list[str] | None = None) -> int:
             root_password=root_password,
             confirm=confirm_hook(args),
             dry_run=args.dry_run,
+            should_cancel=cancel,
         )
     except InstallerError as exc:
-        print(f"[失败] {exc.render()}", file=sys.stderr)
-        return exc.exit_code
+        code = exc.exit_code
+        report_failure(reporter, exc, json_mode=json_mode)
     except KeyboardInterrupt:
-        print("\n[中断] 用户取消", file=sys.stderr)
-        return pipeline.EXIT_CANCELLED
+        code = pipeline.EXIT_CANCELLED
+        report_failure(reporter, InstallerError("用户取消", code), json_mode=json_mode)
     except Exception as exc:  # noqa: BLE001 - 兜底也要给退出码，别让 traceback 当成成功
-        print(f"[失败] 未预期的异常：{exc!r}", file=sys.stderr)
-        return util.EXIT_UNEXPECTED
+        code = util.EXIT_UNEXPECTED
+        report_failure(reporter, InstallerError(f"未预期的异常：{exc!r}", code), json_mode=json_mode)
     finally:
+        signal.signal(signal.SIGUSR1, previous)
+        # `end` 一定要发：界面靠它把「子进程结束了」和「装完了」分开 ——
+        # 只看 close 事件的话，被杀掉的进程和装完的进程长得一模一样。
+        if json_mode:
+            reporter.finish(code)
         reporter.close()
-    return util.EXIT_OK
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if query_requested(args):
+        return run_query(args)
+    return run_install(args)

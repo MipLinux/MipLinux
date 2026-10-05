@@ -176,6 +176,7 @@ def preflight(plan: Plan) -> None:
     """
     configure.validate_user(plan.user)
     options.validate_hostname(plan.hostname)
+    options.validate_locale(plan.locale)
     options.validate_timezone(plan.timezone)
     options.validate_keymap(plan.keymap)
 

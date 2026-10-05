@@ -12,6 +12,13 @@ on:
   pull_request:
     # 刻意**不挂 synchronize**：每次 push 都刷一条评论 = 噪音，而且那时判据往往还没跑完。
     types: [opened, ready_for_review]
+  # 手动重跑：改完 PR 正文、或想刷新那条已经过期的评论时用（能 dispatch 的人本来就有写权限，
+  # 所以这条路径不需要再过 author_association 那道门）。
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR 编号'
+        required: true
 
 permissions:
   issues: write
@@ -23,8 +30,9 @@ jobs:
     # 只对与本仓库有关联的人跑（与 ai-summary 同一套门；仓库公开，陌生人不该花我们的 token）。
     # CONTRIBUTOR 必须保留 —— 实测本仓库里作者是组织 owner 时事件负载给的也是 CONTRIBUTOR。
     if: >
-      !github.event.pull_request.draft &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)
+      github.event_name == 'workflow_dispatch' ||
+      (!github.event.pull_request.draft &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association))
     runs-on: ubuntu-latest
 
     steps:
@@ -34,6 +42,11 @@ jobs:
       - name: fork PR 没有 secret，明确跳过（不是失败）
         id: fork
         run: |
+          # 手动重跑时不检查 fork（能 dispatch 的人有写权限，secret 也拿得到）
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
             echo "skip=true" >>"$GITHUB_OUTPUT"
             echo "::notice::来自 fork 的 PR 拿不到本仓库的 secret，本次跳过验收对账（按 rubric §10.3 的约定）。"
@@ -46,7 +59,7 @@ jobs:
         if: steps.fork.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
         # 产物写进工作区：下面的 action 是 Docker action（WORKDIR=/app，runner 的 /tmp 不与容器共享）
         run: |
           set -euo pipefail
@@ -57,7 +70,7 @@ jobs:
         if: steps.fork.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
         run: |
           set -euo pipefail
           head=$(awk -F'\t' '$1=="head"{print $2}' .pr-acceptance/meta.tsv | cut -c1-7)
@@ -101,7 +114,7 @@ jobs:
         if: steps.fork.outputs.skip != 'true' && steps.gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
           COMMENT_ID: ${{ steps.gate.outputs.comment_id }}
           HEAD: ${{ steps.gate.outputs.head }}
           SEMANTIC: ${{ steps.ai.outputs.response }}

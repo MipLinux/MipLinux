@@ -15,6 +15,13 @@ on:
   issues:
     # edited 也要跑：人按提示改完正文得能再查一遍；正文没变时下面会直接跳过，不会重复评论
     types: [opened, edited]
+  # 手动重跑：`issues` 事件只跑默认分支上的 workflow，所以合并之前只能用这条路径验；
+  # 合并之后改完正文想立刻重查也可以走它（能 dispatch 的人本来就有写权限）。
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'issue 编号'
+        required: true
 
 permissions:
   issues: write
@@ -28,7 +35,9 @@ jobs:
     # 注意 CONTRIBUTOR 必须保留：实测本仓库里作者是组织 owner 时，事件负载给的也是
     # CONTRIBUTOR（同一 issue 的 REST API 却报 MEMBER，两者不一致）。
     # 真正要挡的是 FIRST_TIMER / FIRST_TIME_CONTRIBUTOR / NONE 这类陌生人。
-    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.issue.author_association)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.issue.author_association)
     runs-on: ubuntu-latest
 
     steps:
@@ -38,7 +47,7 @@ jobs:
       - name: 生成上下文（脚本算集合）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE: ${{ github.event.issue.number }}
+          ISSUE: ${{ github.event.issue.number || github.event.inputs.issue }}
         # 产物写进工作区而不是 /tmp：下面那个 action 是 **Docker action**，WORKDIR 是 /app，
         # runner 的 /tmp 不与容器共享；只有工作区挂在容器的 /github/workspace。
         run: |
@@ -49,7 +58,7 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE: ${{ github.event.issue.number }}
+          ISSUE: ${{ github.event.issue.number || github.event.inputs.issue }}
         run: |
           set -euo pipefail
           sha=$(sed -n 's/.*· 正文 \([0-9a-f]\{8\}\)）.*/\1/p' .ai-review/facts.md | head -1)
@@ -98,7 +107,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE: ${{ github.event.issue.number }}
+          ISSUE: ${{ github.event.issue.number || github.event.inputs.issue }}
           COMMENT_ID: ${{ steps.gate.outputs.comment_id }}
           SHA: ${{ steps.gate.outputs.sha }}
           SEMANTIC: ${{ steps.ai.outputs.response }}

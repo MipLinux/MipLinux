@@ -345,7 +345,14 @@ render() {
 
   # ── facts.md ────────────────────────────────────────────────────────────────
   {
-    echo "## 验收对账（机器 · PR #$pr · head ${head:0:7} · 判据来自 issue $(cut -f1 "$dir/issues.tsv" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')）"
+    # 没有关联 issue 时不要把「判据来自 issue 」后面留空 —— 实测第一次真跑就出现了这个空列表
+    local label
+    label=$(cut -f1 "$dir/issues.tsv" 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)
+    if [ -n "$label" ]; then
+      echo "## 验收对账（机器 · PR #$pr · head ${head:0:7} · 判据来自 issue $label）"
+    else
+      echo "## 验收对账（机器 · PR #$pr · head ${head:0:7}）"
+    fi
     echo
     if [ "$n_total" -eq 0 ]; then
       echo "⚠️ 无法判定：这条 PR 没有关联到带「验收」段的 issue（或 issue 里读不出判据）。"

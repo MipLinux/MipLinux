@@ -368,6 +368,14 @@
   font-size: calc(var(--t-body) * var(--ui-scale));
 }
 
+/* 输入控件自己就有边框 + 光圈表达焦点，别再叠一层 outline（实机反馈：
+ * 搜索框里出现了内外两圈蓝线） */
+.input:focus-visible,
+.search input:focus-visible,
+.sr-only:focus-visible {
+  outline: none;
+}
+
 /* 复选 / 单选 / 开关 */
 
 .check {
@@ -540,12 +548,14 @@
 
 /* 列表 / 可选项 */
 
-/* 列表外层：撑满可用高度，让里面的 .list 成为唯一的滚动容器 */
+/* 列表外层：撑满可用高度，让里面的 .list 成为唯一的滚动容器；
+ * 与上面的搜索框之间留出间距（原来贴在一起，手感很差） */
 .list-wrap {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: calc(var(--space-3) * var(--ui-scale));
 }
 
 /* 列表是**自己滚**的那个组件（维护者 2026-10-05）：页面本体不滚，
@@ -560,9 +570,38 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-bottom: calc(var(--space-1) * var(--ui-scale));
-  /* 滚动条不可见时，「下面还有」只能靠底部渐隐说 —— 与步骤轨道同一套语言 */
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent 100%);
+}
+
+/* 滚动渐隐只在「那一侧确实还有内容」时出现（由 dom.js 的 attachScrollFade 打标）。
+ * 统一用 --fade 表示渐隐高度。 */
+.list[data-scroll-fade='top'],
+.steps__body[data-scroll-fade='top'] {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade));
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--fade));
+}
+
+.list[data-scroll-fade='bottom'],
+.steps__body[data-scroll-fade='bottom'] {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent 100%);
+}
+
+.list[data-scroll-fade='both'],
+.steps__body[data-scroll-fade='both'] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade),
+    #000 calc(100% - var(--fade)),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade),
+    #000 calc(100% - var(--fade)),
+    transparent 100%
+  );
 }
 
 /* 「填满内容区」的面板：内部列表滚动，面板本身不动 */
@@ -776,9 +815,6 @@
   gap: 2px;
   min-height: 0;
   overflow-y: auto;   /* 放不下时能滚，但不画滚动条（全局 *::-webkit-scrollbar 宽 0） */
-  /* 底部渐隐：滚动条不可见时，「还有内容」这件事就得靠渐隐说 */
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
 }
 
 

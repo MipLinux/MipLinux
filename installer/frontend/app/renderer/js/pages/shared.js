@@ -5,7 +5,7 @@
  * 交互完全一样，所以放在这里 —— 免得三份实现各自漂。
  */
 
-import { h, clear } from '../dom.js';
+import { h, clear, attachScrollFade } from '../dom.js';
 import { searchInput, option, emptyState, listBox } from '../components.js';
 
 /**
@@ -49,6 +49,8 @@ export function selectableList(config, ctx) {
     const fresh = h('div', { class: 'list-wrap', dataset: { list: '1' } }, box);
     if (old) old.replaceWith(fresh);
     else wrapper.append(fresh);
+    // 渐隐按「当前滚动位置」更新；列表重建后要重新挂
+    attachScrollFade(box.classList && box.classList.contains('list') ? box : box.querySelector('.list'));
   };
 
   const search = searchInput({

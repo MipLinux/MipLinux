@@ -572,6 +572,58 @@ module.exports = async function probe({ app, win, launch }) {
     check(scrollState.listScrollbarGap === 0, '列表的滚动条不占位', JSON.stringify(scrollState));
     await shot('scroll-timezone-1024x768');
 
+    // 渐隐必须跟着滚动位置走：不能滚的列表不许加遮罩（否则最后一项被啃掉一块）
+    const listGap = await run(`(() => {
+      const search = document.querySelector('#timezone-list .search');
+      const list = document.querySelector('#timezone-list .list');
+      return { gap: Math.round(list.getBoundingClientRect().top - search.getBoundingClientRect().bottom) };
+    })()`);
+    check(listGap.gap >= 8, '搜索框与列表之间有间距', JSON.stringify(listGap));
+
+    const fadeStates = await run(`(() => {
+      const list = document.querySelector('#timezone-list .list');
+      const out = { top: list.dataset.scrollFade };
+      list.scrollTop = Math.round((list.scrollHeight - list.clientHeight) / 2);
+      list.dispatchEvent(new Event('scroll'));
+      out.middle = list.dataset.scrollFade;
+      list.scrollTop = list.scrollHeight;
+      list.dispatchEvent(new Event('scroll'));
+      out.bottom = list.dataset.scrollFade;
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event('scroll'));
+      return out;
+    })()`);
+    check(fadeStates.top === 'bottom', '列表在顶部：只在底部渐隐', JSON.stringify(fadeStates));
+    check(fadeStates.middle === 'both', '列表在中间：两侧都渐隐', JSON.stringify(fadeStates));
+    check(fadeStates.bottom === 'top', '列表在底部：只在顶部渐隐', JSON.stringify(fadeStates));
+
+    await run('window.__mipl.goTo("locale")');   // 5 项，放得下 → 不该有任何遮罩
+    await sleep(320);
+    await settle();
+    const shortList = await run(`(() => {
+      const list = document.querySelector('#locale-list .list');
+      const last = list ? list.lastElementChild : null;
+      return {
+        fade: list ? list.dataset.scrollFade : 'missing',
+        scrollable: list ? list.scrollHeight > list.clientHeight + 1 : false,
+        lastBottom: last ? Math.round(last.getBoundingClientRect().bottom) : -1,
+        listBottom: list ? Math.round(list.getBoundingClientRect().bottom) : -1,
+      };
+    })()`);
+    check(shortList.fade === 'none' && !shortList.scrollable, '不用滚的列表不加渐隐（最后一项不吃遮罩）', JSON.stringify(shortList));
+
+    // 焦点环只准有一层：容器的边框 + 光圈已经表达焦点，内层 input 不再叠 outline
+    await run('window.__mipl.goTo("timezone")');
+    await sleep(300);
+    const focusRing = await run(`(() => {
+      const input = document.querySelector('#timezone-list .search input');
+      input.focus();
+      const style = getComputedStyle(input);
+      const wrap = getComputedStyle(input.closest('.search'));
+      return { inputOutline: style.outlineStyle, wrapBorder: wrap.borderTopColor, focused: document.activeElement === input };
+    })()`);
+    check(focusRing.focused && focusRing.inputOutline === 'none', '搜索框焦点只有一层（容器），内层不再叠 outline', JSON.stringify(focusRing));
+
     // 键盘页：试打区在列表上方；预览按需出现
     await run('window.__mipl.goTo("keymap")');
     await sleep(340);

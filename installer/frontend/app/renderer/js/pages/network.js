@@ -5,7 +5,7 @@
  * mock 只给 `auth` / `notFound` / `timeout` / `other`，句子一律走 `network.err.*`。
  */
 
-import { h } from '../dom.js';
+import { h, attachScrollFade } from '../dom.js';
 import {
   pageHead,
   panel,

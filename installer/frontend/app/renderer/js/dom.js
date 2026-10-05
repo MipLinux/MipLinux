@@ -56,3 +56,35 @@ export function mount(el, ...children) {
 
 export const $ = (selector, root = document) => root.querySelector(selector);
 export const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+/**
+ * 滚动渐隐：按「当前能不能滚 / 滚到哪」给元素打 `data-scroll-fade`，
+ * CSS 据此只在**确实还有内容**的那一侧加渐隐遮罩。
+ *
+ * 为什么不用固定遮罩：列表短到不用滚时，固定遮罩会把最后一项的底部啃掉一块
+ * （维护者 2026-10-05 实机反馈）。取值：`none` / `top` / `bottom` / `both`。
+ */
+export function attachScrollFade(el) {
+  if (!el) return () => {};
+  const update = () => {
+    if (el.scrollHeight - el.clientHeight <= 1) {
+      el.dataset.scrollFade = 'none';
+      return;
+    }
+    const atTop = el.scrollTop <= 1;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+    el.dataset.scrollFade = atTop ? 'bottom' : atBottom ? 'top' : 'both';
+  };
+  el.addEventListener('scroll', update, { passive: true });
+  if (typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    el.__miplFadeObserver = observer;
+  }
+  update();
+  requestAnimationFrame(update);
+  return () => {
+    el.removeEventListener('scroll', update);
+    if (el.__miplFadeObserver) el.__miplFadeObserver.disconnect();
+  };
+}

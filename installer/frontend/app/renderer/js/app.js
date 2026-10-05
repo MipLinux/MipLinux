@@ -7,7 +7,7 @@
  *   - 状态在 setup，候选数据在 mock，文案在 i18n —— 外壳自己不存业务状态。
  */
 
-import { h, mount, clear } from './dom.js';
+import { h, mount, clear, attachScrollFade } from './dom.js';
 import { I18n, LANGUAGE_LABEL } from './i18n.js';
 import { ThemeController } from './theme.js';
 import { ScaleController, SCALE_AUTO, SCALE_PERCENTS } from './scale.js';
@@ -223,6 +223,8 @@ class App {
     // 12 步时轨道放不下：把当前步滚进视野（不用平滑滚动 —— 切页时滚动动画会和入场打架）
     const current = rail.querySelector('.step[data-state="current"]');
     if (current && current.scrollIntoView) current.scrollIntoView({ block: 'nearest' });
+    // 轨道的渐隐同样按滚动位置来（只有真还有内容时才淡出）
+    attachScrollFade(rail.querySelector('.steps__body'));
 
     mount(
       this.nodes.stepsbar,

@@ -5,7 +5,7 @@
  * 这一页是**危险动作的前一页**：真正的不可逆确认在下一页（`confirm.js`）。
  */
 
-import { h } from '../dom.js';
+import { h, attachScrollFade } from '../dom.js';
 import { pageHead, panel, badge, button, emptyState, callout, divider } from '../components.js';
 import { icon } from '../icons.js';
 import { staggerIn } from '../motion.js';

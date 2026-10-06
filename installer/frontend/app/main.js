@@ -25,6 +25,7 @@
 const { app, BrowserWindow, ipcMain, protocol } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
 
 // 协议根目录 = 应用目录：这样 `../../vendor/...` 这种相对路径在浏览器与 Node 里语义一致
@@ -244,7 +245,7 @@ const PLAN_FLAGS = {
   keymap: '--keymap',
 };
 
-function installArgv(plan) {
+function installArgv(plan, logPath) {
   if (!plan || typeof plan !== 'object') throw new Error('没有安装计划');
   if (typeof plan.disk !== 'string' || !plan.disk) throw new Error('计划里没有目标盘');
   const argv = ['-m', BACKEND_MODULE, '--json-events', '--yes'];
@@ -255,7 +256,31 @@ function installArgv(plan) {
     argv.push(`${flag}=${value}`);
   }
   argv.push('--password-stdin');
+  if (logPath) argv.push(`--log=${logPath}`);
   return argv;
+}
+
+/**
+ * 安装日志的落盘路径：事件流原本只活在这条管道里，进程一没，实机上只剩屏幕上的
+ * 截图 —— 「二十分钟花在哪了」「那行豆腐块是什么」都无从对证。落一份盘，复盘
+ * 才有东西可读。优先 /var/log（Live 里是 root），写不了退临时目录；都建不出来就
+ * 不传这个开关 —— 记日志不许把安装拖下水。
+ */
+function installLogPath() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const candidates = [
+    `/var/log/mipl-installer/install-${stamp}.log`,
+    path.join(os.tmpdir(), `mipl-installer-${stamp}.log`),
+  ];
+  for (const file of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      return file;
+    } catch (error) {
+      // 这一处建不出来就试下一处
+    }
+  }
+  return null;
 }
 
 /** 正在跑的那一次安装。同一时刻只允许一个 —— 两个 `pacstrap` 抢同一块盘没有意义。 */
@@ -268,9 +293,12 @@ function startInstall(win, plan, secrets) {
   const user = typeof secrets.user === 'string' ? secrets.user : '';
   const root = typeof secrets.rootPassword === 'string' && secrets.rootPassword ? secrets.rootPassword : null;
 
+  const logPath = installLogPath();
+  if (logPath) console.log(`[mipl-installer] 安装日志：${logPath}`);
+
   let argv;
   try {
-    argv = installArgv(plan);
+    argv = installArgv(plan, logPath);
   } catch (error) {
     return { ok: false, error: error.message };
   }
@@ -292,8 +320,10 @@ function startInstall(win, plan, secrets) {
     try {
       send(JSON.parse(body));
     } catch (error) {
-      // 解析不了的一行也要给渲染层看：静默丢掉会让「进度页停在某一步」变成悬案
-      send({ kind: 'note', message: `[后端输出无法解析] ${body.slice(0, 500)}` });
+      // 解析不了的一行也要给渲染层看：静默丢掉会让「进度页停在某一步」变成悬案。
+      // 控制字符先洗掉（\t 除外）：这一支是兜底，兜底自己不该再画出豆腐块
+      const clean = body.slice(0, 500).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ');
+      send({ kind: 'note', message: `[后端输出无法解析] ${clean}` });
     }
   };
   child.stdout.on('data', (chunk) => {

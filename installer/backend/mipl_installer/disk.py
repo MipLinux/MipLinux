@@ -642,6 +642,9 @@ def unmount_target(runner: Runner, target: str = "/mnt") -> None:
     """卸载。**失败不抛** —— 收尾阶段再抛一个异常，只会盖掉真正的失败原因。"""
     if runner.dry_run:
         return
+    # umount 要等整次安装攒下的脏页全部落盘：实机上这一步能以分钟计，而它自己
+    # 一行输出都没有 —— 不说一句，收尾就显得「卡死」（Issue #97 实机教训）
+    runner.reporter.note("卸载目标：等磁盘写缓存落盘，写入量大时这一步可能看似停住几分钟")
     for argv in (["umount", "-R", target], ["umount", "-R", f"{target}/boot"], ["umount", target]):
         runner.run(argv, check=False)
 

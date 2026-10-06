@@ -10,8 +10,11 @@
  *
  * 1. **百分比按阶段落格**：后端只在 `done` 那一条给 100，其余阶段不带百分比
  *    （它也不知道 `pacstrap` 装了百分之几）。所以进度条的推进单位是**阶段**：
- *    `start → 8% → disk → 18% → packages → 70% → configure → 88% → boot → 100%`。
+ *    `start → 8% → disk → 18% → packages → 70% → configure → 88% → boot → 96%`。
  *    这是「到哪一步了」的诚实画法，比一个匀速爬动的假进度条更敢让人看。
+ *    **100% 只留给 `done`**：boot 那一格里还有「装引导 + 校验 + 卸载目标落盘」，
+ *    实机上卸载那一步等写缓存落盘能以分钟计 —— boot 落 100% 会让圆环在机器
+ *    还在写盘时就报「装完了」（Issue #97 实机教训：「到 100% 后还卡很久」）。
  * 2. **日志里的话是后端说的**：阶段那几行走翻译键（`progress.phase.*`，中英都有）；
  *    `note` 是后端的旁白（目标盘、dry-run 之类），**原样显示不翻译** ——
  *    它是诊断信息，和 `journalctl` 里那行是同一句话，翻译它反而对不上。
@@ -38,7 +41,7 @@ const PHASES = [
   { phase: 'disk', key: 'progress.phase.disk', until: 18 },
   { phase: 'packages', key: 'progress.phase.packages', until: 70 },
   { phase: 'configure', key: 'progress.phase.configure', until: 88 },
-  { phase: 'boot', key: 'progress.phase.boot', until: 100 },
+  { phase: 'boot', key: 'progress.phase.boot', until: 96 },
 ];
 
 /** 界面侧的一次订阅与一个时钟。装完/离开时都要收掉，否则会「遥控」别的页面。 */
@@ -127,8 +130,10 @@ function onRecord(ctx, record) {
     case 'event': {
       if (record.phase === 'done') {
         appendLog(ctx, ctx.t('progress.done'), 'ok');
-        paint(ctx, 100, PHASES.length - 1);
-        patch(ctx, { percent: 100 });
+        // phase 推过最后一格：五格全亮「完成」，也不留一格「进行中」在跳完成页
+        // 前的那九百毫秒里骗人
+        paint(ctx, 100, PHASES.length);
+        patch(ctx, { percent: 100, phase: PHASES.length });
         break;
       }
       const index = phaseIndex(record.phase);
@@ -167,8 +172,10 @@ function onRecord(ctx, record) {
         finish(ctx, { failed: false });
         return;
       }
+      // stderr 尾巴里可能带着子进程的控制字符（\b / \r）：摆进 <pre> 之前洗掉，
+      // 否则失败现场又是一屏豆腐块
       const why = current.failure
-        || (record.stderr || '').trim().split('\n').slice(-3).join('\n')
+        || (record.stderr || '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ').trim().split('\n').slice(-3).join('\n')
         || ctx.t('common.error');
       finish(ctx, { failed: true, message: why });
       break;
@@ -240,7 +247,9 @@ export default {
     const phases = PHASES.map((phase, index) => ({
       id: `phase-${index}`,
       label: t(phase.key),
-      state: current.percent >= phase.until ? 'done' : index === current.phase ? 'active' : 'todo',
+        // 「进行中」优先于「百分比到格」：否则阶段刚点亮（百分比落到本格上限）
+        // 就会被画成「已完成」，而它其实还在跑
+        state: index === current.phase ? 'active' : current.percent >= phase.until ? 'done' : 'todo',
     }));
     const { elapsed } = stamp();
 

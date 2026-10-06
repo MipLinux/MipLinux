@@ -379,6 +379,7 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
 
     # 4. keyring 再 populate 一次（幂等）—— roadmap §M1 把它算在 configure 的职责里，
     #    也是检查点 6 的排查入口：这一步没做，装后系统的 pacman -Syu 必挂
+    runner.reporter.note("目标里再填充一次 keyring（幂等，几十秒）")
     runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinux"]), exit_code=EXIT_CONFIGURE)
 
     # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
@@ -391,6 +392,9 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
 
     # 6. initramfs 放最后：它要往 /boot（= ESP）里写内核与 initramfs，
     #    所以必须在 ESP 挂好之后、boot.py 校验之前跑
+    #    -P 连 fallback 救援镜像一起生成：弱 CPU 上这一步以分钟计，先说出来，
+    #    免得进度页在这几分钟里一句话都没有（实机「卡了六分钟」的高发点之一）
+    runner.reporter.note("生成 initramfs（mkinitcpio -P，含 fallback 救援镜像）：弱 CPU 上以分钟计，期间输出会持续到达")
     runner.run(chroot_argv(target, ["mkinitcpio", "-P"]), exit_code=EXIT_CONFIGURE)
 
 

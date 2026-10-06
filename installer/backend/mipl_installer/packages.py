@@ -94,7 +94,11 @@ def init_keyring(runner: Runner, target: str) -> None:
     """在目标系统里建好并填充 keyring（**必须在 pacstrap 之前**，理由见模块开头）。"""
     gpgdir = f"{target}/etc/pacman.d/gnupg"
     ensure_dir(runner, f"{target}/etc/pacman.d")
+    # 这两步是实机上「界面像卡死」的高发点（gpg 等熵、导入并签几百个键），
+    # 而它们自己的输出又少 —— 先说一句「在动、要多久」，进度页才不至于沉默
+    runner.reporter.note("初始化目标 keyring（pacman-key --init）：缺熵的机器上这一步可能看似停住几十秒")
     runner.run(["pacman-key", "--gpgdir", gpgdir, "--init"], exit_code=EXIT_PACKAGES)
+    runner.reporter.note("填充 keyring（导入并签署几百个 Arch 键，几十秒）")
     runner.run(["pacman-key", "--gpgdir", gpgdir, "--populate", "archlinux"], exit_code=EXIT_PACKAGES)
 
 

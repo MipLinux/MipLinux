@@ -338,6 +338,13 @@ def report_failure(reporter, exc: InstallerError, *, json_mode: bool) -> None:
 def run_install(args: argparse.Namespace) -> int:
     json_mode = bool(args.json_events)
     reporter = JsonReporter(log_path=args.log) if json_mode else TextReporter(log_path=args.log)
+    if args.log:
+        # 实机教训：日志在 Live 的内存盘上，强杀/重启即没。先说清楚它在哪、
+        # 以及目标盘里会留副本（pipeline.preserve_log），复盘才有得读
+        reporter.note(
+            f"安装日志：{args.log}（Live 内存盘，重启即没）；boot 阶段前与收尾会自动抄一份到"
+            f"目标系统 /{pipeline.PRESERVED_LOG_NAME}"
+        )
     cancel = CancelFlag()
     previous = signal.signal(signal.SIGUSR1, cancel.request)
     code = util.EXIT_OK

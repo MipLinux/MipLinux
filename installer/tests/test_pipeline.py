@@ -264,3 +264,33 @@ class TestResolveLayout(_RunCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPreserveLog(unittest.TestCase):
+    """安装日志在 Live 内存盘上：重启即没。目标盘是唯一活得过重启的落点。"""
+
+    def test_copies_the_log_into_the_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "install.log"
+            log.write_text("line\n", encoding="utf-8")
+            target = Path(tmp) / "mnt"
+            (target / "var" / "log").mkdir(parents=True)
+            reporter = RecordingReporter()
+            reporter.log_path = str(log)
+            runner = FakeRunner(reporter=reporter)
+            pipeline.preserve_log(runner, pipeline.Plan(disk="/dev/null", target=str(target)), reporter)
+            self.assertTrue(any("抄入目标系统" in note for note in reporter.notes))
+            self.assertIn(f"cp -- {log} {target}/var/log/mipl-installer-install.log", runner.commands())
+
+    def test_no_log_path_is_a_noop(self):
+        runner = FakeRunner(reporter=RecordingReporter())
+        pipeline.preserve_log(runner, pipeline.Plan(disk="/dev/null"), RecordingReporter())
+        self.assertEqual(runner.commands(), [])
+
+    def test_target_without_var_log_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reporter = RecordingReporter()
+            reporter.log_path = f"{tmp}/nope.log"
+            runner = FakeRunner(reporter=reporter)
+            pipeline.preserve_log(runner, pipeline.Plan(disk="/dev/null", target=tmp), reporter)
+            self.assertEqual(runner.commands(), [])

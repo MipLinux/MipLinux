@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from . import boot, configure, disk, options, packages, util
@@ -165,6 +166,29 @@ def step_boot(runner: Runner, plan: Plan, cfg: TargetConfig, state: State) -> No
     boot.verify(runner, cfg, state.root_uuid)
 
 
+#: 目标系统里安装日志副本的固定位置（覆盖式：后一次拷贝比前一次新）
+PRESERVED_LOG_NAME = "var/log/mipl-installer-install.log"
+
+
+def preserve_log(runner: Runner, plan: Plan, reporter: Reporter) -> None:
+    """把安装日志抄一份进目标系统。
+
+    日志文件活在 Live 的内存盘上（`/var/log` 是 tmpfs）：重启、断电、强杀之后 reboot
+    就没了 —— 实机教训正是「引导阶段挂死、强杀、日志随之丢失」。安装期间唯一既写得
+    进、又能在重启后活下来的地方就是目标盘，所以在 boot 阶段开始前（最危险的阶段
+    之前）与收尾各抄一次；失败路径也先抄再卸载。目标还没装到包（没有 /var/log）时
+    静默跳过 —— 那份日志此时也没什么可复盘的。
+    """
+    log_path = getattr(reporter, "log_path", None)
+    if not log_path or runner.dry_run:
+        return
+    dest = Path(plan.target) / PRESERVED_LOG_NAME
+    if not dest.parent.is_dir():
+        return
+    if runner.attempt(["cp", "--", log_path, str(dest)]):
+        runner.reporter.note(f"安装日志已抄入目标系统：{dest}（Live 里那份在内存盘上，重启即没）")
+
+
 # ── 动盘之前 ──────────────────────────────────────────────────────────
 def preflight(plan: Plan) -> None:
     """**动盘之前**把参数能查的都查掉。
@@ -250,16 +274,21 @@ def run(
             elif step == "configure":
                 step_configure(runner, plan, cfg, state, password, root_password)
             elif step == "boot":
+                # 引导阶段是实机上挂死的高发点（固件 NVRAM）：进去之前先把日志
+                # 抄进目标盘 —— 真挂死了，强杀重启之后盘上还有得读
+                preserve_log(runner, plan, reporter)
                 step_boot(runner, plan, cfg, state)
     except BaseException:
         # 失败（或取消）就卸干净：留一堆挂载只会让下一次尝试更难查，
         # 也不许在残骸上接着装。
         if mounted:
+            preserve_log(runner, plan, reporter)
             reporter.note("失败收尾：卸载目标")
             disk.unmount_target(runner, cfg.target)
         raise
     else:
         if mounted and not plan.keep_mounted:
+            preserve_log(runner, plan, reporter)
             reporter.note("卸载目标")
             disk.unmount_target(runner, cfg.target)
 

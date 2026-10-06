@@ -104,26 +104,45 @@ const CANDIDATE_WIFI = [
   { ssid: 'Cafe Guest', signal: 1, security: 'open', password: '' },
 ];
 
+/**
+ * 键盘映射候选。顺序照 `localectl list-keymaps` —— **字母序**，所以默认值 `us`
+ * 在最后一行，不在第一行。
+ *
+ * 三份名单都刻意**不**把默认值放在开头：真实的三个出口也不放
+ * （`localectl` 按名字排、`zone1970.tab` 按大洲排、`/usr/share/i18n/SUPPORTED` 按
+ * locale 名排）。默认值摆在第一行是**界面**的事（`shared.withDefaultFirst`），
+ * 替身要是自己先摆好了，那条断言就成了在验替身。
+ */
 export const KEYMAPS = [
-  { id: 'us', name: 'us' },
+  { id: 'be-latin1', name: 'be-latin1' },
   { id: 'de', name: 'de' },
-  { id: 'fr', name: 'fr' },
   { id: 'dvorak', name: 'dvorak' },
   { id: 'es', name: 'es' },
+  { id: 'fr', name: 'fr' },
   { id: 'ru', name: 'ru' },
-  { id: 'be-latin1', name: 'be-latin1' },
+  { id: 'us', name: 'us' },
 ];
 
 export const LOCALES = [
-  { id: 'zh_CN.UTF-8', name: '简体中文' },
-  { id: 'en_US.UTF-8', name: 'English (US)' },
-  { id: 'zh_TW.UTF-8', name: '繁體中文' },
-  { id: 'ja_JP.UTF-8', name: '日本語' },
   { id: 'de_DE.UTF-8', name: 'Deutsch' },
+  { id: 'en_US.UTF-8', name: 'English (US)' },
+  { id: 'ja_JP.UTF-8', name: '日本語' },
+  { id: 'zh_TW.UTF-8', name: '繁體中文' },
+  { id: 'zh_CN.UTF-8', name: '简体中文' },
 ];
 
 /** 时区候选：`offset` 是静态替身值（不带 UTC 前缀），名字走 JSON 里的 `timezone.name.<id>`。 */
 export const TIMEZONES = [
+  { id: 'Africa/Cairo', offset: '+02:00' },
+  { id: 'Africa/Johannesburg', offset: '+02:00' },
+  { id: 'America/Sao_Paulo', offset: '-03:00' },
+  { id: 'America/Chicago', offset: '-06:00' },
+  { id: 'America/Los_Angeles', offset: '-08:00' },
+  { id: 'America/New_York', offset: '-05:00' },
+  { id: 'Europe/London', offset: '+00:00' },
+  { id: 'Europe/Berlin', offset: '+01:00' },
+  { id: 'Europe/Paris', offset: '+01:00' },
+  { id: 'Europe/Moscow', offset: '+03:00' },
   { id: 'Asia/Shanghai', offset: '+08:00' },
   { id: 'Asia/Hong_Kong', offset: '+08:00' },
   { id: 'Asia/Macau', offset: '+08:00' },
@@ -137,16 +156,6 @@ export const TIMEZONES = [
   { id: 'Asia/Kathmandu', offset: '+05:45' },
   { id: 'Asia/Dhaka', offset: '+06:00' },
   { id: 'Asia/Dubai', offset: '+04:00' },
-  { id: 'Europe/London', offset: '+00:00' },
-  { id: 'Europe/Berlin', offset: '+01:00' },
-  { id: 'Europe/Paris', offset: '+01:00' },
-  { id: 'Europe/Moscow', offset: '+03:00' },
-  { id: 'America/New_York', offset: '-05:00' },
-  { id: 'America/Chicago', offset: '-06:00' },
-  { id: 'America/Los_Angeles', offset: '-08:00' },
-  { id: 'America/Sao_Paulo', offset: '-03:00' },
-  { id: 'Africa/Cairo', offset: '+02:00' },
-  { id: 'Africa/Johannesburg', offset: '+02:00' },
   { id: 'Australia/Sydney', offset: '+10:00' },
   { id: 'Pacific/Auckland', offset: '+12:00' },
   { id: 'UTC', offset: '+00:00' },

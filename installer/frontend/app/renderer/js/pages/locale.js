@@ -7,6 +7,7 @@
 
 import { h } from '../dom.js';
 import { pageHead, panel } from '../components.js';
+import { DEFAULTS } from '../setup.js';
 import { selectableList } from './shared.js';
 
 export default {
@@ -22,6 +23,7 @@ export default {
         searchId: 'locale-search',
         searchKey: 'locale.search',
         selected: setup.data.locale,
+        defaultValue: DEFAULTS.locale,
         items: backend.locales.map((locale) => ({
           value: locale.id,
           display: locale.name,

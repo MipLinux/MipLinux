@@ -597,6 +597,22 @@ module.exports = async function probe({ app, win, launch }) {
     check(fadeStates.middle === 'both', '列表在中间：两侧都渐隐', JSON.stringify(fadeStates));
     check(fadeStates.bottom === 'top', '列表在底部：只在顶部渐隐', JSON.stringify(fadeStates));
 
+    // 默认项在第一行，且**选中别的项不会让列表重排**（选中项不参与排序）。
+    // 置顶的是「默认值」而不是「当前选中」：选中一置顶，点一条列表就在手指底下
+    // 重排一次，紧接着的第二次点击会落到刚挪上来的那一行上（维护者 2026-10-05）。
+    const orderBefore = await run(`[...document.querySelectorAll('#timezone-list .option')].map((el) => el.id)`);
+    const pickedId = orderBefore[4];
+    await run(`document.getElementById(${JSON.stringify(pickedId)}).click()`);
+    await sleep(360);
+    await settle();
+    const orderAfter = await run(`[...document.querySelectorAll('#timezone-list .option')].map((el) => el.id)`);
+    check(orderBefore[0] === 'timezone-list-asia-shanghai', '时区页：默认项（Asia/Shanghai）在第一行', orderBefore[0]);
+    check(
+      JSON.stringify(orderAfter) === JSON.stringify(orderBefore),
+      '选中别的时区之后列表不重排（第一行仍是默认项）',
+      `选中 ${pickedId} 前后：${JSON.stringify({ before: orderBefore.slice(0, 3), after: orderAfter.slice(0, 3) })}`
+    );
+
     // 选中之后**不许跳回开头**：整页会重画一次（子树是新的），滚动位置得还回去。
     // 以前这里是「在几百条语言里挑一条，列表跳回开头」（维护者 2026-10-05）。
     const scrollKept = await run(`(async () => {

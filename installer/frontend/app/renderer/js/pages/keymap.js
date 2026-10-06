@@ -17,6 +17,7 @@ import { h, clear } from '../dom.js';
 import { pageHead, panel, caption } from '../components.js';
 import { reveal } from '../motion.js';
 import { selectableList } from './shared.js';
+import { DEFAULTS } from '../setup.js';
 import { buildRows, hasAnyKey } from '../keymap-rows.js';
 
 /** 画图是异步的（要起一次后端）。`token` 防的是「慢的那次盖掉刚选的那次」。 */
@@ -86,6 +87,7 @@ export default {
         searchId: 'keymap-search',
         searchKey: 'keymap.search',
         selected: setup.data.keymap,
+        defaultValue: DEFAULTS.keymap,
         // 键盘映射的显示名就是它自己的名字（`localectl` 的写法）：kbd 不给译名，
         // 我们也不编一个 —— 编了就会和 `localectl` / `vconsole.conf` 里的写法对不上。
         items: backend.keymaps.map((keymap) => ({ value: keymap.id, display: keymap.name, meta: '' })),

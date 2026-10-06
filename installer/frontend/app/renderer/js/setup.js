@@ -14,15 +14,27 @@ const USER_RE = /^[a-z][a-z0-9_-]*$/;
 
 export const PASSWORD_MIN = 6;
 
+/**
+ * 向导的默认值 —— **唯一来源**：`data` 的初始值与「名单页把默认项放在第一行」
+ * 读的是同一份。
+ *
+ * 为什么不各页各写一个：那两处一旦不一致，第一行那条就不再是「不选会得到的值」——
+ * 而这条纪律的全部价值就在于「一眼看到不选是什么」。见 `pages/shared.js` 的
+ * `withDefaultFirst()`。
+ */
+export const DEFAULTS = {
+  locale: 'zh_CN.UTF-8',
+  keymap: 'us',
+  timezone: 'Asia/Shanghai',
+};
+
 export class Setup {
   constructor() {
     this.advanced = false;
     this.index = 0;
     this.listeners = new Set();
     this.data = {
-      locale: 'zh_CN.UTF-8',
-      keymap: 'us',
-      timezone: 'Asia/Shanghai',
+      ...DEFAULTS,
       disk: '',
       user: '',
       password: '',

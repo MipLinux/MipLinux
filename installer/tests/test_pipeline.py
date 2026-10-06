@@ -262,35 +262,56 @@ class TestResolveLayout(_RunCase):
         self.assertEqual(guard.call_args.kwargs["size_bytes"], 40 * disk.GiB)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestAttachTargetLog(unittest.TestCase):
+    """日志持续并写到目标盘：强杀之后盘上是到挂死点为止的完整日志。"""
 
-
-class TestPreserveLog(unittest.TestCase):
-    """安装日志在 Live 内存盘上：重启即没。目标盘是唯一活得过重启的落点。"""
-
-    def test_copies_the_log_into_the_target(self):
+    def test_reporter_replays_history_into_the_attached_sink(self):
+        import io
         with tempfile.TemporaryDirectory() as tmp:
-            log = Path(tmp) / "install.log"
-            log.write_text("line\n", encoding="utf-8")
-            target = Path(tmp) / "mnt"
-            (target / "var" / "log").mkdir(parents=True)
-            reporter = RecordingReporter()
-            reporter.log_path = str(log)
-            runner = FakeRunner(reporter=reporter)
-            pipeline.preserve_log(runner, pipeline.Plan(disk="/dev/null", target=str(target)), reporter)
-            self.assertTrue(any("抄入目标系统" in note for note in reporter.notes))
-            self.assertIn(f"cp -- {log} {target}/var/log/mipl-installer-install.log", runner.commands())
+            extra = Path(tmp) / "target.log"
+            reporter = events.TextReporter(stream=io.StringIO())
+            reporter.note("挂载前的一行")
+            reporter.attach_log_path(str(extra))
+            reporter.note("挂载后的一行")
+            reporter.close()
+            self.assertEqual(extra.read_text(encoding="utf-8"),
+                             "    挂载前的一行\n    挂载后的一行\n")
 
-    def test_no_log_path_is_a_noop(self):
+    def test_json_reporter_writes_every_sink(self):
+        import io
+        import json as jsonmod
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp) / "main.log"
+            extra = Path(tmp) / "target.log"
+            reporter = events.JsonReporter(stream=io.StringIO(), log_path=str(main))
+            reporter.attach_log_path(str(extra))
+            reporter.note("hi")
+            reporter.close()
+            for path in (main, extra):
+                records = [jsonmod.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual([r["kind"] for r in records], ["hello", "note"])
+
+    def test_attach_creates_the_dir_and_writes_from_now_on(self):
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "mnt"
+            target.mkdir()
+            stream = io.StringIO()
+            reporter = events.TextReporter(stream=stream)
+            runner = FakeRunner(reporter=reporter)
+            pipeline.attach_target_log(runner, pipeline.Plan(disk="/dev/null", target=str(target)), reporter)
+            dest = target / "var" / "log" / "mipl-installer-install.log"
+            self.assertTrue(dest.is_file())
+            reporter.note("落盘的一行")
+            reporter.close()
+            self.assertIn("落盘的一行", dest.read_text(encoding="utf-8"))
+            self.assertIn("持续并写", stream.getvalue())
+
+    def test_reporter_without_attach_is_a_noop(self):
         runner = FakeRunner(reporter=RecordingReporter())
-        pipeline.preserve_log(runner, pipeline.Plan(disk="/dev/null"), RecordingReporter())
+        pipeline.attach_target_log(runner, pipeline.Plan(disk="/dev/null"), RecordingReporter())
         self.assertEqual(runner.commands(), [])
 
-    def test_target_without_var_log_is_skipped(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            reporter = RecordingReporter()
-            reporter.log_path = f"{tmp}/nope.log"
-            runner = FakeRunner(reporter=reporter)
-            pipeline.preserve_log(runner, pipeline.Plan(disk="/dev/null", target=tmp), reporter)
-            self.assertEqual(runner.commands(), [])
+
+if __name__ == "__main__":
+    unittest.main()

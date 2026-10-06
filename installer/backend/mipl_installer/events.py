@@ -56,7 +56,46 @@ class NullReporter:
         pass
 
 
-class TextReporter:
+class FileSinks:
+    """日志落点的公共件：stdout/stderr 之外，主日志文件 + 可后挂的附加落点。
+
+    附加落点给「写进目标盘」用（`attach_log_path`）：目标盘是安装期间唯一既写得进、
+    又活得过重启/断电的地方。挂上时先把**内存里记下的全部历史行**补写进去，之后每行
+    同时写所有落点 —— 中途挂死被强杀时，盘上是到挂死点为止的完整日志，而不是
+    「收尾时抢救出来的那一点」（测试阶段 Bug 多，复盘材料必须默认就在）。
+    """
+
+    def _init_sinks(self, log_path: str | None) -> None:
+        self.log_path = log_path
+        self._log = open(log_path, "w", encoding="utf-8") if log_path else None
+        self._extra: list[TextIO] = []
+        self._lines: list[str] = []
+
+    def attach_log_path(self, path: str) -> None:
+        """再加一个日志落点（覆盖式打开，历史行先补写）。"""
+        handle = open(path, "w", encoding="utf-8")
+        if self._lines:
+            handle.write("\n".join(self._lines) + "\n")
+        handle.flush()
+        self._extra.append(handle)
+
+    def _write_line(self, line: str) -> None:
+        self._lines.append(line)
+        print(line, file=self.stream, flush=True)
+        for handle in (self._log, *self._extra):
+            if handle is not None:
+                handle.write(line + "\n")
+                handle.flush()
+
+    def close(self) -> None:
+        for handle in (self._log, *self._extra):
+            if handle is not None:
+                handle.close()
+        self._log = None
+        self._extra = []
+
+
+class TextReporter(FileSinks):
     """CLI 用：一行一件事，同时可选地写一份日志文件。
 
     日志要能整份抄进 `docs/work/tech/`，所以这里不加上色、不加时间戳的
@@ -65,8 +104,7 @@ class TextReporter:
 
     def __init__(self, stream: TextIO | None = None, log_path: str | None = None) -> None:
         self.stream = stream if stream is not None else sys.stdout
-        self._log = open(log_path, "w", encoding="utf-8") if log_path else None
-        self.log_path = log_path
+        self._init_sinks(log_path)
 
     # ── 事件 ──────────────────────────────────────────────────────────
     def emit(self, event: Event) -> None:
@@ -83,16 +121,8 @@ class TextReporter:
     def note(self, message: str) -> None:
         self._write(f"    {message}")
 
-    def close(self) -> None:
-        if self._log is not None:
-            self._log.close()
-            self._log = None
-
     def _write(self, line: str) -> None:
-        print(line, file=self.stream, flush=True)
-        if self._log is not None:
-            self._log.write(line + "\n")
-            self._log.flush()
+        self._write_line(line)
 
 
 #: JSON 行的协议版本。**事件名与字段名是接口**（见 app/README.md 的耦合层一节）：
@@ -101,7 +131,7 @@ class TextReporter:
 PROTOCOL = 1
 
 
-class JsonReporter:
+class JsonReporter(FileSinks):
     r"""界面用：**一行一个 JSON 对象**，stdout 上除了这些行什么都没有。
 
     为什么是行分隔的 JSON 而不是别的：前端只要 `readline` + `JSON.parse` 就能消费，
@@ -127,8 +157,7 @@ class JsonReporter:
 
     def __init__(self, stream: TextIO | None = None, log_path: str | None = None) -> None:
         self.stream = stream if stream is not None else sys.stdout
-        self._log = open(log_path, "w", encoding="utf-8") if log_path else None
-        self.log_path = log_path
+        self._init_sinks(log_path)
         self._write({"kind": "hello", "protocol": PROTOCOL, "version": _version()})
 
     # ── 事件 ──────────────────────────────────────────────────────────
@@ -155,17 +184,8 @@ class JsonReporter:
     def finish(self, code: int) -> None:
         self._write({"kind": "end", "code": code})
 
-    def close(self) -> None:
-        if self._log is not None:
-            self._log.close()
-            self._log = None
-
     def _write(self, record: dict) -> None:
-        line = json.dumps(record, ensure_ascii=False)
-        print(line, file=self.stream, flush=True)
-        if self._log is not None:
-            self._log.write(line + "\n")
-            self._log.flush()
+        self._write_line(json.dumps(record, ensure_ascii=False))
 
 
 def _version() -> str:

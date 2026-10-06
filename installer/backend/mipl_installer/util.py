@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 from .events import Reporter
@@ -61,6 +62,68 @@ class InstallerError(Exception):
         return f"{text}\n  → {self.hint}" if self.hint else text
 
 
+#: 一条命令跑满多少秒就在日志里留一句「耗时 Ns」。这一句是给实机复盘用的：
+#: 「二十分钟花在哪了」该由日志回答，不该由截图猜（Issue #97 实机教训）。
+SLOW_COMMAND_SECONDS = 15
+
+
+class LineFeeder:
+    """把子进程的输出切成「干净的可读行」。
+
+    进度条类工具（mke2fs、pacman、mkinitcpio）会对终端耍三种花活：`\\b` 擦掉前一个
+    字符、`\\r` 回到行首覆写、ANSI 转义序列改颜色。这些都不是内容 —— 原样漏进日志或
+    界面，轻则满屏豆腐块（Issue #97 的实机教训：mke2fs 的 `\\b` 在安装日志里画成方块），
+    重则把 JSON 事件流冲垮。在这里把它们**当场应用掉**，出来的就是普通文本行。
+    """
+
+    def __init__(self) -> None:
+        self._current: list[str] = []
+        #: text | esc | csi | osc —— 转义序列的三个状态，免得序列跨块时被当成内容
+        self._state = "text"
+
+    def feed(self, chunk: str) -> list[str]:
+        """吃一块输出，返回其中**完整**的行（半行留着跟下一块拼）。"""
+        lines: list[str] = []
+        for ch in chunk:
+            if self._state == "esc":
+                self._state = "csi" if ch == "[" else "osc" if ch == "]" else "text"
+            elif self._state == "csi":
+                if 0x40 <= ord(ch) <= 0x7E:      # CSI 的终止字节
+                    self._state = "text"
+            elif self._state == "osc":
+                if ch == "\x07":
+                    self._state = "text"
+                elif ch == "\x1b":
+                    self._state = "esc"
+            elif ch == "\x1b":
+                self._state = "esc"
+            elif ch == "\n":
+                lines.append("".join(self._current).rstrip())
+                self._current = []
+            elif ch == "\r":
+                self._current = []               # 回行首：接下来的内容整行覆写
+            elif ch == "\b":
+                if self._current:
+                    self._current.pop()          # 擦掉前一个字符
+            elif ch == "\t" or (ord(ch) >= 0x20 and ch != "\x7f"):
+                self._current.append(ch)
+            # 其余 C0 控制字符（响铃、竖制表……）：不是内容，直接丢
+        return lines
+
+    def flush(self) -> list[str]:
+        """输出结束时剩下的半行（有的工具收尾不补换行）。"""
+        line = "".join(self._current).rstrip()
+        self._current = []
+        return [line] if line else []
+
+
+def clean_terminal_text(text: str) -> str:
+    """把一整块已捕获的输出过一遍 `LineFeeder`（报错消息之类用）。"""
+    feeder = LineFeeder()
+    lines = feeder.feed(text) + feeder.flush()
+    return "\n".join(line for line in lines if line)
+
+
 class Runner:
     """执行外部命令。dry-run 时只打印。
 
@@ -89,6 +152,9 @@ class Runner:
 
         capture=True 时返回 stdout（去掉尾部换行）；dry-run 下返回 `DRY`。
         check=True 时非零退出码抛 `InstallerError`（带 exit_code）。
+        capture=False 时**输出逐行清洗后交给 reporter**（见 `_run_streamed`），绝不继承
+        本进程的 stdout：界面下 stdout 是 JSON 事件流，混进一行原文就是满屏
+        「后端输出无法解析」。
         """
         argv = [str(a) for a in argv]
         self.history.append(argv)
@@ -96,31 +162,82 @@ class Runner:
         if self.dry_run:
             return DRY if capture else None
 
+        started = time.monotonic()
         try:
-            proc = subprocess.run(
-                argv,
-                capture_output=capture,
-                text=True,
-                input=input,
-                cwd=cwd,
-                check=False,
-            )
+            if capture:
+                proc = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    input=input,
+                    # 不给 input 就接 DEVNULL：后端的 stdin 走着密码，子进程万一读
+                    # stdin 会把密码字节吞掉（与 `_run_streamed` 同一条纪律）
+                    stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                    cwd=cwd,
+                    check=False,
+                )
+                stdout: str | None = (proc.stdout or "").rstrip("\n")
+            else:
+                proc = self._run_streamed(argv, input=input, cwd=cwd)
+                stdout = None
         except FileNotFoundError as exc:
             raise InstallerError(
                 f"找不到命令：{argv[0]}",
                 EXIT_USAGE,
                 hint="这个命令属于哪个包见 cli.py 的 TOOL_PACKAGES —— 先装它，再重跑",
             ) from exc
+        self._note_if_slow(argv, started)
 
         if check and proc.returncode != 0:
             detail = ""
             if capture and proc.stderr:
-                detail = "：\n    " + proc.stderr.strip().replace("\n", "\n    ")
+                detail = "：\n    " + clean_terminal_text(proc.stderr).strip().replace("\n", "\n    ")
             raise InstallerError(f"命令失败（退出码 {proc.returncode}）：{' '.join(argv)}{detail}", exit_code)
 
-        if capture:
-            return (proc.stdout or "").rstrip("\n")
-        return None
+        return stdout
+
+    def _run_streamed(self, argv: list[str], *, input: str | None = None, cwd: str | None = None):
+        """跑一条命令，输出逐行（清洗后）转发给 reporter。
+
+        两条纪律：
+
+        * **不继承 stdout**：mke2fs / pacman 的进度条、mkinitcpio 的旁白是给终端看的，
+          直接流进本进程的 stdout，在界面下会把 JSON 事件流冲成满屏「后端输出无法解析」，
+          在 CLI 下会把日志的缩进冲垮。收过来、洗干净、当旁白发，两边日志才都读得下去。
+        * **不继承 stdin**：后端的 stdin 走着密码；不给 input 的子进程一律接 DEVNULL。
+        """
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            cwd=cwd,
+        )
+        feeder = LineFeeder()
+        if input is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(input)
+            except BrokenPipeError:
+                pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
+            proc.stdin.close()
+        out = proc.stdout
+        if out is not None:
+            for chunk in iter(lambda: out.read(4096), ""):
+                for line in feeder.feed(chunk):
+                    if line:
+                        self.reporter.note(line)
+        for line in feeder.flush():
+            if line:
+                self.reporter.note(line)
+        proc.wait()
+        return proc
+
+    def _note_if_slow(self, argv: list[str], started: float) -> None:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_COMMAND_SECONDS:
+            self.reporter.note(f"耗时 {int(round(elapsed))}s：{' '.join(argv)}")
 
     def have(self, program: str) -> bool:
         from shutil import which
@@ -138,10 +255,13 @@ class Runner:
         self.reporter.command(argv)
         if self.dry_run:
             return True
+        started = time.monotonic()
         try:
-            proc = subprocess.run(argv, text=True, input=input, check=False)
+            # 输出捕获后丢掉：语义是「只报成败」，但输出同样不许漏进本进程 stdout
+            proc = subprocess.run(argv, capture_output=True, text=True, input=input, check=False)
         except FileNotFoundError:
             return False
+        self._note_if_slow(argv, started)
         return proc.returncode == 0
 
     def require(self, programs: list[str], *, tools: dict[str, str] | None = None) -> None:

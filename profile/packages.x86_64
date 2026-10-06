@@ -157,7 +157,6 @@ networkmanager
 # ==> 安装器 ==>
 cage
 wlr-randr
-# 界面运行时：钉版本化包名，不用 electron 元包（元包跟着「最新 stable」漂）
 electron44
 python-pyparted
 # <== 安装器 <==

@@ -23,15 +23,16 @@ networkmanager
 sudo
 efibootmgr
 nano
-vim
+nvim
 
-# ==> 中文支持 · 字体（configure.py 复制 /etc/fonts/local.conf 的 fallback 靠它们生效）==>
+# ==> 中文支持 · 字体==>
 noto-fonts
 noto-fonts-cjk
 noto-fonts-emoji
+ttf-maplemono-nf-cn-unhinted
 # <== 中文支持 · 字体 <==
 
-# ==> 中文支持 · 输入法（/etc/environment 的三个变量指向 fcitx）==>
+# ==> 中文支持 · 输入法==>
 fcitx5
 fcitx5-configtool
 fcitx5-chinese-addons
@@ -43,7 +44,7 @@ fcitx5-qt
 man-pages-zh_cn
 # <== 中文支持 · 本地化 <==
 
-# ==> NVIDIA 驱动 · Turing 及更新（D8 / 04-架构决策 §1.6；引导项已带 nvidia_drm.modeset=1）==>
+# ==> NVIDIA 驱动 · Turing 及更新==>
 nvidia-open
 nvidia-utils
 # <== NVIDIA 驱动 · Turing 及更新 <==

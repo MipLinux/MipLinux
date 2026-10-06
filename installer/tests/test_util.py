@@ -181,6 +181,35 @@ class TestStreamedOutput(unittest.TestCase):
         self.assertEqual(self.reporter.notes, ["pw"])
 
 
+class TestTimeout(unittest.TestCase):
+    """碰固件 NVRAM 的命令能沉默地挂几十分钟：超时必须有，且带着 reason 走退路。"""
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = Runner(self.reporter)
+
+    def test_streamed_timeout_raises_with_reason(self):
+        with self.assertRaises(InstallerError) as ctx:
+            self.runner.run(["sleep", "30"], timeout=1)
+        self.assertEqual(ctx.exception.reason, "timeout")
+        self.assertIn("超时", str(ctx.exception))
+
+    def test_capture_timeout_raises_with_reason(self):
+        with self.assertRaises(InstallerError) as ctx:
+            self.runner.run(["sleep", "30"], capture=True, timeout=1)
+        self.assertEqual(ctx.exception.reason, "timeout")
+
+    def test_attempt_timeout_counts_as_failure_and_says_so(self):
+        self.assertFalse(self.runner.attempt(["sleep", "30"], timeout=1))
+        self.assertTrue(any("超时" in note for note in self.reporter.notes))
+
+    def test_history_records_the_logical_argv_without_stdbuf(self):
+        # stdbuf 只存在于 exec 的那一层：history 与 reporter.command 记的是逻辑命令
+        self.runner.run(["true"])
+        self.assertEqual(self.runner.history, [["true"]])
+        self.assertIn("$ true", self.reporter.text())
+
+
 class TestSmallHelpers(unittest.TestCase):
     def test_human_size(self):
         self.assertEqual(util.human_size(1024 ** 3), "1.0 GiB")

@@ -194,3 +194,29 @@ class TestKernelPartitions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStrayMountpoints(unittest.TestCase):
+    """udisks2 会自动挂上新建的文件系统：挂载目标前必须先看见这些野挂载。"""
+
+    MOUNTINFO = "\n".join([
+        "25 1 8:2 / /mnt rw,relatime - ext4 /dev/sdb2 rw",
+        "26 25 8:1 / /mnt/boot rw - vfat /dev/sdb1 rw",
+        "30 1 8:2 / /run/media/neo/MIPLINUX ro - ext4 /dev/sdb2 ro",
+        "31 1 8:1 / /run/media/neo/ESP ro - vfat /dev/sdb1 ro",
+        "32 1 8:9 / /run/media/neo/other ro - ext4 /dev/sdc1 ro",
+    ])
+
+    def test_reports_every_mount_of_our_devices(self):
+        strays = disk.stray_mountpoints(self.MOUNTINFO, ["/dev/sdb2", "/dev/sdb1"], set())
+        self.assertEqual(sorted(strays), ["/mnt", "/mnt/boot",
+                                          "/run/media/neo/ESP", "/run/media/neo/MIPLINUX"])
+
+    def test_keep_hides_our_own_mounts(self):
+        strays = disk.stray_mountpoints(self.MOUNTINFO, ["/dev/sdb2", "/dev/sdb1"],
+                                        {"/mnt", "/mnt/boot"})
+        self.assertEqual(sorted(strays), ["/run/media/neo/ESP", "/run/media/neo/MIPLINUX"])
+
+    def test_other_devices_are_ignored(self):
+        strays = disk.stray_mountpoints(self.MOUNTINFO, ["/dev/sdb2"], {"/mnt"})
+        self.assertEqual(strays, ["/run/media/neo/MIPLINUX"])

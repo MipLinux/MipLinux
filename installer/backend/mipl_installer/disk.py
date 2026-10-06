@@ -180,6 +180,29 @@ def mount_sources(mountinfo_text: str) -> set[str]:
     return sources
 
 
+def stray_mountpoints(mountinfo_text: str, devices: list[str], keep: set[str]) -> list[str]:
+    """mountinfo 里属于 `devices` 但不在 `keep` 里的挂载点。
+
+    udisks2 看见新文件系统会**自动挂载**（Live 里挂到 /run/media/<标签>/…，根分区
+    标签正是 MIPLINUX）：mkfs 一完它就扑上来。不解除的话目标盘整个安装过程都被
+    udisks 额外挂着一份 —— 收尾的「卸载目标」成了谎话，盘也一直busy（实机教训）。
+    """
+    strays: list[str] = []
+    for line in mountinfo_text.splitlines():
+        fields = line.split()
+        if "-" not in fields:
+            continue
+        sep = fields.index("-")
+        if len(fields) < sep + 3:
+            continue
+        source, mountpoint = fields[sep + 2], fields[4]
+        if mountpoint in keep:
+            continue
+        if any(same_device(source, device) for device in devices):
+            strays.append(mountpoint)
+    return strays
+
+
 def same_device(source: str, device: str) -> bool:
     """`/dev/vda1` 属于 `/dev/vda`；`/dev/vda` 不等于 `/dev/vdb`。"""
     if source == device:
@@ -632,6 +655,11 @@ def make_filesystems(runner: Runner, esp: str, root: str) -> None:
 
 def mount_target(runner: Runner, root: str, esp: str, target: str = "/mnt") -> None:
     """root 挂到 target，ESP 挂到 target/boot（理由见模块开头）。"""
+    if not runner.dry_run:
+        # mkfs 完到这儿之间，udisks 可能已经自动挂上了目标分区：先解除再挂我们的
+        for point in stray_mountpoints(util.read_text("/proc/self/mountinfo"), [root, esp], set()):
+            runner.reporter.note(f"解除 udisks 的自动挂载：{point}")
+            runner.run(["umount", point], check=False)
     ensure_dir(runner, target)
     runner.run(["mount", root, target], exit_code=EXIT_GUARD)
     ensure_dir(runner, f"{target}/boot")

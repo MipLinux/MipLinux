@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -147,6 +148,7 @@ class Runner:
         exit_code: int = EXIT_UNEXPECTED,
         input: str | None = None,
         cwd: str | None = None,
+        timeout: float | None = None,
     ) -> str | None:
         """跑一条命令。
 
@@ -155,6 +157,9 @@ class Runner:
         capture=False 时**输出逐行清洗后交给 reporter**（见 `_run_streamed`），绝不继承
         本进程的 stdout：界面下 stdout 是 JSON 事件流，混进一行原文就是满屏
         「后端输出无法解析」。
+        timeout 给了就超时杀进程并抛 `reason="timeout"` 的 `InstallerError` ——
+        给**会去碰固件 NVRAM 的命令**用的：固件变量存储卡住时那些命令能沉默地
+        挂几十分钟（实机教训：引导阶段挂 40 分钟），安装器不该陪着等。
         """
         argv = [str(a) for a in argv]
         self.history.append(argv)
@@ -162,23 +167,37 @@ class Runner:
         if self.dry_run:
             return DRY if capture else None
 
+        # 先查工具在不在：流式路径套了 stdbuf 之后，「命令不存在」会变成 stdbuf
+        # 退出 127 —— 那句报错对不上事实（该说「装哪个包」而不是「命令失败」）
+        if not self.have(argv[0]):
+            raise InstallerError(
+                f"找不到命令：{argv[0]}",
+                EXIT_USAGE,
+                hint="这个命令属于哪个包见 cli.py 的 TOOL_PACKAGES —— 先装它，再重跑",
+            )
+
         started = time.monotonic()
         try:
             if capture:
-                proc = subprocess.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    input=input,
-                    # 不给 input 就接 DEVNULL：后端的 stdin 走着密码，子进程万一读
-                    # stdin 会把密码字节吞掉（与 `_run_streamed` 同一条纪律）
-                    stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                    cwd=cwd,
-                    check=False,
-                )
+                try:
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        input=input,
+                        # 不给 input 就接 DEVNULL：后端的 stdin 走着密码，子进程万一读
+                        # stdin 会把密码字节吞掉（与 `_run_streamed` 同一条纪律）
+                        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                        cwd=cwd,
+                        check=False,
+                        timeout=timeout,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise self._timeout_error(argv, timeout, exit_code) from exc
                 stdout: str | None = (proc.stdout or "").rstrip("\n")
             else:
-                proc = self._run_streamed(argv, input=input, cwd=cwd)
+                proc = self._run_streamed(argv, input=input, cwd=cwd,
+                                          timeout=timeout, exit_code=exit_code)
                 stdout = None
         except FileNotFoundError as exc:
             raise InstallerError(
@@ -196,18 +215,33 @@ class Runner:
 
         return stdout
 
-    def _run_streamed(self, argv: list[str], *, input: str | None = None, cwd: str | None = None):
+    def _timeout_error(self, argv: list[str], timeout: float | None, exit_code: int) -> InstallerError:
+        return InstallerError(
+            f"命令超时（{int(timeout or 0)}s）：{' '.join(argv)}",
+            exit_code,
+            hint="固件 NVRAM 写入停滞、设备不应是常见原因；现场已保留，先看日志再按该阶段的退路绕行或重跑",
+            reason="timeout",
+        )
+
+    def _run_streamed(self, argv: list[str], *, input: str | None = None, cwd: str | None = None,
+                      timeout: float | None = None, exit_code: int = EXIT_UNEXPECTED):
         """跑一条命令，输出逐行（清洗后）转发给 reporter。
 
-        两条纪律：
+        三条纪律：
 
         * **不继承 stdout**：mke2fs / pacman 的进度条、mkinitcpio 的旁白是给终端看的，
           直接流进本进程的 stdout，在界面下会把 JSON 事件流冲成满屏「后端输出无法解析」，
           在 CLI 下会把日志的缩进冲垮。收过来、洗干净、当旁白发，两边日志才都读得下去。
         * **不继承 stdin**：后端的 stdin 走着密码；不给 input 的子进程一律接 DEVNULL。
+        * **C 工具强制行缓冲**：pacman / mke2fs 这类 C 实现的工具 stdout 接管道时是
+          **全缓冲** —— 攒满 4 KiB 或进程退出才吐一次，实机症状是「一个阶段爆出一堆
+          日志、随后装死」。有 stdbuf 就套 `stdbuf -oL -eL`（脚本类工具无副作用）。
         """
+        exec_argv = argv
+        if self.have("stdbuf"):
+            exec_argv = ["stdbuf", "-oL", "-eL", *argv]
         proc = subprocess.Popen(
-            argv,
+            exec_argv,
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -216,22 +250,45 @@ class Runner:
             cwd=cwd,
         )
         feeder = LineFeeder()
+
+        def pump() -> None:
+            out = proc.stdout
+            if out is None:
+                return
+            try:
+                for chunk in iter(lambda: out.read(4096), ""):
+                    for line in feeder.feed(chunk):
+                        if line:
+                            self.reporter.note(line)
+                for line in feeder.flush():
+                    if line:
+                        self.reporter.note(line)
+            finally:
+                out.close()
+
         if input is not None and proc.stdin is not None:
             try:
                 proc.stdin.write(input)
             except BrokenPipeError:
                 pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
             proc.stdin.close()
-        out = proc.stdout
-        if out is not None:
-            for chunk in iter(lambda: out.read(4096), ""):
-                for line in feeder.feed(chunk):
-                    if line:
-                        self.reporter.note(line)
-        for line in feeder.flush():
-            if line:
-                self.reporter.note(line)
-        proc.wait()
+
+        if timeout is None:
+            pump()
+            proc.wait()
+            return proc
+
+        # 带超时：读输出放到守护线程里，主线程等进程；超时杀进程后线程自然随管道 EOF 收掉
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            reader.join(5)
+            raise self._timeout_error(argv, timeout, exit_code)
+        reader.join(10)
         return proc
 
     def _note_if_slow(self, argv: list[str], started: float) -> None:
@@ -244,11 +301,12 @@ class Runner:
 
         return which(program) is not None
 
-    def attempt(self, argv: list[str], *, input: str | None = None) -> bool:
+    def attempt(self, argv: list[str], *, input: str | None = None, timeout: float | None = None) -> bool:
         """跑一条命令，只回报成没成功。
 
         用于「失败有退路」的场合（NVRAM 写不进 → 退到可移除介质路径）。
         普通的失败路径别用它 —— 抛异常的 `run()` 才带得上退出码与提示。
+        超时算失败（并留一句旁白）：碰固件的命令卡住时，退路才有意义。
         """
         argv = [str(a) for a in argv]
         self.history.append(argv)
@@ -258,8 +316,12 @@ class Runner:
         started = time.monotonic()
         try:
             # 输出捕获后丢掉：语义是「只报成败」，但输出同样不许漏进本进程 stdout
-            proc = subprocess.run(argv, capture_output=True, text=True, input=input, check=False)
+            proc = subprocess.run(argv, capture_output=True, text=True, input=input,
+                                  check=False, timeout=timeout)
         except FileNotFoundError:
+            return False
+        except subprocess.TimeoutExpired:
+            self.reporter.note(f"命令超时（{int(timeout or 0)}s）：{' '.join(argv)}（按失败走退路）")
             return False
         self._note_if_slow(argv, started)
         return proc.returncode == 0
@@ -300,15 +362,17 @@ TOOL_PACKAGES = {
     "bootctl": "systemd",
     "efibootmgr": "efibootmgr",
     "pacman": "pacman",
+    # 流式输出靠它把 C 工具切成行缓冲（见 Runner._run_streamed）
+    "stdbuf": "coreutils",
 }
 
 #: 每个阶段需要哪些工具（开跑前一次性检查，别跑到一半才炸）
 STEP_TOOLS = {
     "disk": ["parted", "partprobe", "wipefs", "udevadm", "mkfs.vfat", "mkfs.ext4",
-             "mount", "umount", "blkid", "mknod", "chown", "chmod"],
-    "packages": ["pacstrap", "pacman-key", "pacman"],
-    "configure": ["arch-chroot"],
-    "boot": ["bootctl", "efibootmgr"],
+             "mount", "umount", "blkid", "mknod", "chown", "chmod", "stdbuf"],
+    "packages": ["pacstrap", "pacman-key", "pacman", "stdbuf"],
+    "configure": ["arch-chroot", "stdbuf"],
+    "boot": ["bootctl", "efibootmgr", "stdbuf"],
 }
 
 

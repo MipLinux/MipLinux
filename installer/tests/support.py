@@ -45,7 +45,7 @@ class FakeRunner:
         self.fail_patterns: set[str] = set()
 
     # ── 与真 Runner 同签名 ────────────────────────────────────────────
-    def run(self, argv, *, check=True, capture=False, exit_code=7, input=None, cwd=None):
+    def run(self, argv, *, check=True, capture=False, exit_code=7, input=None, cwd=None, timeout=None):
         argv = [str(a) for a in argv]
         self.history.append(argv)
         joined = " ".join(argv)
@@ -61,7 +61,7 @@ class FakeRunner:
             return ""
         return None
 
-    def attempt(self, argv, *, input=None):
+    def attempt(self, argv, *, input=None, timeout=None):
         argv = [str(a) for a in argv]
         self.history.append(argv)
         joined = " ".join(argv)

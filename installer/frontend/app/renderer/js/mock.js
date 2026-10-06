@@ -169,11 +169,17 @@ export class Mock {
     this.timezones = [...TIMEZONES];
     this.keymaps = [...KEYMAPS];
     this.locales = [...LOCALES];
+    /**
+     * 「这台机器现在的联网状况」—— 与 `network` **分开**。
+     *
+     * 真实后端里 `network` 是**上一次问回来的结果**（nmcli 那一刻说了什么），现状本身
+     * 在 NetworkManager 那边。两者分开，才验得出「停留在网络页时，网通了界面会不会
+     * 自己发现」：探针改这里的现状，等一轮轮询，看界面跟不跟上。
+     */
+    this.world = { connected: true, kind: 'wired', ipv4: '192.168.1.23', ssid: '' };
+    /** 界面读的是这一份：现状经 `refreshNetwork()` / `connectWifi()` 落进来的结果。 */
     this.network = {
-      connected: true,
-      kind: 'wired',
-      ipv4: '192.168.1.23',
-      ssid: '',
+      ...this.world,
       scanning: false,
       connecting: false,
       failure: '',
@@ -277,11 +283,22 @@ export class Mock {
     return this.disks;
   }
 
-  async scanWifi() {
+  /**
+   * 扫 Wi-Fi。`rescan` 在替身里没有区别（没有真的 NetworkManager 可问），
+   * 参数留着只为与 `Backend.scanWifi()` **同形** —— 页面两边都传 `{rescan:true}`。
+   */
+  async scanWifi({ rescan = false } = {}) {
+    void rescan;
     this.network = { ...this.network, scanning: true, failure: '' };
     await sleep(900);
     this.network = { ...this.network, scanning: false, wifi: CANDIDATE_WIFI.map((w) => ({ ...w })) };
     return this.network.wifi;
+  }
+
+  /** 把「现状」读进 `network`（真实后端里这一步是再起一次 `--print-network`）。 */
+  async refreshNetwork() {
+    this.network = { ...this.network, ...this.world };
+    return this.network;
   }
 
   /**
@@ -300,38 +317,24 @@ export class Mock {
       this.network = { ...this.network, connecting: false, failure: 'auth' };
       return false;
     }
-    this.network = {
-      ...this.network,
-      connected: true,
-      kind: 'wireless',
-      ssid,
-      ipv4: '192.168.1.23',
-      connecting: false,
-      failure: '',
-    };
+    // 连上 = 现状变了，再走一次「问回来」——与 Backend.connectWifi 同一条路
+    this.world = { connected: true, kind: 'wireless', ssid, ipv4: '192.168.1.23' };
+    await this.refreshNetwork();
+    this.network = { ...this.network, connecting: false, failure: '' };
     return true;
   }
 
+  /**
+   * 「网线插上了」/「拔掉了」：**只动现状，不动 `network`**。
+   *
+   * 这正是要模拟的那件事：真实后端里它发生在 nmcli 那边，界面要下一次
+   * `refreshNetwork()`（网络页的轮询）才知道。探针靠这个时间差验轮询。
+   */
   connectWired() {
-    this.network = {
-      ...this.network,
-      connected: true,
-      kind: 'wired',
-      ssid: '',
-      ipv4: '192.168.1.23',
-      connecting: false,
-      failure: '',
-    };
+    this.world = { connected: true, kind: 'wired', ssid: '', ipv4: '192.168.1.23' };
   }
 
   disconnectNetwork() {
-    this.network = {
-      ...this.network,
-      connected: false,
-      kind: 'wired',
-      ssid: '',
-      ipv4: '',
-      failure: '',
-    };
+    this.world = { connected: false, kind: 'wired', ssid: '', ipv4: '' };
   }
 }

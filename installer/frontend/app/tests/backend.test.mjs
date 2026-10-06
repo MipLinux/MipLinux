@@ -48,7 +48,7 @@ test('Mock 与 Backend 同形 —— 探针跑的因此是产品代码的契约'
     );
   }
 
-  for (const name of ['diskById', 'rescanDisks', 'scanWifi', 'connectWifi', 'keymapView',
+  for (const name of ['diskById', 'rescanDisks', 'scanWifi', 'connectWifi', 'refreshNetwork', 'keymapView',
     'checkHostname', 'onInstallEvent', 'startInstall', 'cancelInstall']) {
     assert.equal(
       typeof mock[name],
@@ -165,6 +165,60 @@ test('Wi-Fi 失败按错误码走，不把 nmcli 的英文原文透给页面', a
   assert.equal(await backend.connectWifi('MyNet', 'wrong'), false);
   assert.equal(backend.network.failure, 'auth');
   assert.equal(backend.network.connecting, false);
+});
+
+test('「重新扫描」必须让 NetworkManager 真扫一遍，不能拿缓存再画一次', async () => {
+  const seen = [];
+  const backend = new Backend({
+    channel: {
+      query: async (name, options) => {
+        seen.push([name, options]);
+        return { ok: true, data: { wifi: [] } };
+      },
+    },
+  });
+  await backend.scanWifi(); // 进页面那次：用 NM 的缓存，不让人干等
+  assert.deepEqual(seen.at(-1), ['wifi', undefined]);
+  await backend.scanWifi({ rescan: true }); // 点「重新扫描」：`--print-wifi --rescan`
+  assert.deepEqual(seen.at(-1), ['wifi', { rescan: true }]);
+});
+
+test('停留网络页时的轮询能发现「外面通了」；但绝不抹掉上一次连接失败的原因', async () => {
+  // 现状在对面变（真机上就是网线插上了）。`network` 是**上一次问回来的结果**，
+  // 界面要靠 `refreshNetwork()` 才知道 —— 这正是网络页那 3 秒一次轮询做的事
+  let online = false;
+  const backend = new Backend({
+    channel: {
+      query: async (name) => {
+        if (name === 'network') {
+          return {
+            ok: true,
+            data: {
+              online,
+              wired: true,
+              wired_interface: 'eth0',
+              wired_ipv4: online ? '10.0.2.15' : '',
+              wifi_interface: '',
+              wifi_ssid: '',
+            },
+          };
+        }
+        return { ok: true, data: { ok: false, reason: 'auth', message: 'secrets were required' } };
+      },
+    },
+  });
+  await backend.refreshNetwork();
+  assert.equal(backend.network.connected, false);
+
+  // 一次失败的连接尝试：原因要留在界面上等人读
+  await backend.connectWifi('MyNet', 'wrong');
+  assert.equal(backend.network.failure, 'auth');
+
+  online = true;
+  await backend.refreshNetwork();
+  assert.equal(backend.network.connected, true, '轮询要把「通了」反映出来，否则人卡在网络页出不去');
+  assert.equal(backend.network.ipv4, '10.0.2.15');
+  assert.equal(backend.network.failure, 'auth', '失败原因是连接尝试的结果、不是现状的一部分 —— 轮询不许抹掉它');
 });
 
 /* ------------------------------------------------------------ 名单与校验 */

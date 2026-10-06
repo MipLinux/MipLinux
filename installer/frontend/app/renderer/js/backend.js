@@ -176,7 +176,9 @@ export class Backend {
       // 拿有线的填上去会在只有 Wi-Fi 的机器上显示一个不存在的地址。
       ipv4: wired ? state.wired_ipv4 || '' : '',
       ssid: wired ? '' : state.wifi_ssid || '',
-      failure: '',
+      // **不动 `failure`**：它是「上一次连接尝试的结果」，不是现状的一部分。
+      // 在这里清掉的话，网络页那 3 秒一次的轮询会把刚报出来的错误抹掉
+      // （`connectWifi` 起手与成功时各自清，那才是它该被清的时候）。
     };
   }
 
@@ -196,9 +198,26 @@ export class Backend {
 
   /* ------------------------------------------------------------ 网络 */
 
-  async scanWifi() {
+  /**
+   * 重新问一次**联网现状**。不触发无线扫描 —— 那个要几秒，只该在用户点「重新扫描」时跑。
+   *
+   * 网络页停留期间靠它发现「网线插上了 / NetworkManager 自己连上了」：
+   * 现状只在 `load()` 那一次读的话，进来之后网通了界面也不知道，
+   * 而这一页没连上就不让走（维护者 2026-10-05）。
+   */
+  async refreshNetwork() {
+    const state = await this._query('network');
+    if (state) this._setNetwork(state);
+    return this.network;
+  }
+
+  /**
+   * 扫 Wi-Fi。`{rescan:true}` = 让 NetworkManager **真扫一遍**（`--rescan`，慢几秒）；
+   * 默认用它的缓存 —— 进页面那次不该让人干等。
+   */
+  async scanWifi({ rescan = false } = {}) {
     this.network = { ...this.network, scanning: true, failure: '' };
-    const data = await this._query('wifi');
+    const data = await this._query('wifi', rescan ? { rescan: true } : undefined);
     const wifi = ((data && data.wifi) || []).map((item) => ({
       ssid: item.ssid,
       signal: signalBars(item.signal),
@@ -222,8 +241,7 @@ export class Backend {
     }
     // 连上之后**重新问一次现状**，而不是把 ssid 拼成「已连接」：
     // 真正拿到地址之前就说连上了，是这句文案在替 NetworkManager 撒谎。
-    const state = await this._query('network');
-    if (state) this._setNetwork(state);
+    await this.refreshNetwork();
     this.network = { ...this.network, connecting: false, failure: '' };
     return true;
   }

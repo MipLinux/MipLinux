@@ -513,6 +513,71 @@ module.exports = async function probe({ app, win, launch }) {
     check(reachable.ok, '选中 WiFi 后主动作仍在视口内且可点', JSON.stringify(reachable));
     await shot('network-wifi-selected-1024x768');
 
+    // ---------------------------------------------------------- 6.6b 网络页的「重新扫描」与现状自动刷新
+    // 9a99666 那次「重新扫描挪到列表下方」在 disk.js 挪对了，在网络页却是**直接删掉**
+    // （`?: null`）—— 于是网卡住时既没有手动入口，也没有自动刷新（维护者 2026-10-05）。
+    const rescanButton = await run(`(() => {
+      const btn = document.getElementById('wifi-rescan');
+      if (!btn) return { exists: false };
+      const list = document.querySelector('#page-network .list');
+      return {
+        exists: true,
+        // 「在列表下方」：按钮顶边不低于列表底边（空列表时没有列表可依，只判存在）
+        below: list ? btn.getBoundingClientRect().top >= list.getBoundingClientRect().bottom - 1 : true,
+        label: btn.textContent.trim(),
+      };
+    })()`);
+    check(rescanButton.exists && rescanButton.below, '网络页有「重新扫描」，位置在列表下方', JSON.stringify(rescanButton));
+
+    const rescanRan = await run(`(async () => {
+      document.getElementById('wifi-rescan').click();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const scanning = Boolean(document.querySelector('#page-network .skeleton'));
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      return { scanning, options: document.querySelectorAll('#page-network .option').length };
+    })()`);
+    check(rescanRan.scanning && rescanRan.options > 0, '点「重新扫描」：先出「正在扫描」，扫完列表还在', JSON.stringify(rescanRan));
+
+    // 停留本页时，「外面的世界变了」界面得自己发现：这一页没连上就不让往下走，
+    // 只在开工时读一次现状的话，网通了人也出不去。
+    const unplugged = await run(`(() => {
+      const badge = () => document.querySelector('#page-network .badge').textContent;
+      const before = badge();
+      window.__mipl.setLink(false);   // 只改「现状」，不改上一次问回来的结果
+      return { before, stillShown: badge() };   // 同一个同步块里读：中间插不进一轮轮询
+    })()`);
+    await sleep(3800);   // 等一轮轮询（POLL_MS = 3000）
+    await settle();
+    const afterUnplug = await run(`(() => ({
+      badge: document.querySelector('#page-network .badge').textContent,
+      disabled: document.getElementById('nav-primary').disabled,
+    }))()`);
+    check(
+      unplugged.before === unplugged.stillShown && afterUnplug.badge !== unplugged.before && afterUnplug.disabled === true,
+      '停在网络页：拔网线之后界面自己变成「未连接」并拦住「下一步」',
+      JSON.stringify({ ...unplugged, ...afterUnplug })
+    );
+
+    // 再插回去 —— 这一条**要求上一轮轮询先落地**（`beforePlug` 必须是「未连接 + 拦住」），
+    // 否则「网通了能解锁」在网络页从头到尾没刷新的情况下也会绿：那是假绿。
+    const beforePlug = await run(`(() => ({
+      badge: document.querySelector('#page-network .badge').textContent,
+      disabled: document.getElementById('nav-primary').disabled,
+    }))()`);
+    await run('window.__mipl.setLink(true)');
+    await sleep(3800);
+    await settle();
+    const afterPlug = await run(`(() => ({
+      badge: document.querySelector('#page-network .badge').textContent,
+      disabled: document.getElementById('nav-primary').disabled,
+    }))()`);
+    check(
+      beforePlug.disabled === true && afterPlug.disabled === false && afterPlug.badge !== beforePlug.badge,
+      '停在网络页：网通了界面自己发现，「下一步」随之解锁（原来卡住的正是这一步）',
+      JSON.stringify({ beforePlug, afterPlug })
+    );
+    await shot('network-replugged-1024x768');
+
     // 完成页必须一屏放得下（实机反馈：安装完成界面居然能滚）
     await run('window.__mipl.goTo("finish")');
     await sleep(360);
@@ -633,7 +698,6 @@ module.exports = async function probe({ app, win, launch }) {
       JSON.stringify(scrollKept)
     );
     await shot('timezone-scroll-kept-1024x768');
-
 
     await run('window.__mipl.goTo("locale")');   // 5 项，放得下 → 不该有任何遮罩
     await sleep(320);

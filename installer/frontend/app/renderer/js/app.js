@@ -276,8 +276,9 @@ class App {
       },
       /** 页面内容变了（例如扫描结果回来）：整页重画，但不跑进场动效。 */
       rerender: () => this.renderPage({ animate: false }),
-      scanWifi: async () => {
-        await this.backend.scanWifi();
+      /** 扫 Wi-Fi。`{rescan:true}` = 让 NetworkManager 真扫一遍（几秒）；默认用缓存。 */
+      scanWifi: async (options) => {
+        await this.backend.scanWifi(options);
         this.renderPage({ animate: false });
         return this.backend.network.wifi.map((w) => w.ssid);
       },
@@ -325,6 +326,9 @@ class App {
     wrapper.append(page.render(this.makeContext()));
     mount(this.nodes.stage, wrapper);
     restoreScroll(this.nodes.stage, scrollSpots);
+    // 「进入这一页」只在这一页真的被换上时发生**一次**（与 `onLeave` 对称）：
+    // 网络页的轮询挂在这里，重画不会把它叠成两个。
+    if (pageChanged && typeof page.onEnter === 'function') page.onEnter(this.makeContext());
     this.renderShell();
     this.renderActions();
     if (animate) motion.pageEnter(wrapper);
@@ -550,10 +554,23 @@ class App {
         return this.setup.data[key];
       },
       rerender: () => this.renderPage({ animate: false }),
-      scanWifi: async () => {
-        await this.backend.scanWifi();
+      scanWifi: async (options) => {
+        await this.backend.scanWifi(options);
         this.renderPage({ animate: false });
         return this.backend.network.wifi.map((w) => w.ssid);
+      },
+      /**
+       * 离屏自检用：模拟「外面的世界变了」（插上网线 / 拔掉网线）。
+       *
+       * 改的是 Mock 的**现状**、不是 `network`（上一次问回来的结果）—— 真实后端里
+       * 这两件事发生在 nmcli 那边，界面要下一次 `refreshNetwork()` 才知道。
+       * 靠这个时间差才验得出「停留在网络页时，网通了界面会不会自己发现」。
+       * 只有 `launch.probe`（Mock）才挂这个入口，产品路径上没有它。
+       */
+      setLink: (connected) => {
+        if (connected) this.backend.connectWired();
+        else this.backend.disconnectNetwork();
+        return this.backend.network;
       },
       countUndefinedStrings: () => {
         const html = document.getElementById('root').innerText || '';

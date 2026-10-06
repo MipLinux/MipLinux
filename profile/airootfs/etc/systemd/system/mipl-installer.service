@@ -27,6 +27,19 @@ RuntimeDirectory=mipl-installer
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/mipl-installer
 Environment=QT_QPA_PLATFORM=wayland
+# 关机 / 重启时的停机上限。默认 TimeoutStopSec=90s，而实机反馈：在 tty 里敲
+# `reboot`，整个关机被安装器这个 stop job 拖住 —— 前台只显示一句
+# 「A stop job is running for MipLinux 安装器界面」，没人知道在等什么。
+# SIGTERM 之后最多等 5 秒，剩下的交给 SIGKILL（`SendSIGKILL=` 默认就是 yes）。
+#
+# **根因还没定**：2026-10-06 在开发机上实测过两件事 ——
+#   1. Electron 主进程里 `process.on('SIGTERM')` 不会被调用（Chromium 顶掉了它），
+#      所以「前端自己不退」这条路不成立；
+#   2. 朝整个进程组发 SIGTERM，Electron 的 6 个进程 3 秒内全部消失，不留残留。
+# 剩下的嫌疑在 cage / seatd-launch / 本 unit 的兜底作业（OnSuccess/OnFailure 那条），
+# 要定案得有一份真机或 QEMU 的 `journalctl -b -1 -u mipl-installer -u mipl-installer-tty`。
+# 在那之前，这条上限让「卡 90 秒」变成「最多卡 5 秒」—— 它不解释原因，只限制代价。
+TimeoutStopSec=5s
 
 [Install]
 WantedBy=multi-user.target

@@ -192,10 +192,6 @@ class TestKernelPartitions(unittest.TestCase):
             self.assertEqual(disk.kernel_partitions("/dev/nope", sysfs_root=tmp), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestStrayMountpoints(unittest.TestCase):
     """udisks2 会自动挂上新建的文件系统：挂载目标前必须先看见这些野挂载。"""
 
@@ -220,3 +216,7 @@ class TestStrayMountpoints(unittest.TestCase):
     def test_other_devices_are_ignored(self):
         strays = disk.stray_mountpoints(self.MOUNTINFO, ["/dev/sdb2"], {"/mnt"})
         self.assertEqual(strays, ["/run/media/neo/MIPLINUX"])
+
+
+if __name__ == "__main__":
+    unittest.main()

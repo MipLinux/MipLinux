@@ -12,7 +12,7 @@
  * 页面只认 `ctx.backend`，不知道自己在跟哪一个说话。
  */
 
-import { h, mount, clear, attachScrollFade } from './dom.js';
+import { h, mount, clear, captureScroll, restoreScroll, attachScrollFade } from './dom.js';
 import { I18n, LANGUAGE_LABEL } from './i18n.js';
 import { ThemeController } from './theme.js';
 import { ScaleController, SCALE_AUTO, SCALE_PERCENTS } from './scale.js';
@@ -315,11 +315,16 @@ class App {
     if (this.page && this.page !== page && typeof this.page.onLeave === 'function') {
       this.page.onLeave(this.makeContext());
     }
+    // 同一页重画（`rerender()`）要把滚动位置还回去：页面子树是重建的，`scrollTop`
+    // 天然归零 —— 在几百条语言里选一条就会跳回开头（维护者 2026-10-05）。
+    // **换页不还**：新的一页从顶部开始，那不叫「丢了位置」。
+    const scrollSpots = pageChanged ? null : captureScroll(this.nodes.stage);
     this.page = page;
     this.animateIn = Boolean(animate) && pageChanged;
     const wrapper = h('div', { class: 'stage__inner', id: `page-${id}`, dataset: { page: id } });
     wrapper.append(page.render(this.makeContext()));
     mount(this.nodes.stage, wrapper);
+    restoreScroll(this.nodes.stage, scrollSpots);
     this.renderShell();
     this.renderActions();
     if (animate) motion.pageEnter(wrapper);

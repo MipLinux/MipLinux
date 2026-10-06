@@ -597,6 +597,28 @@ module.exports = async function probe({ app, win, launch }) {
     check(fadeStates.middle === 'both', '列表在中间：两侧都渐隐', JSON.stringify(fadeStates));
     check(fadeStates.bottom === 'top', '列表在底部：只在顶部渐隐', JSON.stringify(fadeStates));
 
+    // 选中之后**不许跳回开头**：整页会重画一次（子树是新的），滚动位置得还回去。
+    // 以前这里是「在几百条语言里挑一条，列表跳回开头」（维护者 2026-10-05）。
+    const scrollKept = await run(`(async () => {
+      const list = document.querySelector('#timezone-list .list');
+      list.scrollTop = 240;
+      const before = list.scrollTop;
+      const target = [...document.querySelectorAll('#timezone-list .option')].find(
+        (el) => el.getBoundingClientRect().top > 260
+      ) || [...document.querySelectorAll('#timezone-list .option')].at(-1);
+      target.click();
+      await new Promise((resolve) => setTimeout(resolve, 420));
+      const fresh = document.querySelector('#timezone-list .list');
+      return { before, after: fresh.scrollTop, rebuilt: fresh !== list };
+    })()`);
+    check(
+      scrollKept.before > 0 && scrollKept.rebuilt && scrollKept.after === scrollKept.before,
+      '选中之后列表不回开头（整页确实重画了，滚动位置还回去了）',
+      JSON.stringify(scrollKept)
+    );
+    await shot('timezone-scroll-kept-1024x768');
+
+
     await run('window.__mipl.goTo("locale")');   // 5 项，放得下 → 不该有任何遮罩
     await sleep(320);
     await settle();

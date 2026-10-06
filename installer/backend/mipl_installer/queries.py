@@ -19,7 +19,8 @@
 ## 出口的形态
 
 每个函数返回一个可直接 `json.dumps` 的 dict，由 `cli.py` 的 `--print-*` 打印。
-`--connect-wifi` 是唯一有副作用的（它真的会连网），其余全是只读、不需要 root。
+三个出口有副作用：`--connect-wifi`（真的会连网）、`--reboot`（真的会重启）、
+`--unmount-target`（真的会卸载 /mnt），其余全是只读、不需要 root。
 """
 
 from __future__ import annotations
@@ -86,6 +87,41 @@ def connect_wifi(runner: Runner, ssid: str, password: str = "") -> dict:
     except InstallerError as exc:
         return {"ok": False, "reason": exc.reason or "other", "message": str(exc)}
     return {"ok": True, "reason": None, "message": ""}
+
+
+def reboot(runner: Runner) -> dict:
+    """重启机器 —— 完成页那个按钮。
+
+    **与 `--connect-wifi` 同类的有副作用出口**：它真的会重启。放在后端而不是
+    Electron 主进程里，是因为「动系统的命令」在这个仓库只有一处（`Runner`）：
+    它进 `history`、进日志、`--dry-run` 下只打印。界面那侧只发一个请求。
+
+    用 `systemctl reboot` 而不是裸 `reboot`：Live 是 systemd 系统，前者是与
+    「请系统重启」这件事一一对应的正式入口。命令本身不等待关机完成（systemd
+    把重启作业排上就返回），所以这里没有「之后」可等 —— 返回 `ok` 只是说
+    「请求发出去了」。
+    """
+    runner.run(["systemctl", "reboot"])
+    return {"ok": True}
+
+
+def unmount_target(runner: Runner, target: str = "/mnt") -> dict:
+    """把目标挂载点卸干净 —— 失败页那个「卸载 /mnt」按钮。
+
+    守卫拒绝「`/mnt` 已经是个挂载点」时（`reason="targetMounted"`），用户点一下
+    就能把这条路清出来，不必切到 tty 手敲 `umount`。
+
+    **只卸挂载，不碰盘**：走的是 `disk.unmount_target()` —— 与失败收尾同一个函数
+    （`umount -R` 那条路），所以不存在第二种「怎么卸」的实现。
+
+    回 `{ok, mounted}`：卸完**再看一眼** `/mnt` 还在不在挂载表里。说「卸好了」而
+    实际还挂着，用户点第二次还是失败，而他会以为是按钮坏了。
+    """
+    disk.unmount_target(runner, target)
+    if runner.dry_run:
+        return {"ok": True, "mounted": True}
+    mounted = disk.is_mountpoint(target)
+    return {"ok": not mounted, "mounted": mounted}
 
 
 # ── 高级安装的四份名单 ────────────────────────────────────────────────

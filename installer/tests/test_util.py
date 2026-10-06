@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,19 @@ class TestRunner(unittest.TestCase):
 
     def test_capture_returns_stdout_without_the_trailing_newline(self):
         self.assertEqual(self.runner.run(["printf", "hi\n"], capture=True), "hi")
+
+    def test_capture_with_input_actually_reaches_the_child(self):
+        """**回归测试**：`capture=True` 又给了 `input` 时，两个管子参数会打架。
+
+        `subprocess.run` 同时收到 `input=` 与 `stdin=` 会直接抛
+        `ValueError: stdin and input arguments may not both be used.` —— 实机症状是
+        「网络页上点连接必报错」，而这正是 `nmcli --ask`（密码走 stdin）唯一走的那条路。
+        """
+        self.assertEqual(
+            self.runner.run(["sh", "-c", "read line; printf 'got:%s' \"$line\""],
+                            capture=True, input="pw\n"),
+            "got:pw",
+        )
 
     def test_capture_includes_stderr_in_the_error_message(self):
         with self.assertRaises(InstallerError) as ctx:
@@ -153,6 +167,32 @@ class TestStreamedOutput(unittest.TestCase):
     def test_subprocess_output_becomes_notes(self):
         self.runner.run(["sh", "-c", "printf 'hi\\nthere\\n'"])
         self.assertEqual(self.reporter.notes, ["hi", "there"])
+
+    def test_output_is_forwarded_as_it_arrives_not_at_eof(self):
+        """**回归测试**：日志必须一行一行到，不能攒到进程退出才一次性吐。
+
+        旧实现是 `out.read(4096)` —— 文本管道的 `read(n)` 要**攒满 n 个字符或等到
+        EOF** 才返回（实测：三行分 0.8 秒输出，1.21 秒才一次性到达）。于是
+        `stdbuf -oL` 那条行缓冲白做，界面上的日志一段一段的、initramfs 那几分钟
+        一句话都不来（实机反馈）。这条用例看的是**两行之间的到达间隔**，不是内容。
+        """
+
+        class Timed(RecordingReporter):
+            def __init__(self):
+                super().__init__()
+                self.stamps = []
+
+            def note(self, message):
+                super().note(message)
+                self.stamps.append(time.monotonic())
+
+        reporter = Timed()
+        Runner(reporter).run(["sh", "-c", "echo 第一行; sleep 0.5; echo 第二行"])
+        self.assertEqual(reporter.notes, ["第一行", "第二行"])
+        self.assertGreaterEqual(
+            reporter.stamps[1] - reporter.stamps[0], 0.35,
+            "第二行跟着第一行一起到了 —— 输出被攒到 EOF 才转发（read(4096) 的老毛病）",
+        )
 
     def test_progress_control_characters_are_cleaned_before_the_reporter(self):
         self.runner.run(["sh", "-c", "printf '0/465\\b\\b\\b\\b\\bdone\\n'"])

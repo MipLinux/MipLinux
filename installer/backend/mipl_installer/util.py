@@ -13,12 +13,14 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import stat
 import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from .events import Reporter
 
@@ -149,6 +151,7 @@ class Runner:
         input: str | None = None,
         cwd: str | None = None,
         timeout: float | None = None,
+        on_line: Callable[[str], None] | None = None,
     ) -> str | None:
         """跑一条命令。
 
@@ -157,9 +160,20 @@ class Runner:
         capture=False 时**输出逐行清洗后交给 reporter**（见 `_run_streamed`），绝不继承
         本进程的 stdout：界面下 stdout 是 JSON 事件流，混进一行原文就是满屏
         「后端输出无法解析」。
+        `input` 给了就写进子进程的 stdin（配合 capture=True 用）—— 密码那条红线：
+        argv 会留在进程列表与日志里，所以「问一句答一句」的命令走它。
+        `on_line` 给「要**边跑边读**输出」的调用方用（pacman 的 `(14/345)` 就是
+        这么变成细进度的）：每清洗出一行回调一次，**在**它被当旁白记下来之前。
+        只在流式路径（`capture=False`）上有意义 —— 捕获路径要收完才返回。
         timeout 给了就超时杀进程并抛 `reason="timeout"` 的 `InstallerError` ——
         给**会去碰固件 NVRAM 的命令**用的：固件变量存储卡住时那些命令能沉默地
         挂几十分钟（实机教训：引导阶段挂 40 分钟），安装器不该陪着等。
+
+        **`input` 与 `stdin=` 不能同时给** `subprocess.run`（它自己会抛
+        `ValueError: stdin and input arguments may not both be used.`）。所以这里
+        按「给没给 input」二选一：给了就走 `input=`（它内部会接 PIPE），
+        没给才显式接 `DEVNULL` —— 后端的 stdin 走着密码，子进程万一去读 stdin
+        会把密码字节吞掉（与 `_run_streamed` 同一条纪律）。
         """
         argv = [str(a) for a in argv]
         self.history.append(argv)
@@ -179,25 +193,28 @@ class Runner:
         started = time.monotonic()
         try:
             if capture:
+                # `input=` 会自己接 PIPE，`:stdin=` 只能在没有 input 时给 ——
+                # 两个同时传是 ValueError，而那条路正是 `nmcli --ask` 连 Wi-Fi 走的路
+                # （实机症状：网络页上点「连接」必报错，命令行手敲 `nmcli d wifi connect`
+                # 反倒一次就成）。
+                pipes = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
                 try:
                     proc = subprocess.run(
                         argv,
                         capture_output=True,
                         text=True,
-                        input=input,
-                        # 不给 input 就接 DEVNULL：后端的 stdin 走着密码，子进程万一读
-                        # stdin 会把密码字节吞掉（与 `_run_streamed` 同一条纪律）
-                        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                         cwd=cwd,
                         check=False,
                         timeout=timeout,
+                        **pipes,
                     )
                 except subprocess.TimeoutExpired as exc:
                     raise self._timeout_error(argv, timeout, exit_code) from exc
                 stdout: str | None = (proc.stdout or "").rstrip("\n")
             else:
                 proc = self._run_streamed(argv, input=input, cwd=cwd,
-                                          timeout=timeout, exit_code=exit_code)
+                                          timeout=timeout, exit_code=exit_code,
+                                          on_line=on_line)
                 stdout = None
         except FileNotFoundError as exc:
             raise InstallerError(
@@ -224,10 +241,11 @@ class Runner:
         )
 
     def _run_streamed(self, argv: list[str], *, input: str | None = None, cwd: str | None = None,
-                      timeout: float | None = None, exit_code: int = EXIT_UNEXPECTED):
+                      timeout: float | None = None, exit_code: int = EXIT_UNEXPECTED,
+                      on_line: Callable[[str], None] | None = None):
         """跑一条命令，输出逐行（清洗后）转发给 reporter。
 
-        三条纪律：
+        五条纪律：
 
         * **不继承 stdout**：mke2fs / pacman 的进度条、mkinitcpio 的旁白是给终端看的，
           直接流进本进程的 stdout，在界面下会把 JSON 事件流冲成满屏「后端输出无法解析」，
@@ -236,6 +254,13 @@ class Runner:
         * **C 工具强制行缓冲**：pacman / mke2fs 这类 C 实现的工具 stdout 接管道时是
           **全缓冲** —— 攒满 4 KiB 或进程退出才吐一次，实机症状是「一个阶段爆出一堆
           日志、随后装死」。有 stdbuf 就套 `stdbuf -oL -eL`（脚本类工具无副作用）。
+        * **读用 `read1()`，不用 `read()`**：文本管道的 `read(n)` 要**攒满 n 个字符
+          或等到 EOF** 才返回（实测：三行分 0.8 秒输出，1.21 秒才一次性到达）——
+          于是上面那条 stdbuf 白做，日志仍然一段一段的。`read1()` 是「有多少给多少」，
+          子进程吐一行就转发一行。这两个字之差就是「日志是流式还是分段」的全部原因。
+        * **`on_line` 先于旁白**：想在输出里认东西的调用方（pacman 的 `(14/345)`）
+          拿到的是**同一条清洗过的行**，与日志里那行一字不差；认出来的进度因此不会
+          与日志对不上。回调抛异常不吞 —— 那是调用方的 bug，不该在管道里静默。
         """
         exec_argv = argv
         if self.have("stdbuf"):
@@ -251,18 +276,33 @@ class Runner:
         )
         feeder = LineFeeder()
 
+        def deliver(line: str) -> None:
+            if on_line is not None:
+                on_line(line)
+            self.reporter.note(line)
+
         def pump() -> None:
             out = proc.stdout
             if out is None:
                 return
+            # 走底层字节流：`TextIOWrapper` 上没有 read1，而它的 `read()` 正是要避开的那一个。
+            # 解码用**这个流自己的编码**（`out.encoding`），与原来 text=True 的行为一致；
+            # 多字节字符被管道从中间切开时，增量解码器会把它留到下一块拼起来。
+            stream = getattr(out, "buffer", out)
+            read1 = getattr(stream, "read1", None) or stream.read
+            decoder = codecs.getincrementaldecoder(getattr(out, "encoding", None) or "utf-8")("replace")
             try:
-                for chunk in iter(lambda: out.read(4096), ""):
-                    for line in feeder.feed(chunk):
+                while True:
+                    chunk = read1(4096)
+                    if not chunk:
+                        break
+                    text = decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
+                    for line in feeder.feed(text):
                         if line:
-                            self.reporter.note(line)
+                            deliver(line)
                 for line in feeder.flush():
                     if line:
-                        self.reporter.note(line)
+                        deliver(line)
             finally:
                 out.close()
 

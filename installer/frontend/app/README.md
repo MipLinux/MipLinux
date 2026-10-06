@@ -161,6 +161,7 @@ MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js  
 | `plan` | `--print-plan` | `{filesystem, boot, esp, pacman_conf}` |
 | `checkHostname` / `checkLocale` / `checkKeymap` / `checkTimezone` | `--check-<项>=<值>` | `{ok, reason, message}`；`reason` 是 `format` / `notInList` / `notFound` |
 | `connectWifi` | `--connect-wifi=<SSID>`（密码走 stdin） | `{ok, reason, message}` —— **连不上也是 ok:true 的答案** |
+| `unmountTarget` | `--unmount-target` | `{ok, mounted}` —— 失败页那个「卸载 /mnt」：**只卸挂载，不碰盘**；卸完再看一眼 `/mnt`，所以 `ok` 说的是「真的卸干净了」 |
 
 一律用 `--开关=值` 而不是 `--开关 值`：值以 `-` 开头时（`-bad-` 这种主机名是测试用例里就有的），
 分开写会被 argparse 当成另一个开关，然后报一句与事实无关的错。
@@ -192,14 +193,26 @@ MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js  
 |---|---|
 | `hello` | 第一条。带 `protocol` 版本 |
 | `event` | 阶段与进度。`phase` 取自 `events.PHASES`（`start`/`disk`/`packages`/`configure`/`boot`/`done`） |
-| `note` | 给人看的旁白（目标盘、dry-run 之类） |
+| `note` | 给人看的旁白（目标盘、子进程的真实输出、dry-run 之类） |
 | `command` | 跑了哪条命令 |
-| `error` | 失败：退出码 + 消息 + 提示。**之后一定跟一条 `end`** |
+| `error` | 失败：退出码 + 消息 + 提示 + **失败码 `reason`**（`targetMounted` / `isPartition` / `diskInUse` / `notBlockDevice` / `timeout` …）。界面拿 `reason` 挑自己的句子，并在能一键补救的那几条上给按钮。**之后一定跟一条 `end`** |
 | `end` | 后端自己的收尾，带进程退出码 |
 | `exit` | **主进程加的**：子进程真的退出了，带 `code` 与 `cancelled` |
 
-`percent` 只有 `done` 那一条是 100，其余是 `null` —— 后端也不知道 `pacstrap` 装了百分之几。
-**进度条的推进单位因此是「阶段」，不是百分比**（`pages/progress.js` 的 `PHASES` 表）。
+**`event` 的进度分两层**（协议 `protocol: 2`）：
+
+| 字段 | 含义 |
+|---|---|
+| `phase` | 粗粒度：第几个阶段。界面画「第 k / n 个阶段」，**不再有全局百分比** |
+| `step_id` | 细粒度：阶段内子步骤的稳定 id，取自 `events.PHASE_STEPS`；界面查 `progress.step.<id>` 拿文案（**后端不发给人看的句子** —— 英文模式会露馅） |
+| `step` / `total` | 这一步**真的数得出来**的进度，例如 pacman 的 `(14/345)`。数不出来时是 `null`，界面据此画不确定态 |
+
+`percent` 只有 `done` 那一条是 100，其余是 `null`。
+
+为什么改成这样（2026-10-06 实机反馈）：旧版让界面按阶段落格算百分比，一进
+`packages` 就显示 70% —— 而那一刻第一个包还没下完。**全局百分比是对整次安装的预测，
+界面没有依据做这个预测**（四个阶段耗时差着量级：分区几十秒、下载看网速、initramfs 看 CPU）。
+现在环只说「第几个阶段」，阶段内的进度一律用后端数得出来的真计数。
 
 ### 7.5 `mock.js` 现在只做离线自检
 

@@ -124,65 +124,71 @@ export default {
       ]),
     ]);
 
+    const wifiList = net.wifi.length === 0
+      ? null
+      : listBox(
+          ...net.wifi.map((item) => {
+            const selected = setup.data.wifiSelected === item.ssid;
+            const chipId = `wifi-${item.ssid.replace(/[^a-zA-Z0-9]+/g, '-')}`;
+            return h('div', { class: 'stack', dataset: { wifi: item.ssid } }, [
+              option({
+                id: chipId,
+                icon: 'wifi-high',
+                title: item.ssid,
+                meta: item.security === 'open' ? t('network.connect') : t('network.password'),
+                selected,
+                tail: [
+                  net.connected && net.ssid === item.ssid
+                    ? badge({ label: t('network.connected'), tone: 'ok' })
+                    : null,
+                  signalBars(item.signal),
+                ],
+                onClick: () => {
+                  setup.set('wifiSelected', selected ? '' : item.ssid);
+                  setup.set('wifiPassword', '');
+                  ctx.rerender();
+                },
+              }),
+              selected
+                ? h('div', { class: 'wifi-editor' }, [
+                    item.security === 'open'
+                      ? null
+                      : field({
+                          controlId: 'wifi-password',
+                          label: t('network.password'),
+                          control: textInput({
+                            id: 'wifi-password',
+                            type: 'password',
+                            value: setup.data.wifiPassword || '',
+                            autocomplete: 'off',
+                            invalid: net.failure === 'auth',
+                            onInput: (value) => setup.set('wifiPassword', value),
+                            onEnter: () => connect(ctx, item),
+                          }),
+                        }),
+                    button({
+                      id: 'wifi-connect',
+                      label: net.connecting ? t('network.connecting') : t('network.connect'),
+                      variant: 'primary',
+                      disabled: net.connecting,
+                      onClick: () => connect(ctx, item),
+                    }),
+                  ])
+                : null,
+            ]);
+          })
+        );
+
     const wifiBody = net.scanning
       ? h('div', { class: 'stack' }, [
           h('div', { class: 'skeleton', style: { height: '64px' } }),
           h('div', { class: 'skeleton', style: { height: '64px' } }),
         ])
-      : net.wifi.length === 0
-        ? emptyState({ icon: 'wifi-high', text: t('network.none') })
-        : listBox(
-            ...net.wifi.map((item) => {
-              const selected = setup.data.wifiSelected === item.ssid;
-              const chipId = `wifi-${item.ssid.replace(/[^a-zA-Z0-9]+/g, '-')}`;
-              return h('div', { class: 'stack', dataset: { wifi: item.ssid } }, [
-                option({
-                  id: chipId,
-                  icon: 'wifi-high',
-                  title: item.ssid,
-                  meta: item.security === 'open' ? t('network.connect') : t('network.password'),
-                  selected,
-                  tail: [
-                    net.connected && net.ssid === item.ssid
-                      ? badge({ label: t('network.connected'), tone: 'ok' })
-                      : null,
-                    signalBars(item.signal),
-                  ],
-                  onClick: () => {
-                    setup.set('wifiSelected', selected ? '' : item.ssid);
-                    setup.set('wifiPassword', '');
-                    ctx.rerender();
-                  },
-                }),
-                selected
-                  ? h('div', { class: 'wifi-editor' }, [
-                      item.security === 'open'
-                        ? null
-                        : field({
-                            controlId: 'wifi-password',
-                            label: t('network.password'),
-                            control: textInput({
-                              id: 'wifi-password',
-                              type: 'password',
-                              value: setup.data.wifiPassword || '',
-                              autocomplete: 'off',
-                              invalid: net.failure === 'auth',
-                              onInput: (value) => setup.set('wifiPassword', value),
-                              onEnter: () => connect(ctx, item),
-                            }),
-                          }),
-                      button({
-                        id: 'wifi-connect',
-                        label: net.connecting ? t('network.connecting') : t('network.connect'),
-                        variant: 'primary',
-                        disabled: net.connecting,
-                        onClick: () => connect(ctx, item),
-                      }),
-                    ])
-                  : null,
-              ]);
-            })
-          );
+      : wifiList || emptyState({ icon: 'wifi-high', text: t('network.none') });
+
+    // 渐隐跟着「这一侧还有没有内容」走（与语言 / 键盘 / 时区页同一套）。
+    // 挂进微任务：render 返回时这棵树还没进文档，量 clientHeight 只会得到 0。
+    if (wifiList) queueMicrotask(() => attachScrollFade(wifiList));
 
     const failure = net.failure
       ? callout({
@@ -199,7 +205,15 @@ export default {
       pageHead({ title: t('network.title'), desc: t('network.desc') }),
       status,
       divider(),
-      panel({ title: t('network.available') }, [
+      // `fill: true` = **列表自己滚**，与目标盘 / 语言 / 键盘 / 时区页同一条规矩
+      // （维护者 2026-10-05：「允许滚动的是列表，不是整个页面」）。
+      //
+      // 网络页原先漏了它：`.list` 于是长成一个**滚不动却带 `overscroll-behavior:
+      // contain` 的滚动容器** —— Chromium 把落在它上面的滚轮整个吞掉、不链给页面
+      // （Electron 43 实测：`overflow-y:auto` + `contain` 且内容不溢出时，
+      // 父容器 scrollTop 恒为 0）。症状正是实机反馈的那条：选中一条网络（密码框
+      // 展开、列表变长）之后**怎么滚都不动**，只能再点一下取消选中。
+      panel({ title: t('network.available'), fill: true }, [
         failure,
         wifiBody,
         // 扫描动作跟在列表**下方**，与目标盘页同一条规矩（维护者 2026-10-05）：

@@ -49,7 +49,7 @@ test('Mock 与 Backend 同形 —— 探针跑的因此是产品代码的契约'
   }
 
   for (const name of ['diskById', 'rescanDisks', 'scanWifi', 'connectWifi', 'refreshNetwork', 'keymapView',
-    'checkHostname', 'onInstallEvent', 'startInstall', 'cancelInstall']) {
+    'checkHostname', 'onInstallEvent', 'startInstall', 'cancelInstall', 'unmountTarget']) {
     assert.equal(
       typeof mock[name],
       typeof real[name],
@@ -266,9 +266,18 @@ test('密码只进 secrets，不进 Plan（Plan 会被写进日志与命令行�
   const plan = buildPlan(setup);
   assert.ok(!JSON.stringify(plan).includes('hunter2'));
   assert.deepEqual(buildSecrets(setup), { user: 'hunter2', rootPassword: 'rootpw' });
-  // root 留空 = 不设，后端据此保持 root 锁定
+});
+
+test('root 留空 = 与用户密码相同（账户页就是这么承诺的）', () => {
+  // 回归：这里曾经回 `rootPassword: ''`，而 `main.js` 把空串当「没给 root 密码」→
+  // 后端保持 root 锁定。界面写着「留空则与用户密码相同」，装出来却是个登不进去的 root。
   assert.deepEqual(buildSecrets({ data: { password: 'hunter2', rootPassword: '' } }), {
     user: 'hunter2',
+    rootPassword: 'hunter2',
+  });
+  // 用户密码也是空（账户页会拦住，不该走到这里）：不设 root，别编一个空密码出来
+  assert.deepEqual(buildSecrets({ data: { password: '', rootPassword: '' } }), {
+    user: '',
     rootPassword: '',
   });
 });

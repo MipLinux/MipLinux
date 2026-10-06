@@ -1,54 +1,138 @@
 /**
- * 进度页（7）—— 阶段、百分比、日志、耗时
+ * 进度页（7）—— 阶段、当前步骤、真计数、日志、耗时
  *
- * **进度不再由界面编。** 这一页只做两件事：把 `backend.onInstallEvent()` 推来的
+ * **进度不由界面编。** 这一页只做两件事：把 `backend.onInstallEvent()` 推来的
  * 记录翻成画面，和把用户的取消请求送到 `backend.cancelInstall()`。
- * 「装到哪一步了」的答案在 `events.JsonReporter` 的事件流里，
- * 界面自己跑一个定时器往前拱百分比，是界面在描述它没做的事（M1 的纪律）。
  *
- * ## 三条口径
+ * ## 两层进度，两层都只说真话（2026-10-06 实机反馈后重做）
  *
- * 1. **百分比按阶段落格**：后端只在 `done` 那一条给 100，其余阶段不带百分比
- *    （它也不知道 `pacstrap` 装了百分之几）。所以进度条的推进单位是**阶段**：
- *    `start → 8% → disk → 18% → packages → 70% → configure → 88% → boot → 96%`。
- *    这是「到哪一步了」的诚实画法，比一个匀速爬动的假进度条更敢让人看。
- *    **100% 只留给 `done`**：boot 那一格里还有「装引导 + 校验 + 卸载目标落盘」，
- *    实机上卸载那一步等写缓存落盘能以分钟计 —— boot 落 100% 会让圆环在机器
- *    还在写盘时就报「装完了」（Issue #97 实机教训：「到 100% 后还卡很久」）。
- * 2. **日志里的话是后端说的**：阶段那几行走翻译键（`progress.phase.*`，中英都有）；
- *    `note` 是后端的旁白（目标盘、dry-run 之类），**原样显示不翻译** ——
- *    它是诊断信息，和 `journalctl` 里那行是同一句话，翻译它反而对不上。
- * 3. **取消只发生在阶段之间**：按下的那一刻只是「举手」（`SIGUSR1`），
- *    页面上那句提示就是这么写的（`progress.cancelHint`）。真的停下来之后
- *    后端给一条退出码 130，那时才回摘要页 —— 提前跳走会让人以为已经停了。
+ * 旧版是「一进阶段就把这一段的百分比先领了」：`start→8% / disk→18% /
+ * packages→70% / configure→88% / boot→96%`。实机上它的代价很直观 —— 第一个包还没
+ * 下完，环上就写着 70%（维护者：「安装系统实际上是很前期的事情，这里不应该给
+ * 70% 这么大的进度」）。**全局百分比是对整次安装的预测，而界面没有依据做这个预测**：
+ * 四个阶段的耗时差着量级（分区几十秒、下载看网速、initramfs 看 CPU）。
+ *
+ * 现在：
+ *   1. **环 = 第几个阶段 / 共几个阶段**（`PHASES.length`）。真的，永不倒退，
+ *      也永不提前领功；
+ *   2. **meter = 当前阶段内真的数得出来的进度**（`record.step / record.total`，
+ *      例如 pacman 的 `(14/345)`）。数不出来就画不确定态 —— 不编百分比；
+ *   3. **子步骤列表**：当前阶段报过的 `step_id`，名字走 `progress.step.<id>` ——
+ *      id 是后端事件里的稳定标识，界面不猜、也不自己排一份步骤表；
+ *   4. **时间**：`已用时` 是真的；不可细分的长步骤给一句「这一步以分钟计」；
+ *      packages 那一步按**本阶段**实测速率给一条局部估算，绝不外推到整次安装。
+ *
+ * ## 另外两条口径
+ *
+ * - **日志里的话是后端说的**：阶段那几行走翻译键（`progress.phase.*`）；
+ *   `note` 是后端的旁白（子进程的真实输出、耗时），**原样显示不翻译** ——
+ *   它是诊断信息，和 `journalctl` 里那行是同一句话。
+ * - **取消只发生在阶段之间**：按下的那一刻只是「举手」（`SIGUSR1`），页面上那句
+ *   提示就是这么写的（`progress.cancelHint`）。真停下来之后后端给 130，才回摘要页。
  */
 
-import { h } from '../dom.js';
-import { pageHead, panel, rings, meter, phaseList, callout } from '../components.js';
+import { h, clear } from '../dom.js';
+import { pageHead, panel, rings, meter, phaseList, button } from '../components.js';
+import { icon } from '../icons.js';
 import { ring, fill } from '../motion.js';
 import { buildPlan, buildSecrets } from '../backend.js';
 
 /**
- * 阶段边界 —— 与 `mipl_installer/events.py` 的 `PHASES` 一一对应。
+ * 阶段的显示顺序与文案键 —— 与 `mipl_installer/events.py` 的 `PHASES` 一一对应。
  *
- * 抄一份在这里是**有意的**：界面要知道「这个阶段在第几格」，就得有边界值，
- * 而边界值是产品决定（跑完 8% 算进了第一步），不是后端事实。
- * 名字对不上的话，下面 `phaseIndex()` 找不到就退回「不动」——不会画错，
- * 只会慢一格，那比一个错位的进度条好查。
+ * 这里**只认 id 与文案**，不再有百分比：全局百分比是界面替后端做的预测，
+ * 而依据在后端手里（它才知道每一步真的走到哪了）。
  */
 const PHASES = [
-  { phase: 'start', key: 'progress.phase.start', until: 8 },
-  { phase: 'disk', key: 'progress.phase.disk', until: 18 },
-  { phase: 'packages', key: 'progress.phase.packages', until: 70 },
-  { phase: 'configure', key: 'progress.phase.configure', until: 88 },
-  { phase: 'boot', key: 'progress.phase.boot', until: 96 },
+  { phase: 'start', key: 'progress.phase.start' },
+  { phase: 'disk', key: 'progress.phase.disk' },
+  { phase: 'packages', key: 'progress.phase.packages' },
+  { phase: 'configure', key: 'progress.phase.configure' },
+  { phase: 'boot', key: 'progress.phase.boot' },
 ];
+
+/**
+ * 「这一步以分钟计」的那几步：它们输出少、耗时长（gpg 等熵、导入几百个键、
+ * mkinitcpio 压缩），而界面又数不出子进度。说一句预期，比一个假百分比有用。
+ */
+const SLOW_STEPS = new Set(['keyring-init', 'keyring-populate', 'keyring-refresh', 'initramfs']);
+
+/**
+ * 失败码 → 界面自己的句子与补救动作。
+ *
+ * 认得的用本地化文案（英文模式才不会冒出中文），**认不出的照实摆后端那句** ——
+ * 编一句「安装失败」比原文更没用（同 `network.err.other` 的道理）。
+ * `action` 是能一键补救的那几条：目前只有「`/mnt` 被占用」（守卫拒绝时盘一个
+ * 字节都没动，卸掉挂载就能重来）。
+ */
+const KNOWN_FAILURES = {
+  targetMounted: {
+    title: 'progress.err.targetMounted',
+    hint: 'progress.err.targetMountedHint',
+    action: 'unmountTarget',
+  },
+};
+
+/** 一键卸载目标挂载点。**动作在后端**（`umount -R`），界面只发请求与报结果。 */
+async function unmountTarget(ctx) {
+  const result = await ctx.backend.unmountTarget();
+  if (result.ok) {
+    patch(ctx, { unmounted: true });
+    ctx.snackbar(ctx.t('progress.unmounted'));
+  } else {
+    ctx.snackbar(ctx.t('progress.unmountFailed'));
+  }
+  ctx.rerender();
+}
+
+/**
+ * 失败那一块：**什么坏了 / 下一步怎么办 / 能点什么 / 技术细节**。
+ *
+ * 不用 `.callout`：那里只放得下一句话，而失败要把这四件事分开说，还得塞得下一个
+ * 按钮。技术细节走原生 `<details>` 收起 —— 摆给要排查的人，不占别人的眼睛。
+ */
+function failureBlock(ctx, current) {
+  const t = ctx.t;
+  const known = current.failureReason ? KNOWN_FAILURES[current.failureReason] : null;
+  const title = known ? t(known.title) : (current.failure || t('common.error'));
+  const hint = known ? t(known.hint) : (current.failureHint || '');
+
+  const actions = [];
+  if (known && known.action === 'unmountTarget') {
+    actions.push(current.unmounted
+      ? h('span', { class: 'failure__done', text: t('progress.unmounted') })
+      : button({
+        id: 'failure-unmount',
+        label: t('progress.unmount'),
+        variant: 'primary',
+        onClick: () => unmountTarget(ctx),
+      }));
+  }
+
+  // **没有「技术细节」那一块。** 它曾经把后端那句原文与 hint 折起来摆在下面，
+  // 而那两句要么已经被上面的本地化文案说过了、要么就是标题本身 —— 一个只会重复
+  // 上一行的折叠块（实机反馈：「技术细节删除，没有用处」）。
+  // 认不出的失败码仍然照实把后端那句当标题摆出来，信息一个字没少；
+  // 要原文有 `journalctl -u mipl-installer` 与安装日志（后端的 stderr 都在那儿）。
+  return h('div', { class: 'failure', id: 'progress-error' }, [
+    h('div', { class: 'failure__head' }, [
+      icon('warning'),
+      h('div', { class: 'failure__body' }, [
+        h('div', { class: 'failure__title', text: title }),
+        hint ? h('div', { class: 'failure__hint', text: hint }) : null,
+      ]),
+    ]),
+    actions.length ? h('div', { class: 'failure__actions' }, actions) : null,
+  ]);
+}
 
 /** 界面侧的一次订阅与一个时钟。装完/离开时都要收掉，否则会「遥控」别的页面。 */
 let subscription = null;
 let clock = null;
 let advanceTimer = null;
 let startedAt = 0;
+/** packages 那一步的速率样本：`{at, step}`，只用来算**本阶段**的局部估算。 */
+let rateSample = null;
 
 function stop() {
   if (subscription) subscription();
@@ -57,6 +141,7 @@ function stop() {
   clock = null;
   if (advanceTimer) clearTimeout(advanceTimer);
   advanceTimer = null;
+  rateSample = null;
 }
 
 function stamp() {
@@ -87,24 +172,95 @@ function appendLog(ctx, text, tone = 'info') {
   }
 }
 
-/** 只改元素属性，不重画整页 —— 事件流每来一条就重画一次，页面会闪。 */
-function paint(ctx, percent, index) {
+/**
+ * 「按当前速度还需约 N 分钟」—— **只在本阶段内成立**，也只用本阶段实测到的样本。
+ *
+ * 不外推到整次安装：后面还有几步、各要多久，界面不知道。样本不够（刚装第一个包）
+ * 或算出来不到一分钟就不显示 —— 一句估不准的话比没有更糟。
+ */
+function localEta(progress) {
+  if (progress.stepId !== 'install' || !progress.total || !rateSample) return '';
+  const seconds = (Date.now() - rateSample.at) / 1000;
+  const done = progress.step - rateSample.step;
+  if (seconds < 5 || done < 1) return '';
+  const remaining = progress.total - progress.step;
+  const minutes = Math.round(remaining / (done / seconds) / 60);
+  return minutes >= 1 ? String(minutes) : '';
+}
+
+/** 环、阶段、meter、计数、提示 —— 每条事件都更新这几样（都是廉价的属性赋值）。 */
+function paint(ctx) {
+  const t = ctx.t;
+  const progress = ctx.setup.data.progress;
+  const completed = Math.min(progress.phaseIndex || 0, PHASES.length);
+
   const ringsEl = document.getElementById('progress-rings');
-  if (ringsEl) ring(ringsEl, percent);
+  ring(ringsEl, (completed / PHASES.length) * 100);
   const valueEl = ringsEl && ringsEl.querySelector('.rings__value');
-  if (valueEl) valueEl.textContent = `${Math.round(percent)}%`;
-  fill(document.querySelector('#progress-meter .meter__fill'), percent);
-  for (const row of document.querySelectorAll('.phase')) row.dataset.state = 'todo';
-  for (let i = 0; i < index; i += 1) {
-    const done = document.getElementById(`phase-${i}`);
-    if (done) done.dataset.state = 'done';
+  if (valueEl) valueEl.textContent = `${completed} / ${PHASES.length}`;
+
+  for (const [index, item] of PHASES.entries()) {
+    const row = document.getElementById(item.phase);
+    if (!row) continue;
+    row.dataset.state = index < (progress.phaseIndex || 0) ? 'done'
+      : index === progress.phaseIndex ? 'active' : 'todo';
   }
-  const active = document.getElementById(`phase-${index}`);
-  if (active) active.dataset.state = 'active';
+
+  const hasCounter = Boolean(progress.total) && Number.isFinite(progress.step);
+  const counterEl = document.getElementById('progress-counter');
+  if (counterEl) {
+    counterEl.textContent = hasCounter
+      ? (progress.stepId === 'install'
+        ? t('progress.packages', progress.step, progress.total)
+        : `${progress.step} / ${progress.total}`)
+      : '';
+  }
+  fill(document.querySelector('#progress-meter .meter__fill'),
+    hasCounter ? (progress.step / progress.total) * 100 : 0);
+  const meterEl = document.getElementById('progress-meter');
+  if (meterEl) meterEl.classList.toggle('meter--indeterminate', !hasCounter && !progress.done);
+
+  const hintEl = document.getElementById('progress-hint');
+  if (hintEl) {
+    const minutes = localEta(progress);
+    hintEl.textContent = minutes ? t('progress.eta', minutes)
+      : SLOW_STEPS.has(progress.stepId) ? t('progress.slow') : '';
+  }
+
   const elapsedEl = document.getElementById('progress-elapsed');
   if (elapsedEl) {
-    elapsedEl.textContent = ctx.t('progress.elapsed', `${Math.floor(stamp().elapsed / 60)}:${stamp().elapsed % 60}`);
+    elapsedEl.textContent = t('progress.elapsed', `${Math.floor(stamp().elapsed / 60)}:${stamp().elapsed % 60}`);
   }
+}
+
+/**
+ * 子步骤列表：**只画后端已经报过的那几步**，名字查 `progress.step.<id>`。
+ *
+ * 不预先排一份「这个阶段有哪几步」的表：那会成为第二份真相（后端加一步、
+ * 界面这里忘了加，表现是这一步永远不出现）。已经报过的按顺序列出来，
+ * 当前那一步高亮 —— 下一个阶段一开，这一块就整个换掉。
+ */
+function renderSteps(ctx) {
+  const host = document.getElementById('progress-steps');
+  if (!host) return;
+  const progress = ctx.setup.data.progress;
+  const steps = progress.steps || [];
+  const currentIndex = steps.indexOf(progress.stepId);
+  const signature = `${progress.phaseIndex}|${progress.stepId}|${steps.join(',')}`;
+  if (host.dataset.signature === signature) return;
+  host.dataset.signature = signature;
+  clear(host);
+  if (!steps.length) return;
+  host.append(
+    phaseList(
+      steps.map((id, index) => ({
+        id: `substep-${index}`,
+        state: id === progress.stepId ? 'active' : currentIndex >= 0 && index < currentIndex ? 'done' : 'todo',
+        label: ctx.t(`progress.step.${id}`),
+      })),
+      { className: 'phase-list--sub' }
+    )
+  );
 }
 
 function finish(ctx, { failed, message }) {
@@ -130,24 +286,42 @@ function onRecord(ctx, record) {
     case 'event': {
       if (record.phase === 'done') {
         appendLog(ctx, ctx.t('progress.done'), 'ok');
-        // phase 推过最后一格：五格全亮「完成」，也不留一格「进行中」在跳完成页
-        // 前的那九百毫秒里骗人
-        paint(ctx, 100, PHASES.length);
-        patch(ctx, { percent: 100, phase: PHASES.length });
+        patch(ctx, { phaseIndex: PHASES.length, stepId: null, step: null, total: null });
+        renderSteps(ctx);
+        paint(ctx);
         break;
       }
       const index = phaseIndex(record.phase);
       if (index === null) break;
-      if (index !== current.phase) appendLog(ctx, ctx.t(PHASES[index].key));
-      const percent = record.percent === null || record.percent === undefined
-        ? PHASES[index].until
-        : record.percent;
-      patch(ctx, { percent, phase: index });
-      paint(ctx, percent, index);
+      const changes = {};
+      if (index !== current.phaseIndex) {
+        // 阶段切换才在日志里记一行；细进度不进日志（它每装一个包就变一次）
+        appendLog(ctx, ctx.t(PHASES[index].key));
+        changes.phaseIndex = index;
+        changes.steps = [];
+        changes.stepId = null;
+        changes.step = null;
+        changes.total = null;
+        rateSample = null;
+      }
+      if (record.step_id) {
+        const steps = changes.steps || current.steps || [];
+        if (!steps.includes(record.step_id)) changes.steps = [...steps, record.step_id];
+        if (record.step_id !== current.stepId) rateSample = null;
+        changes.stepId = record.step_id;
+        changes.step = Number.isFinite(record.step) ? record.step : null;
+        changes.total = Number.isFinite(record.total) ? record.total : null;
+        if (record.step_id === 'install' && changes.step && !rateSample) {
+          rateSample = { at: Date.now(), step: changes.step };
+        }
+      }
+      patch(ctx, changes);
+      renderSteps(ctx);
+      paint(ctx);
       break;
     }
     case 'note':
-      // 后端的旁白：原样显示（见文件头第 2 条）
+      // 后端的旁白：原样显示（见文件头最后一条）
       if (record.message) appendLog(ctx, String(record.message));
       break;
     case 'command':
@@ -155,7 +329,14 @@ function onRecord(ctx, record) {
       // 要看它们有 journalctl（子进程的 stderr 也在那儿）。
       break;
     case 'error':
-      patch(ctx, { failed: true, failure: [record.message, record.hint].filter(Boolean).join('\n') });
+      // 后端那句原文与 `hint` 都留着（`failureBlock` 用它们当原始记录）；
+      // `reason` 是机器可读的失败码，界面拿它挑自己的句子与补救动作。
+      patch(ctx, {
+        failed: true,
+        failure: record.message || '',
+        failureHint: record.hint || '',
+        failureReason: record.reason || '',
+      });
       break;
     case 'end':
       patch(ctx, { exitCode: record.code });
@@ -185,12 +366,34 @@ function onRecord(ctx, record) {
   }
 }
 
+/**
+ * 订阅事件流 + 起一个走秒的钟。**两个入口共用**：新开一轮（`startRun`）与
+ * 中途回到这一页（`render` 的 resume 分支）。
+ */
+function attach(ctx) {
+  if (!subscription) {
+    subscription = ctx.backend.onInstallEvent((record) => onRecord(ctx, record));
+  }
+  if (!clock) {
+    clock = setInterval(() => {
+      const elapsedEl = document.getElementById('progress-elapsed');
+      if (elapsedEl) {
+        elapsedEl.textContent = ctx.t('progress.elapsed',
+          `${Math.floor(stamp().elapsed / 60)}:${stamp().elapsed % 60}`);
+      }
+    }, 1000);
+  }
+}
+
 function startRun(ctx) {
   stop();
   startedAt = Date.now();
   ctx.setup.data.progress = {
-    percent: 0,
-    phase: 0,
+    phaseIndex: 0,
+    stepId: null,
+    step: null,
+    total: null,
+    steps: [],
     lines: [],
     startedAt,
     done: false,
@@ -200,13 +403,7 @@ function startRun(ctx) {
     failure: '',
   };
   appendLog(ctx, ctx.t(PHASES[0].key));
-  subscription = ctx.backend.onInstallEvent((record) => onRecord(ctx, record));
-  clock = setInterval(() => {
-    const elapsedEl = document.getElementById('progress-elapsed');
-    if (elapsedEl) {
-      elapsedEl.textContent = ctx.t('progress.elapsed', `${Math.floor(stamp().elapsed / 60)}:${stamp().elapsed % 60}`);
-    }
-  }, 1000);
+  attach(ctx);
 
   ctx.backend.startInstall(buildPlan(ctx.setup), buildSecrets(ctx.setup)).then((result) => {
     if (result && result.ok === false) {
@@ -229,14 +426,20 @@ export default {
       return h('div', { class: 'stack' }, [pageHead({ title: t('progress.title') })]);
     }
 
-    // 进入这一页 = 开一轮安装。重进（重画）时若已经跑过，就不重开一次。
+    // 进入这一页 = 开一轮安装；一轮还没结束就回到这一页 = **接回去**，不是再开一轮。
     if (!progress.startedAt) {
       startRun(ctx);
     } else {
       startedAt = progress.startedAt;
+      // `onLeave` 会把订阅退掉（不退的话它会在别的页面上继续画），所以回到这一页
+      // 必须重新接上 —— 否则页面停在离开那一刻，看着像卡死。产品路径走不到这里
+      // （进度页没有返回），但这是一条**会静默冻住**的路，留着比修它危险。
+      attach(ctx);
+      renderSteps(ctx);
+      paint(ctx);
     }
 
-    // 用户在对话框里按了「取消安装」：这里才把请求送出去（见文件头第 3 条）
+    // 用户在对话框里按了「取消安装」：这里才把请求送出去（见文件头最后一条）
     if (progress.cancelRequested && !progress.cancelSent) {
       patch(ctx, { cancelSent: true });
       ctx.backend.cancelInstall();
@@ -244,12 +447,12 @@ export default {
     }
 
     const current = setup.data.progress;
+    const completed = Math.min(current.phaseIndex || 0, PHASES.length);
     const phases = PHASES.map((phase, index) => ({
-      id: `phase-${index}`,
+      id: phase.phase,
       label: t(phase.key),
-        // 「进行中」优先于「百分比到格」：否则阶段刚点亮（百分比落到本格上限）
-        // 就会被画成「已完成」，而它其实还在跑
-        state: index === current.phase ? 'active' : current.percent >= phase.until ? 'done' : 'todo',
+      // 「进行中」优先于「已完成」：阶段刚点亮时不该被画成已完成
+      state: index === current.phaseIndex ? 'active' : index < completed ? 'done' : 'todo',
     }));
     const { elapsed } = stamp();
 
@@ -260,26 +463,19 @@ export default {
 
     return h('div', { class: 'stack' }, [
       pageHead({ title: t('progress.title') }),
-      current.failed
-        ? callout({
-            id: 'progress-error',
-            tone: 'danger',
-            icon: 'warning',
-            text: t('common.error'),
-            extra: current.failure ? h('pre', { class: 'log log--inline', text: current.failure }) : null,
-          })
-        : null,
+      current.failed ? failureBlock(ctx, current) : null,
       panel(
         {},
         h('div', { class: 'progress-layout' }, [
           rings({
             id: 'progress-rings',
-            percent: current.percent || 0,
-            value: `${Math.round(current.percent || 0)}%`,
-            label: t('progress.title'),
+            percent: (completed / PHASES.length) * 100,
+            value: `${completed} / ${PHASES.length}`,
+            label: t('progress.stage'),
           }),
           h('div', { class: 'stack' }, [
             phaseList(phases),
+            h('div', { id: 'progress-steps' }),
             h('div', { class: 'row' }, [
               h('span', {
                 class: 'label',
@@ -287,12 +483,17 @@ export default {
                 text: t('progress.elapsed', `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`),
               }),
               h('span', { class: 'panel__spacer' }),
+              h('span', { class: 'caption', id: 'progress-hint', text: '' }),
+              h('span', { class: 'panel__spacer' }),
               h('span', {
                 class: 'caption',
                 text: current.failed ? '' : t('progress.cancelHint'),
               }),
             ]),
-            meter({ id: 'progress-meter', percent: current.percent || 0 }),
+            h('div', { class: 'row progress-meter' }, [
+              meter({ id: 'progress-meter', percent: 0 }),
+              h('span', { class: 'caption mono', id: 'progress-counter', text: '' }),
+            ]),
           ]),
         ])
       ),

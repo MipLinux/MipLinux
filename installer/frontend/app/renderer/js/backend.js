@@ -284,6 +284,19 @@ export class Backend {
   /* ------------------------------------------------------------ 安装 */
 
   /**
+   * 把目标挂载点卸干净 —— 失败页那个「卸载 /mnt」按钮。
+   *
+   * 后端**卸完会再看一眼** `/mnt` 还在不在挂载表里，所以这里如实回两个字段：
+   * `ok` = 真的卸干净了，`mounted` = 它还挂着。界面按 `ok` 说成败 ——
+   * 说成功了而实际还挂着，用户点第二次还是失败，只会以为按钮坏了。
+   */
+  async unmountTarget() {
+    const data = await this._query('unmountTarget');
+    if (!data) return { ok: false, mounted: true };
+    return { ok: Boolean(data.ok), mounted: Boolean(data.mounted) };
+  }
+
+  /**
    * 开始装。进度通过 `onInstallEvent` 推回来。
    *
    * `secrets`（密码）从这里下去之后**只走子进程的 stdin**，绝不进 argv ——
@@ -331,8 +344,17 @@ export function buildPlan(setup) {
   };
 }
 
-/** `setup.data` → 两个密码。root 留空 = 不设（后端保持 root 锁定，只用 sudo）。 */
+/**
+ * `setup.data` → 两个密码。
+ *
+ * **root 留空 = 与用户密码相同** —— 账户页的 `account.rootPasswordHint` 就是这么向
+ * 用户承诺的（tech/09 同一条口径）。这条翻译必须落在**这里**：`main.js` 只认
+ * 「有没有非空 rootPassword」，空就**不加** `--root-password-stdin`，而后端 CLI 的
+ * 语义是「不给这个开关 = 保持 root 锁定」。两处口径一撞，界面上写着「与用户密码
+ * 相同」、装出来的系统却有个登不进去的 root —— 实机反馈里这是最严重的一条。
+ */
 export function buildSecrets(setup) {
   const data = setup.data;
-  return { user: data.password || '', rootPassword: data.rootPassword || '' };
+  const user = data.password || '';
+  return { user, rootPassword: data.rootPassword || user };
 }

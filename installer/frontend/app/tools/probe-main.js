@@ -790,6 +790,103 @@ module.exports = async function probe({ app, win, launch }) {
     await sleep(360);
     await run('window.__mipl.setAdvanced(false)');
 
+    // ---------------------------------------------------------- 6.8 进度页：环不被子步骤顶动
+    // 2026-10-06 实机反馈：子进度一展开，阶段圆圈就往下跳 —— 根因是 `.progress-layout`
+    // 用 `align-items: center`，右列长高一次它就把环重新居中一次。改成顶部对齐之后，
+    // 环的位置只由它自己的尺寸决定。这条断言把它钉住（量的是**位置**，不是长相）。
+    // 这条要的是**一轮全新的假安装**：探针前面已经把进度页走过一次，
+// 那一轮的事件早就发完了（离开这一页时订阅已退掉），接回去只会停在一个
+// 早就不动的画面上 —— 量它没有任何意义。所以先把状态清掉，让它真开一轮。
+    await run('window.__mipl.setData("progress", {})');
+    await run('window.__mipl.goTo("progress")');
+    await sleep(140);
+    // 先等进场动效停下来再量：`pageEnter` 会给整页一个 translateY，
+    // 第一拍采到动画中间态的话，量到的是动效的位移，不是布局的位移
+    await settle();
+    const ringTrack = await run(`(async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const ringNow = () => document.getElementById('progress-rings');
+      // 先等这一页真的挂上（goTo 不等 renderPage 完成），再开始采样 ——
+      // 不然第一拍就落空，这条断言会「什么都没验」地绿掉
+      for (let i = 0; i < 20 && !ringNow(); i += 1) await wait(120);
+      // 再等进场动效（pageEnter 的 translateY）跑完：不然第一拍量到的是动效的位移
+      await wait(700);
+      const seen = [];
+      for (let i = 0; i < 16; i += 1) {
+        const ring = ringNow();
+        const right = document.querySelector('#page-progress .progress-layout > .stack');
+        if (!ring || !right) break;
+        seen.push({
+          top: Math.round(ring.getBoundingClientRect().top),
+          right: Math.round(right.getBoundingClientRect().height),
+          steps: document.querySelectorAll('#progress-steps .phase').length,
+        });
+        await wait(220);
+      }
+      return seen;
+    })()`);
+    const ringTops = [...new Set(ringTrack.map((item) => item.top))];
+    check(ringTrack.some((item) => item.steps > 0), '进度页：子步骤真的出现过（不然这条什么都没验）',
+      ringTrack.map((item) => item.steps));
+    check(ringTrack.some((item) => item.right > ringTrack[0].right + 20), '进度页：右列确实被撑高过',
+      ringTrack.map((item) => item.right));
+    check(ringTops.length === 1, '进度页：环的纵向位置不随子步骤变化（不重新居中）', ringTops);
+
+    // ---------------------------------------------------------- 6.9 失败页：能一键卸载
+    // 2026-10-06 实机反馈两条：错误提示丑、`/mnt` 被占用时只能切 tty 手敲 umount。
+    //
+    // 怎么造这个现场：先让这一轮假安装跑起来（`startedAt` 有值 = 这是**当前**这一轮），
+    // 再在**页面内**把失败状态注进去并重画。不能靠「先去别的页、再带着失败状态进来」——
+    // 那条路会被 `shouldRestartRun()` 正确清掉（它是防无限重装的那道闸）。
+    // `cancelRequested` 是顺手把假安装的定时器停掉：不停的话它下一秒就把失败状态冲了。
+    await run('window.__mipl.setData("progress", {})');
+    await run('window.__mipl.goTo("progress")');
+    await sleep(700);
+    await run(`window.__mipl.setData('progress', {
+      phaseIndex: 0, stepId: null, step: null, total: null, steps: [], lines: [],
+      startedAt: Date.now(), done: false, cancelled: false,
+      cancelRequested: true, cancelSent: false,
+      failed: true,
+      failure: '/mnt 已经是个挂载点，拒绝把系统装上去',
+      failureHint: '手动卸载后再跑；安装器不替谁卸载机器上已有的挂载',
+      failureReason: 'targetMounted',
+    })`);
+    await run('window.__mipl.rerender()');
+    await sleep(320);
+    const failureView = await run(`(() => {
+      const block = document.getElementById('progress-error');
+      if (!block) return { missing: true };
+      const btn = document.getElementById('failure-unmount');
+      return {
+        title: block.querySelector('.failure__title')?.textContent || '',
+        hint: block.querySelector('.failure__hint')?.textContent || '',
+        // 失败卡里**不该再有任何折叠块 / 原始输出框**：那两句要么已被上面的文案
+        // 说过、要么就是标题本身（实机反馈：「技术细节删除，没有用处」）
+        extra: block.querySelectorAll('details, pre').length,
+        button: btn ? btn.textContent.trim() : null,
+      };
+    })()`);
+    check(!failureView.missing && failureView.title === '目标挂载点已经被占用',
+      '失败页：标题走本地化文案（不是后端那句原文）', failureView.title);
+    check(Boolean(failureView.hint), '失败页：下一步那句话在', failureView.hint);
+    check(failureView.extra === 0, '失败页：没有多余的折叠块 / 原始输出框', failureView.extra);
+    check(failureView.button === '卸载 /mnt', '失败页：有「卸载 /mnt」按钮', failureView.button);
+    await shot('failure-target-mounted-1024x768');
+
+    const afterUnmount = await run(`(async () => {
+      const btn = document.getElementById('failure-unmount');
+      if (!btn) return { missing: true };
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      return {
+        button: Boolean(document.getElementById('failure-unmount')),
+        done: document.querySelector('.failure__done')?.textContent || '',
+        snackbar: document.querySelector('.snackbar')?.textContent || '',
+      };
+    })()`);
+    check(!afterUnmount.button && Boolean(afterUnmount.done),
+      '失败页：按一下就把「卸载 /mnt」变成「已卸载」（按钮不该留在那儿等人重复点）', afterUnmount);
+
     // ---------------------------------------------------------- 7. reduced-motion
     try {
       win.webContents.debugger.attach('1.3');

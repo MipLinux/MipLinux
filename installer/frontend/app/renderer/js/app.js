@@ -301,7 +301,9 @@ class App {
     // `steps.shouldRestartRun()` 上（那里有测试 —— 这条写错会变成失败后无限重装）。
     const progress = this.setup.data.progress;
     if (id === 'progress' && shouldRestartRun(progress, { cameFromProgress: this.page?.id === 'progress' })) {
-      this.setup.data.progress = { percent: 0, phase: 0, done: false, cancelled: false, failed: false };
+      // 整份丢掉（含 `startedAt`）：`pages/progress.js` 的 `startRun()` 会重新铺一份，
+      // 这里只需要「没有终态、也没有 startedAt」——形状归进度页自己管，不在这儿复述。
+      this.setup.data.progress = {};
     }
     const page = PAGES[id];
     if (!page) throw new Error(`没有这个页面模块：${id}`);

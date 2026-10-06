@@ -22,15 +22,65 @@ from typing import Protocol, TextIO
 # 阶段名：前端按它分组显示。顺序即执行顺序。
 PHASES = ("start", "disk", "packages", "configure", "boot", "done")
 
+#: 每个阶段内部的**子步骤 id**，顺序即执行顺序。空元组 = 这个阶段没有可列的子步骤。
+#:
+#: **这是接口的一部分**（与 `PHASES` 同级）：前端拿 id 查自己的文案
+#: （`renderer/i18n` 里的 `progress.step.<id>`），所以改 id 等于改接口。
+#: 后端只发 **id 与计数**，不发给人看的句子 —— 句子是界面的事，英文模式下把
+#: 后端的中文摆到屏幕上就是露馅（app/README.md §7.2）。
+#:
+#: 这里没有「下载」单独一格：pacman 的 `(n/m)` 是**一整个事务**的计数
+#: （取包与装包都算它），硬拆成两格就要替它编一个自己数不出来的分母。
+PHASE_STEPS: dict[str, tuple[str, ...]] = {
+    "start": (),
+    "disk": ("wait-devices", "wipe", "partition", "wait-parts",
+             "mkfs-esp", "mkfs-root", "mount", "uuids"),
+    "packages": ("keyring-init", "keyring-populate", "install"),
+    "configure": ("user", "user-password", "root-password", "locale",
+                  "keyring-refresh", "services", "reflector", "initramfs"),
+    "boot": ("bootctl", "entry", "nvram", "verify"),
+    "done": (),
+}
+
 
 @dataclass(frozen=True)
 class Event:
-    """一件事：在哪个阶段、干了什么、进度多少（0-100，未知则 None）。"""
+    """一件事：在哪个阶段、干了什么。
+
+    **进度分两层，两层都只说真话**（2026-10-06 实机反馈：原来那套「一进阶段就把
+    这一段的百分比先领了」的画法，会在刚开始下载时就显示 70%）：
+
+    * 粗粒度 = `phase`：界面画「第几个阶段 / 共几个」，这是真的；
+    * 细粒度 = `step_id` + `step`/`total`：阶段内**真的数得出来**的进度 ——
+      例如 pacman 的 `(14/345)`，分母就是 pacman 自己报的。
+
+    `step`/`total` 数不出来时**留 `None`**：界面据此画不确定态，而不是替后端编
+    一个百分比。`percent` 现在只有 `done` 那一条用（100）。
+    """
 
     phase: str
     message: str
     percent: int | None = None
     detail: str | None = None
+    #: 阶段内子步骤的稳定 id（见 `PHASE_STEPS`）
+    step_id: str | None = None
+    #: 这一步真的数出来的进度（`14` / `345` 个包）；数不出来就是 `None`
+    step: int | None = None
+    total: int | None = None
+
+
+def step_event(phase: str, step_id: str, message: str, *,
+               step: int | None = None, total: int | None = None) -> Event:
+    """阶段内的一个子步骤事件。
+
+    `step_id` 必须在 `PHASE_STEPS[phase]` 里 —— 校验放在构造函数里，是因为
+    「后端发了一个前端没有文案的 id」的代价是实机上冒出一行 `⟨缺键⟩` 或退回中文，
+    而那要等到装机才看得见。拼错 id 在这里当场炸，比那时好查。
+    """
+    known = PHASE_STEPS.get(phase, ())
+    if step_id not in known:
+        raise ValueError(f"{phase} 阶段没有子步骤 {step_id!r}；可选：{'、'.join(known) or '（无）'}")
+    return Event(phase, message, step_id=step_id, step=step, total=total)
 
 
 class Reporter(Protocol):
@@ -108,8 +158,11 @@ class TextReporter(FileSinks):
 
     # ── 事件 ──────────────────────────────────────────────────────────
     def emit(self, event: Event) -> None:
+        # 数得出来的细进度（`14/345` 个包）跟着那一条走：CLI 的日志要能一眼看出
+        # 「装到第几个包了」，而不必去数屏幕上有多少行 pacman 输出。
+        counter = f" [{event.step}/{event.total}]" if event.total else ""
         suffix = f" ({event.percent}%)" if event.percent is not None else ""
-        self._write(f"[{event.phase}] {event.message}{suffix}")
+        self._write(f"[{event.phase}] {event.message}{suffix}{counter}")
         if event.detail:
             for line in event.detail.rstrip("\n").splitlines():
                 self._write(f"    {line}")
@@ -128,7 +181,10 @@ class TextReporter(FileSinks):
 #: JSON 行的协议版本。**事件名与字段名是接口**（见 app/README.md 的耦合层一节）：
 #: 加字段可以，改名字要前端跟着改。这里只出现在 `hello` 一条里，
 #: 前端拿它判断「对面是不是我认识的这个后端」。
-PROTOCOL = 1
+#:
+#: 2：`event` 多了 `step_id` / `step` / `total`（阶段内的细进度），`percent`
+#:    收窄成「只有 `done` 用」。界面那侧据此不再自己按阶段落格算百分比。
+PROTOCOL = 2
 
 
 class JsonReporter(FileSinks):
@@ -147,7 +203,7 @@ class JsonReporter(FileSinks):
     | `event` | `emit()` | 阶段与进度。`phase` 取自 `PHASES` |
     | `note` | `note()` | 给人看的旁白（`command` 与 `note` 在前端是同一种东西） |
     | `command` | `command()` | 跑了哪条命令（不实现也行，但实机上排查靠它） |
-    | `error` | `error()` | 失败：退出码 + 消息 + 提示。**之后一定跟一条 `end`** |
+    | `error` | `error()` | 失败：退出码 + 消息 + 提示 + 失败码 `reason`。**之后一定跟一条 `end`** |
     | `end` | `finish()` | 收尾。带进程退出码，前端据此决定是「装完了」还是「失败了」 |
 
     最后两条是刻意加的：子进程的退出码当然能等到 `close` 事件再拿，
@@ -169,6 +225,11 @@ class JsonReporter(FileSinks):
                 "message": event.message,
                 "percent": event.percent,
                 "detail": event.detail,
+                # 细进度三件套：`step_id` 查文案、`step`/`total` 画计数。
+                # 数不出来时是 `null` —— 界面据此画不确定态（不是 0）。
+                "step_id": event.step_id,
+                "step": event.step,
+                "total": event.total,
             }
         )
 
@@ -178,8 +239,16 @@ class JsonReporter(FileSinks):
     def note(self, message: str) -> None:
         self._write({"kind": "note", "message": message})
 
-    def error(self, code: int, message: str, hint: str | None = None) -> None:
-        self._write({"kind": "error", "code": code, "message": message, "hint": hint})
+    def error(self, code: int, message: str, hint: str | None = None,
+              reason: str | None = None) -> None:
+        """失败：退出码 + 消息 + 提示（+ 机器可读的 `reason`）。
+
+        `reason` 是给**界面**用的失败码（如 `targetMounted`）：界面据此挑自己的
+        句子，并在能一键补救的那几条上给出按钮。没有它，界面只能去比对中文报错 ——
+        那是措辞，改一个字就失效（与 `network.classify_failure` 同一条道理）。
+        """
+        self._write({"kind": "error", "code": code, "message": message, "hint": hint,
+                     "reason": reason})
 
     def finish(self, code: int) -> None:
         self._write({"kind": "end", "code": code})

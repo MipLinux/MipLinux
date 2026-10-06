@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import util
 from .configure import TargetConfig
+from .events import step_event
 from .util import (
     EXIT_BOOT,
     InstallerError,
@@ -67,12 +68,14 @@ def entry_path(cfg: TargetConfig) -> str:
 
 
 def write_entries(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
+    runner.reporter.emit(step_event("boot", "entry", "写引导项"))
     write_text(runner, entry_path(cfg), loader_entry(root_uuid))
     write_text(runner, f"{cfg.target}/boot/loader/loader.conf", loader_conf())
 
 
 def install_bootloader(runner: Runner, cfg: TargetConfig, root_uuid: str, *, no_nvram: bool = False) -> None:
     """装 systemd-boot 到 ESP（顺带写 NVRAM，除非 no_nvram）。"""
+    runner.reporter.emit(step_event("boot", "bootctl", "安装 systemd-boot 到 ESP"))
     argv = ["bootctl", "--esp-path=/boot"]
     if no_nvram:
         argv.append("--no-variables")
@@ -106,6 +109,7 @@ def ensure_efi_entry(runner: Runner, cfg: TargetConfig, *, no_nvram: bool = Fals
     这一步失败意味着「盘上的系统是好的，但固件不知道去哪找它」，
     正好是失败模式清单里那条。
     """
+    runner.reporter.emit(step_event("boot", "nvram", "写固件引导项"))
     if no_nvram:
         # 不动固件，那就必须留一条「不靠 NVRAM」的路，否则这块盘在真机上起不来
         runner.reporter.note("--no-nvram：不写固件引导项，改留可移除介质路径")
@@ -170,6 +174,7 @@ def verify(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
     现场极难定位。第二道是 entry 里的 UUID 与实际 root 分区的 UUID 一致 ——
     UUID 写错的话，内核起得来、找不到根，掉进 emergency shell。
     """
+    runner.reporter.emit(step_event("boot", "verify", "校验引导"))
     if runner.dry_run:
         return
     missing = [name for name in ("vmlinuz-linux", "initramfs-linux.img")

@@ -168,6 +168,11 @@ const QUERY_ARGV = {
   checkKeymap: (options) => [`--check-keymap=${str(options, 'value')}`],
   checkTimezone: (options) => [`--check-timezone=${str(options, 'value')}`],
   connectWifi: (options) => [`--connect-wifi=${str(options, 'ssid')}`],
+  // 完成页的「重启」也走这一层：系统动作在**后端**（`queries.reboot` → `systemctl reboot`），
+  // 主进程只把出口名翻成命令行。前端自己 exec 系统命令，就等于多了一处没人记日志的动系统的地方。
+  reboot: () => ['--reboot'],
+  // 失败页的「卸载 /mnt」同理（`queries.unmount_target` → `umount -R /mnt`）
+  unmountTarget: () => ['--unmount-target'],
 };
 
 function str(options, key) {
@@ -288,8 +293,10 @@ let installRun = null;
 
 function startInstall(win, plan, secrets) {
   if (installRun) return { ok: false, error: '已经有一次安装在进行中' };
-  // 两行密码的顺序固定：用户在前、root 在后（cli.py 的红线）。root 不给就
-  // **不加**那个开关 —— 后端据此保持 root 锁定，只用 sudo 提权。
+  // 两行密码的顺序固定：用户在前、root 在后（cli.py 的红线）。`rootPassword` 空 =
+  // **不加**那个开关，后端据此保持 root 锁定。注意「root 留空 = 与用户密码相同」
+  // 这条界面口径的翻译点在 `renderer/js/backend.js` 的 `buildSecrets()` —— 到这一步
+  // 它已经是具体值了；在这里再补一次回退，等于把口径复制成两份。
   const user = typeof secrets.user === 'string' ? secrets.user : '';
   const root = typeof secrets.rootPassword === 'string' && secrets.rootPassword ? secrets.rootPassword : null;
 
@@ -466,10 +473,15 @@ app.whenReady().then(async () => {
   }
   const win = createWindow(launch);
 
-  ipcMain.handle('mipl:reboot', () => {
-    // v0.1：完成页的「重启」在真机由后端接管（systemctl reboot）；本层只记录，不做安装逻辑
-    console.log('[mipl-installer] 完成页请求重启（真机由后端接管，前端不执行）');
-    return { ok: true, handled: false };
+  ipcMain.handle('mipl:reboot', async () => {
+    // 完成页的「重启」= 后端的 `--reboot` 出口（`systemctl reboot`）。
+    // v0.1 曾经只在这里打一行日志就回 `handled:false` —— 界面上按钮点得动、
+    // 系统一动不动，是最难查的一类假按钮（实机反馈）。
+    const result = await runQuery('reboot');
+    // 失败的**原文**进 journal（中文），界面那侧只拿 `ok` 去查自己的文案 ——
+    // 英文模式下界面不许出现后端的中文句子（app/README.md §7.2）。
+    if (!result.ok) console.error(`[mipl-installer] 重启失败：${result.error}`);
+    return result;
   });
 
   ipcMain.handle('mipl:window-info', () => ({
@@ -504,3 +516,10 @@ app.whenReady().then(async () => {
 
 // 单实例：kiosk 里被拉起两次时，第二次直接退出，不要叠两个全屏窗口
 if (!app.requestSingleInstanceLock()) app.quit();
+
+// **不要在这里加 `process.on('SIGTERM')`。** 实测（Electron 43，2026-10-06）：
+// 浏览器进程里 Chromium 自己的信号处理器会把 Node 那个顶掉，注册了也不会被调用
+// （退出码 0、我那句日志一次都没打）。而 Chromium 的默认行为本身是**干脆的**：
+// 朝整个进程组发 SIGTERM，6 个 Electron 进程 3 秒内全部消失，没有残留。
+// 也就是说「关机时安装器这个 stop job 卡住」的根因不在这一层，
+// 停机上限由 unit 的 `TimeoutStopSec=` 兜（见 profile/.../mipl-installer.service）。

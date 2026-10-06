@@ -244,14 +244,16 @@ export function rings({ percent = 0, label, value, id }) {
   ]);
 }
 
-export function phaseList(phases) {
+export function phaseList(phases, { className = '' } = {}) {
   return h(
     'div',
-    { class: 'phase-list' },
+    { class: `phase-list${className ? ` ${className}` : ''}` },
     phases.map((phase) =>
       h('div', { class: 'phase', dataset: { state: phase.state }, id: phase.id }, [
         h('span', { class: 'phase__mark' }, icon(phase.state === 'done' ? 'check' : 'caret-right')),
-        h('span', { text: phase.label }),
+        h('span', { class: 'phase__text', text: phase.label }),
+        // 尾巴给「14 / 345 个包」这类真计数（进度页的子步骤用）
+        phase.tail ? h('span', { class: 'phase__tail', text: phase.tail }) : null,
       ])
     )
   );

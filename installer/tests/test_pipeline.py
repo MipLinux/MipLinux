@@ -109,12 +109,79 @@ class TestRunPhases(_RunCase):
         for phase in {event.phase for event in self.reporter.events}:
             self.assertIn(phase, events.PHASES)
 
+    def test_done_is_the_only_event_carrying_a_percent(self):
+        """**全局百分比没有了**（2026-10-06 实机反馈：一进 packages 就显示 70%）。
+
+        现在只有 `done` 那一条带 100；其余进度一律走 `step_id` + `step`/`total`
+        （当前阶段内**真的数得出来**的那部分）。
+        """
+        pipeline.run(self.plan(), self.reporter, password="pw", confirm=lambda *a: None)
+        for event in self.reporter.events:
+            if event.percent is not None:
+                self.assertEqual((event.phase, event.percent), ("done", 100))
+                self.assertIsNone(event.step, "done 不该带细计数")
+
     def test_only_the_requested_steps_run(self):
         pipeline.run(self.plan(steps=("disk", "boot")), self.reporter,
                      password="pw", confirm=lambda *a: None)
         self.assertEqual(self.phases(), ["start", "disk", "boot", "done"])
         self.steps["step_packages"].assert_not_called()
         self.steps["step_configure"].assert_not_called()
+
+
+class TestProgressEvents(unittest.TestCase):
+    """细进度的契约：**跑真的四个阶段模块**（不换成替身），看它们各自发了什么。
+
+    `_RunCase` 把四个 `step_*` 全 mock 掉了，所以那一组验不到「模块自己发的
+    `step_id` 对不对」—— 而拼错一个 id 的表现是界面上那一格显示成缺键，
+    要等到装机才看得见。这一组用 dry-run 走完整条链，专验这件事。
+    """
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        # blkid 的 UUID 得给一个：`uuid_of` 读不到会当场报错（那是设计如此），
+        # 而这一组验的是进度事件、不是「dry-run 下 UUID 从哪来」。
+        self.runner = FakeRunner(reporter=self.reporter, dry_run=True,
+                                 outputs={"blkid": "11111111-1111-1111-1111-111111111111"})
+        patch = mock.patch("mipl_installer.pipeline.Runner", return_value=self.runner)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_chain(self, **overrides) -> list:
+        plan = pipeline.Plan(disk="/dev/vda", **overrides)
+        pipeline.run(plan, self.reporter, password="pw", confirm=lambda *a: None, dry_run=True)
+        return [event for event in self.reporter.events if event.step_id]
+
+    def test_every_step_id_belongs_to_its_phase(self):
+        steps = self.run_chain()
+        self.assertTrue(steps, "整条链一条细进度都没发 —— 进度页会退化成空壳")
+        for event in steps:
+            with self.subTest(phase=event.phase, step=event.step_id):
+                self.assertIn(event.step_id, events.PHASE_STEPS[event.phase])
+
+    def test_step_ids_of_a_phase_arrive_in_contract_order(self):
+        """子步骤按 `PHASE_STEPS` 的顺序出现 —— 界面就是按到达顺序画的。"""
+        seen: dict[str, list[str]] = {}
+        for event in self.run_chain():
+            seen.setdefault(event.phase, [])
+            if event.step_id not in seen[event.phase]:
+                seen[event.phase].append(event.step_id)
+        self.assertTrue(seen)
+        for phase, ids in seen.items():
+            with self.subTest(phase=phase):
+                contract = [step for step in events.PHASE_STEPS[phase] if step in ids]
+                self.assertEqual(ids, contract, f"{phase} 的步骤顺序与 PHASE_STEPS 对不上")
+
+    def test_no_step_event_invents_a_counter(self):
+        """dry-run 下数不出包数：`step`/`total` 必须是 `None`，不是 0。
+
+        界面按「有没有 total」决定画计数还是画不确定态 —— 编一个 0/0 出来，
+        它就会画成一根一直停在 0 的条。
+        """
+        for event in self.run_chain():
+            with self.subTest(step=event.step_id):
+                self.assertIsNone(event.step)
+                self.assertIsNone(event.total)
 
 
 class TestConfirmIsMandatory(_RunCase):
@@ -305,7 +372,9 @@ class TestAttachTargetLog(unittest.TestCase):
             reporter.note("落盘的一行")
             reporter.close()
             self.assertIn("落盘的一行", dest.read_text(encoding="utf-8"))
-            self.assertIn("持续并写", stream.getvalue())
+            # 挂上了**不说**：正常流里「我们把日志写到哪儿了」是自我指涉的噪音，
+            # 失败时由 `cli.log_locations()` 报（它会先确认文件真的在）。
+            self.assertNotIn("持续并写", stream.getvalue())
 
     def test_reporter_without_attach_is_a_noop(self):
         runner = FakeRunner(reporter=RecordingReporter())

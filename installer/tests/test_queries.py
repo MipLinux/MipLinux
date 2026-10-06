@@ -19,11 +19,13 @@ import json
 import re
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from mipl_installer import cli, events, queries
+from mipl_installer import cli, events, queries, util
 from mipl_installer.events import Event, JsonReporter
 from mipl_installer.util import EXIT_USAGE, InstallerError
+from tests.support import FakeRunner
 
 
 def _lines(text: str) -> list[dict]:
@@ -138,6 +140,23 @@ class TestJsonReporter(unittest.TestCase):
         self.reporter.emit(Event("packages", "正在从镜像源下载并安装软件包"))
         self.assertIsNone(_lines(self.stream.getvalue())[-1]["percent"])
 
+    def test_error_carries_the_machine_readable_reason(self):
+        """失败码是**给界面的**：界面拿它挑自己的句子、并决定给不给补救按钮。
+
+        没有它，界面只能去比对中文报错 —— 那是措辞，改一个字就失效
+        （2026-10-06：`/mnt` 被占用那条要能一键卸载，靠的就是这个字段）。
+        """
+        self.reporter.error(3, "/mnt 已经是个挂载点，拒绝把系统装上去",
+                            "手动卸载后再跑", "targetMounted")
+        record = _lines(self.stream.getvalue())[-1]
+        self.assertEqual(record["reason"], "targetMounted")
+        self.assertEqual(record["code"], 3)
+        self.assertEqual(record["hint"], "手动卸载后再跑")
+
+    def test_error_without_a_reason_says_null_not_empty(self):
+        self.reporter.error(7, "出事了", None)
+        self.assertIsNone(_lines(self.stream.getvalue())[-1]["reason"])
+
     def test_error_is_followed_by_end(self):
         """失败也要走同一条流、同一个解析器：只看 `close` 事件的话，
         被杀掉的进程和装完的进程长得一模一样。"""
@@ -175,6 +194,8 @@ class TestQueryRequested(unittest.TestCase):
         ["--check-keymap=us"],
         ["--check-timezone=Asia/Shanghai"],
         ["--connect-wifi=MyNet"],
+        ["--reboot"],
+        ["--unmount-target"],
     ]
 
     def test_every_read_only_flag_is_recognised(self):
@@ -256,6 +277,110 @@ class TestRunQuery(unittest.TestCase):
         fake.readline.return_value = "\n"
         with mock.patch.object(sys, "stdin", fake):
             self.assertEqual(cli.read_wifi_password(), "", "开放网络就是空密码，不该拒绝")
+
+    def test_reboot_is_a_query_and_starts_nothing_under_dry_run(self):
+        """`--reboot` 走出口那一支，且 `--dry-run` 下**一个子进程都不许起**。
+
+        回归（2026-10-06 实机事故）：`run_query()` 造 `Runner` 时漏传了
+        `dry_run=args.dry_run`，于是 `--reboot --dry-run` 在开发机上真的执行了
+        `systemctl reboot`。这条用例因此把 subprocess **封死** —— 它要证明的不是
+        「命令跑了」，而是「dry-run 下 subprocess 根本没被叫到」。
+        凡是碰系统动作的用例都该这样写：把出口封住，而不是指望参数拦得住。
+        """
+        boom = AssertionError("dry-run 下不许起任何子进程")
+        with mock.patch.object(util.subprocess, "run", side_effect=boom), \
+                mock.patch.object(util.subprocess, "Popen", side_effect=boom):
+            code, out, err = self._run(["--reboot", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True})
+
+    def test_reboot_runs_systemctl_reboot_through_the_runner(self):
+        """命令从**后端**发出（`Runner` 是动系统的唯一出口），且只跑这一条。
+
+        用 `FakeRunner`：这条断言看的是「拼出来的是哪条命令」，真去跑它就会重启
+        这台机器 —— 单测里不许出现真的 `systemctl reboot`。
+        """
+        runner = FakeRunner(dry_run=True)
+        self.assertEqual(queries.reboot(runner), {"ok": True})
+        self.assertEqual(runner.commands(), ["systemctl reboot"])
+
+    def test_unmount_target_reports_what_it_actually_saw(self):
+        """卸完**再看一眼** `/mnt` 还在不在挂载表里 —— 说「卸好了」而实际还挂着，
+        用户点第二次还是失败，只会以为按钮坏了。"""
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.disk.is_mountpoint", return_value=False):
+            self.assertEqual(queries.unmount_target(runner), {"ok": True, "mounted": False})
+        self.assertIn("umount -R /mnt", runner.commands())
+
+        still = FakeRunner()
+        with mock.patch("mipl_installer.disk.is_mountpoint", return_value=True):
+            self.assertEqual(queries.unmount_target(still), {"ok": False, "mounted": True})
+
+    def test_unmount_target_never_touches_the_disk_itself(self):
+        """它只卸挂载：命令里不许出现 wipefs / mkfs / parted 这类动盘的东西。"""
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.disk.is_mountpoint", return_value=False):
+            queries.unmount_target(runner)
+        joined = " ".join(runner.commands())
+        for forbidden in ("wipefs", "mkfs", "parted", "partprobe"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, joined)
+
+    def test_unmount_target_is_a_query_and_never_runs_under_dry_run(self):
+        boom = AssertionError("dry-run 下不许起任何子进程")
+        with mock.patch.object(util.subprocess, "run", side_effect=boom), \
+                mock.patch.object(util.subprocess, "Popen", side_effect=boom):
+            code, out, err = self._run(["--unmount-target", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "mounted": True})
+
+    def test_reboot_failure_is_not_reported_as_success(self):
+        """`systemctl reboot` 失败时不许回 `ok` —— 界面据此说「重启失败，请手动重启」。"""
+        runner = FakeRunner()
+        runner.fail_patterns.add("systemctl reboot")
+        with self.assertRaises(InstallerError):
+            queries.reboot(runner)
+
+
+class TestProgressContract(unittest.TestCase):
+    """进度事件的**跨语言契约**：后端发 `step_id`，前端查 `progress.step.<id>`。
+
+    两边各写各的、谁也不知道对方漏了什么的代价是：实机上那一格显示成 `⟨缺键⟩`，
+    或者英文模式下冒出一句中文。所以这里从后端唯一的 `PHASE_STEPS` 抽出全部 id，
+    逐个到两份文案里找 —— 抽的是**实现**，不是抄一份到测试里（抄一份会一起漂）。
+    """
+
+    def _strings(self, lang: str) -> dict:
+        path = (Path(__file__).resolve().parents[1]
+                / "frontend" / "app" / "renderer" / "i18n" / f"{lang}.json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_every_step_id_has_copy_in_both_languages(self):
+        for lang in ("zh_CN", "en_US"):
+            strings = self._strings(lang)
+            for phase, ids in events.PHASE_STEPS.items():
+                for step_id in ids:
+                    with self.subTest(lang=lang, phase=phase, step=step_id):
+                        self.assertIn(f"progress.step.{step_id}", strings)
+
+    def test_progress_page_knows_every_phase(self):
+        """进度页的阶段表与 `events.PHASES` 对齐：少一个，那一格就永远不亮。"""
+        source = (Path(__file__).resolve().parents[1]
+                  / "frontend" / "app" / "renderer" / "js" / "pages" / "progress.js").read_text(encoding="utf-8")
+        for phase in events.PHASES:
+            if phase == "done":
+                continue  # done 不是轨道上的一格，它是收尾
+            with self.subTest(phase=phase):
+                self.assertIn(f"phase: '{phase}'", source)
+
+    def test_the_ring_no_longer_claims_a_global_percentage(self):
+        """**回归**：环上不许再出现「一进阶段就领了这一段的百分比」。
+
+        旧版那张 `until: 70` 的落格表就是实机反馈里「刚开始下载就显示 70%」的来源。
+        """
+        source = (Path(__file__).resolve().parents[1]
+                  / "frontend" / "app" / "renderer" / "js" / "pages" / "progress.js").read_text(encoding="utf-8")
+        self.assertNotIn("until:", source)
 
 
 class TestQueryShapes(unittest.TestCase):

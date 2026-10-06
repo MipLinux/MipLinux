@@ -23,7 +23,7 @@ from typing import Callable
 
 from . import boot, configure, disk, options, packages, util
 from .configure import TargetConfig
-from .events import Event, Reporter
+from .events import Event, Reporter, step_event
 from .util import EXIT_USAGE, InstallerError, Runner
 
 #: 执行顺序即依赖顺序：分区 → 装包 → 配置 → 引导
@@ -142,6 +142,8 @@ def step_disk(runner: Runner, plan: Plan, cfg: TargetConfig, layout: disk.Layout
     state.esp, state.root = disk.wipe_and_partition(runner, plan.disk, layout)
     disk.make_filesystems(runner, state.esp, state.root)
     disk.mount_target(runner, state.root, state.esp, cfg.target)
+    # 两个 UUID 是 fstab 与引导项的原料，读不到会当场报错（见 disk.uuid_of）
+    runner.reporter.emit(step_event("disk", "uuids", "读取分区 UUID"))
     state.root_uuid = disk.uuid_of(runner, state.root)
     state.esp_uuid = disk.uuid_of(runner, state.esp)
 
@@ -186,10 +188,13 @@ def attach_target_log(runner: Runner, plan: Plan, reporter: Reporter) -> None:
     try:
         attach(str(dest))
     except OSError as exc:
-        # 日志写不进去不许把安装拖下水：Live 侧那份还在
+        # 日志写不进去不许把安装拖下水：Live 侧那份还在。这一句要说 ——
+        # 它意味着「出事后盘上没有证据」，与「日志会写进盘里」正相反。
         reporter.note(f"日志写不进目标盘（{dest}）：{exc}；只保留 Live 侧日志")
         return
-    reporter.note(f"安装日志持续并写到目标盘：{dest}（强杀 / 重启后仍在）")
+    # **挂上了不说。** 「我们把日志写到哪儿了」在正常流程里是自我指涉的噪音
+    # （实机反馈）；它只在出事时有用，那时由 `cli.log_locations()` 报出来 ——
+    # 而且那时它会先看一眼文件到底在不在，不报一个推测出来的路径。
 
 
 # ── 动盘之前 ──────────────────────────────────────────────────────────

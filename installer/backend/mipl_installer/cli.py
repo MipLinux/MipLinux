@@ -33,6 +33,7 @@ import getpass
 import json
 import signal
 import sys
+from pathlib import Path
 
 from . import disk, packages, pipeline, queries, util, __version__
 from .events import JsonReporter, TextReporter
@@ -90,7 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
     # 名字与 queries.EXITS / queries 里的函数一一对应。
     exits = parser.add_argument_group(
         "只读出口",
-        "看一眼运行环境，不动盘、不需要 root（--connect-wifi 除外，它会真的联网）。"
+        "看一眼运行环境，不动盘、不需要 root（--connect-wifi / --reboot / "
+        "--unmount-target 除外：它们分别真的连网、真的重启、真的卸载 /mnt）。"
         "输出恰好一份 JSON 文档。",
     )
     pick = exits.add_mutually_exclusive_group()
@@ -109,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     pick.add_argument("--check-timezone", metavar="名字", default=None, help="时区存不存在")
     pick.add_argument("--connect-wifi", metavar="SSID", default=None,
                       help="连一个无线网络；密码从 stdin 读一行")
+    pick.add_argument("--reboot", action="store_true",
+                      help="重启机器（完成页那个按钮）：跑 systemctl reboot，回 {ok}")
+    pick.add_argument("--unmount-target", action="store_true",
+                      help="把目标挂载点卸干净（失败页那个按钮）：回 {ok, mounted}")
     exits.add_argument("--rescan", action="store_true",
                        help="配合 --print-wifi：让 NetworkManager 重新扫一遍（慢几秒）")
 
@@ -257,6 +263,8 @@ def query_requested(args: argparse.Namespace) -> bool:
             args.check_keymap is not None,
             args.check_timezone is not None,
             args.connect_wifi is not None,
+            args.reboot,
+            args.unmount_target,
         )
     )
 
@@ -277,9 +285,14 @@ def run_query(args: argparse.Namespace) -> int:
     stdout 上**恰好一份 JSON 文档**，所以 `Runner` 的旁白（`--print-disks` 会跑
     `blkid`）走 stderr。混进 stdout 会让消费方「读一份 JSON」变成「先剥掉几行人话」，
     而那正是前端最不该做的事。
+
+    **`--dry-run` 在这里也必须生效。** 出口里有两个有副作用的（`--connect-wifi`
+    真的连网、`--reboot` 真的重启），它们的命令全走 `Runner` —— 这里漏传
+    `dry_run`，`--dry-run` 就成了一句空话：2026-10-06 就是这条漏传让
+    `--reboot --dry-run` 在开发机上真的重启了一次（当时以为 dry-run 拦得住）。
     """
     narration = TextReporter(stream=sys.stderr, log_path=args.log)
-    runner = Runner(narration)
+    runner = Runner(narration, dry_run=args.dry_run)
     try:
         if args.print_disks:
             payload = queries.disks(runner)
@@ -307,6 +320,10 @@ def run_query(args: argparse.Namespace) -> int:
             payload = queries.check_timezone(args.check_timezone)
         elif args.connect_wifi is not None:
             payload = queries.connect_wifi(runner, args.connect_wifi, read_wifi_password())
+        elif args.reboot:
+            payload = queries.reboot(runner)
+        elif args.unmount_target:
+            payload = queries.unmount_target(runner)
         else:  # pragma: no cover - query_requested() 与上面这支必须同步
             raise InstallerError(
                 "这个只读出口没有实现",
@@ -331,19 +348,31 @@ def report_failure(reporter, exc: InstallerError, *, json_mode: bool) -> None:
     子进程的 stderr，只发事件流的话，日志里就只剩一行行 JSON 了。
     """
     if json_mode:
-        reporter.error(exc.exit_code, str(exc), exc.hint)
+        reporter.error(exc.exit_code, str(exc), exc.hint, exc.reason)
     print(f"[失败] {exc.render()}", file=sys.stderr)
+
+
+def log_locations(args: argparse.Namespace) -> list[str]:
+    """失败时该去哪儿找日志 —— **只在失败时问**。
+
+    日志位置是一句「有用的话」，但只在出事的时候有用：正常流程里把「我们会把过程
+    写进哪儿」先说一遍，是自我指涉的噪音（实机反馈：「假惺惺提醒用户我们会输出日志」）。
+    所以它从开场白挪到了失败收尾。只报**确实存在**的那几份，不报一个推测出来的路径。
+    """
+    found: list[str] = []
+    if args.log:
+        live_copy = Path(args.log)
+        if live_copy.is_file():
+            found.append(f"{live_copy}（Live 侧，重启即没）")
+    target_log = Path(args.target) / pipeline.TARGET_LOG_NAME
+    if target_log.is_file():
+        found.append(f"{target_log}（目标盘，重启后仍在）")
+    return found
 
 
 def run_install(args: argparse.Namespace) -> int:
     json_mode = bool(args.json_events)
     reporter = JsonReporter(log_path=args.log) if json_mode else TextReporter(log_path=args.log)
-    # 实机教训：日志在 Live 的内存盘上，强杀/重启即没。目标盘挂上之后日志会持续
-    # 并写进去（pipeline.attach_target_log），这里先说清楚两份各在哪
-    reporter.note(
-        f"安装日志：分区挂载后持续并写到目标系统 /{pipeline.TARGET_LOG_NAME}（强杀 / 重启后仍在）"
-        + (f"；Live 侧副本：{args.log}（内存盘，重启即没）" if args.log else "")
-    )
     cancel = CancelFlag()
     previous = signal.signal(signal.SIGUSR1, cancel.request)
     code = util.EXIT_OK
@@ -370,6 +399,12 @@ def run_install(args: argparse.Namespace) -> int:
         report_failure(reporter, InstallerError(f"未预期的异常：{exc!r}", code), json_mode=json_mode)
     finally:
         signal.signal(signal.SIGUSR1, previous)
+        # 出事之后才说日志在哪（见 `log_locations`）—— 摆在这一步是因为此时
+        # 目标盘挂没挂、日志到底写成了没有，都已经有答案了。
+        if code != util.EXIT_OK:
+            locations = log_locations(args)
+            if locations:
+                reporter.note("日志：" + "；".join(locations))
         # `end` 一定要发：界面靠它把「子进程结束了」和「装完了」分开 ——
         # 只看 close 事件的话，被杀掉的进程和装完的进程长得一模一样。
         if json_mode:

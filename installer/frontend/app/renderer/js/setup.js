@@ -53,7 +53,11 @@ export class Setup {
       understood: false,
       confirmText: '',
       wifiPassword: '',
-      progress: { percent: 0, phase: 0, done: false, cancelled: false },
+      /**
+       * 进度页的状态由 `pages/progress.js` 整份写（阶段序号 + 当前子步骤 + 真计数 +
+       * 日志）。这里只留一个空对象：**形状归它自己**，别的模块不假装知道。
+       */
+      progress: {},
     };
   }
 
@@ -119,16 +123,9 @@ export class Setup {
     return this.go(this.index - 1);
   }
 
-  /** 进入进度页时重置进度状态（重跑一遍时不该带着上一次的 100%）。 */
-  resetProgress() {
-    this.data.progress = { percent: 0, phase: 0, done: false, cancelled: false };
-    this.emit();
-  }
-
-  onProgress(percent, phase) {
-    this.data.progress = { ...this.data.progress, percent, phase };
-    this.emit();
-  }
+  // 进度状态**不在这里**：它由 `pages/progress.js` 整份持有（阶段序号、当前子步骤、
+  // 真计数、日志），界面那侧不再自己算百分比 —— 所以这里没有 `resetProgress()` /
+  // `onProgress()` 之类的半套状态机（它们在 2026-10-06 的进度重做里删掉了）。
 
   emit() {
     for (const listener of this.listeners) listener(this);

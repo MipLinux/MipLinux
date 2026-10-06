@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import util
+from .events import step_event
 from .util import (
     EXIT_CONFIGURE,
     EXIT_GUARD,
@@ -222,24 +223,32 @@ def assert_usable(
     target_mountpoint: str,
     target_is_mountpoint: bool,
 ) -> Layout:
-    """动手前的全部守卫。**任一条不过就不动手**，不「先做着看看」。"""
+    """动手前的全部守卫。**任一条不过就不动手**，不「先做着看看」。
+
+    每一条都带 `reason`（机器可读的失败码）：界面据此挑自己的句子、并在能一键
+    补救的那一条上给出按钮（`targetMounted` → 「卸载 /mnt」，见 `queries.unmount_target`）。
+    没有 `reason` 的话，界面只能去比对中文报错 —— 那是外部工具的措辞，改一个字就失效。
+    """
     if not util.is_block_device(device):
         raise InstallerError(
             f"不是块设备：{device}",
             EXIT_GUARD,
             hint="给整块盘的路径，例如 Live 里挂上来的 /dev/vda（先 lsblk 确认）",
+            reason="notBlockDevice",
         )
     if util.is_partition(device):
         raise InstallerError(
             f"这是一个分区，不是整块盘：{device}",
             EXIT_GUARD,
             hint="去掉分区号，给整盘路径（/dev/vda1 → /dev/vda）",
+            reason="isPartition",
         )
     if target_is_mountpoint:
         raise InstallerError(
             f"{target_mountpoint} 已经是个挂载点，拒绝把系统装上去",
             EXIT_GUARD,
-            hint="手动卸载后再跑；安装器不替谁卸载机器上已有的挂载",
+            hint=f"手动卸载后再跑；安装器不替谁卸载机器上已有的挂载",
+            reason="targetMounted",
         )
 
     in_use = sorted(s for s in sources if same_device(s, device))
@@ -248,6 +257,7 @@ def assert_usable(
             f"这块盘正在被使用：{device}（挂载来源：{'、'.join(in_use)}）",
             EXIT_GUARD,
             hint="它是运行环境自己的盘 —— 换一块盘，别动这一块",
+            reason="diskInUse",
         )
     return plan_layout(size_bytes)
 
@@ -512,8 +522,10 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
     幂等：先擦掉盘上原有的分区表与残留文件系统，再重建 —— 同一块盘重复跑，
     结果一致（ROADMAP 的 S1 就是要验这一条）。
     """
+    runner.reporter.emit(step_event("disk", "wait-devices", "让内核与 udev 认全设备"))
     settle_udev(runner)
 
+    runner.reporter.emit(step_event("disk", "wipe", "擦除原有分区表与文件系统"))
     # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）。
     # 只擦**内核收下、节点也在**的那些：盘上的表里有名字不代表设备存在。
     for old, _, _ in kernel_partitions(device):
@@ -529,9 +541,11 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
         runner.reporter.note("dry-run：跳过 pyparted 建分区表与重读分区")
         return f"{device}1", f"{device}2"
 
+    runner.reporter.emit(step_event("disk", "partition", "创建 GPT（ESP + root）"))
     _parted_create(device, layout)
 
     # 分区表提交后让内核与 udev 跟上，再等节点出现（理由见 wait_for_partition_nodes）
+    runner.reporter.emit(step_event("disk", "wait-parts", "等分区节点就绪"))
     runner.run(["partprobe", device], check=False)
     settle_udev(runner)
     return wait_for_partition_nodes(runner, device)
@@ -649,12 +663,15 @@ def _parted_create(device: str, layout: Layout) -> None:
 
 
 def make_filesystems(runner: Runner, esp: str, root: str) -> None:
+    runner.reporter.emit(step_event("disk", "mkfs-esp", "格式化 ESP（vfat）"))
     runner.run(["mkfs.vfat", "-F", "32", "-n", FAT_LABEL, esp], exit_code=EXIT_GUARD)
+    runner.reporter.emit(step_event("disk", "mkfs-root", "格式化 root（ext4）"))
     runner.run(["mkfs.ext4", "-F", "-L", EXT4_LABEL, root], exit_code=EXIT_GUARD)
 
 
 def mount_target(runner: Runner, root: str, esp: str, target: str = "/mnt") -> None:
     """root 挂到 target，ESP 挂到 target/boot（理由见模块开头）。"""
+    runner.reporter.emit(step_event("disk", "mount", "挂载到目标系统"))
     if not runner.dry_run:
         # mkfs 完到这儿之间，udisks 可能已经自动挂上了目标分区：先解除再挂我们的
         for point in stray_mountpoints(util.read_text("/proc/self/mountinfo"), [root, esp], set()):

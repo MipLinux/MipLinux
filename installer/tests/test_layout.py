@@ -130,6 +130,36 @@ class TestAssertUsable(unittest.TestCase):
         with self.assertRaises(InstallerError) as ctx:
             self._call(target_is_mountpoint=True)
         self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+        # 失败码是**给界面的**：界面拿它挑自己的句子，并给出「卸载 /mnt」那个按钮
+        # （见 queries.unmount_target）。没有它，界面只能去比对中文报错。
+        self.assertEqual(ctx.exception.reason, "targetMounted")
+
+    def test_every_guard_carries_a_failure_code(self):
+        """四条守卫都要有 `reason` —— 少一条，界面在那条路上就只能照抄中文。"""
+        cases = {
+            "notBlockDevice": {"is_block_device": False},
+            "isPartition": {"is_partition": True},
+            "targetMounted": {"target_is_mountpoint": True},
+            "diskInUse": {"sources": {"/dev/vda2"}},   # 挂载来源里出现目标盘 = 它在被使用
+        }
+        for reason, overrides in cases.items():
+            with self.subTest(reason=reason):
+                patches = []
+                if "is_block_device" in overrides:
+                    patches.append(mock.patch("mipl_installer.util.is_block_device",
+                                              return_value=overrides["is_block_device"]))
+                if "is_partition" in overrides:
+                    patches.append(mock.patch("mipl_installer.util.is_partition",
+                                              return_value=overrides["is_partition"]))
+                for patch in patches:
+                    patch.start()
+                try:
+                    with self.assertRaises(InstallerError) as ctx:
+                        self._call(**{k: v for k, v in overrides.items() if not k.startswith("is_")})
+                    self.assertEqual(ctx.exception.reason, reason)
+                finally:
+                    for patch in patches:
+                        patch.stop()
 
     def test_refuses_disk_in_use(self):
         # 这是最要命的一条：运行环境自己的盘

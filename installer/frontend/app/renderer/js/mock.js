@@ -203,7 +203,11 @@ export class Mock {
 
   /**
    * 假的安装：按 `events.PHASES` 的顺序推一串事件，形状与 `events.JsonReporter`
-   * 的行**逐字一致**（`kind` / `phase` / `percent` / `detail`）。
+   * 的行**逐字一致**（`kind` / `phase` / `percent` / `detail` / `step_id` /
+   * `step` / `total`）。
+   *
+   * 细进度也要假戏真做：每个阶段推几个**真实的 step_id**，packages 那一步还带上
+   * `(n/m)` 计数 —— 否则探针验的是一张空壳进度页，而真机上它画的正是这些东西。
    *
    * 慢到足够被看见：探针每页等 200ms，太快的话进度页会在截图前就跳走 ——
    * 那样「渲染了进度页」这条断言就变成了在测运气。
@@ -213,22 +217,49 @@ export class Mock {
     const emit = (record) => {
       for (const listener of this._installListeners) listener(record);
     };
-    emit({ kind: 'hello', protocol: 1, version: 'mock' });
+    emit({ kind: 'hello', protocol: 2, version: 'mock' });
 
-    PHASES.forEach((phase, index) => {
+    // [阶段, 子步骤 id, step, total]；`step` 为空 = 这一步数不出细进度（不确定态）
+    const script = [
+      ['disk', 'wait-devices'], ['disk', 'wipe'], ['disk', 'partition'], ['disk', 'mount'],
+      ['packages', 'keyring-init'], ['packages', 'keyring-populate'],
+      ['packages', 'install', 1, 12], ['packages', 'install', 5, 12], ['packages', 'install', 12, 12],
+      ['configure', 'user'], ['configure', 'user-password'], ['configure', 'initramfs'],
+      ['boot', 'bootctl'], ['boot', 'entry'], ['boot', 'verify'],
+    ];
+
+    let at = 400;
+    let lastPhase = null;
+    for (const [phase, stepId, step, total] of script) {
+      // 替身不许自己发明阶段：阶段名与后端 `events.PHASES` 同源（见文件头）
+      if (!PHASES.includes(phase)) throw new Error(`mock 的步骤表用了未知阶段：${phase}`);
+      if (phase !== lastPhase) {
+        const message = PHASE_ACTIONS[phase];
+        this._installTimers.push(setTimeout(() => {
+          emit({ kind: 'event', phase, message, percent: null, detail: null,
+                 step_id: null, step: null, total: null });
+        }, at));
+        lastPhase = phase;
+        at += 160;
+      }
+      this._installTimers.push(setTimeout(() => {
+        emit({
+          kind: 'event', phase, message: PHASE_ACTIONS[phase], percent: null, detail: null,
+          step_id: stepId, step: step ?? null, total: total ?? null,
+        });
+      }, at));
+      at += 180;
+    }
+
+    this._installTimers.push(setTimeout(() => {
+      emit({ kind: 'event', phase: 'done', message: '装完了', percent: 100, detail: null,
+             step_id: null, step: null, total: null });
+      emit({ kind: 'end', code: 0 });
       this._installTimers.push(
-        setTimeout(() => {
-          emit({ kind: 'event', phase, message: PHASE_ACTIONS[phase], percent: null, detail: null });
-          if (index === PHASES.length - 1) {
-            emit({ kind: 'event', phase: 'done', message: '装完了', percent: 100, detail: null });
-            emit({ kind: 'end', code: 0 });
-            this._installTimers.push(
-              setTimeout(() => emit({ kind: 'exit', code: 0, cancelled: this._cancelled === true }), 200)
-            );
-          }
-        }, 400 * index)
+        setTimeout(() => emit({ kind: 'exit', code: 0, cancelled: this._cancelled === true }), 200)
       );
-    });
+    }, at + 300));
+
     this._cancelled = false;
     return { ok: true };
   }
@@ -237,6 +268,16 @@ export class Mock {
     this._cancelled = true;
     this.stopInstall();
     return { ok: true };
+  }
+
+  /**
+   * 「卸载 /mnt」的离线替身（`Backend.unmountTarget` 的同形实现）。
+   *
+   * 离屏探针里 `/mnt` 当然没挂着，所以回「卸好了」—— 探针要验的是**按钮接上了、
+   * 按下去有反馈**，不是真的去卸谁的东西。
+   */
+  async unmountTarget() {
+    return { ok: true, mounted: false };
   }
 
   onInstallEvent(listener) {

@@ -465,13 +465,15 @@ app.whenReady().then(async () => {
 
   const launch = parseLaunchArgs(process.argv);
   const gpuCheck = Boolean(process.env.MIPL_GPU_CHECK);
-  await logGpuStatus();
   // `MIPL_GPU_CHECK=1`：只打印 GPU 状态就退出（在实机上排查「到底用没用上显卡」）
   if (gpuCheck) {
+    await logGpuStatus();
     app.exit(0);
     return;
   }
   const win = createWindow(launch);
+  // GPU 状态只是诊断信息。先创建窗口，让它自己的首帧不等 GPU 查询完成。
+  void logGpuStatus();
 
   ipcMain.handle('mipl:reboot', async () => {
     // 完成页的「重启」= 后端的 `--reboot` 出口（`systemctl reboot`）。

@@ -29,13 +29,9 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/drafts"
 
 # 一份合规草案（照 TEMPLATE.md 的骨架写）。夹具**不依赖规范的具体措辞**，
-# 只依赖机制：字段小节、受理人角色、验收里的命令与期望、行数上限。
+# 只依赖机制：字段小节、验收里的命令与期望、行数上限。
 write_good_draft() {
   cat >"$T/good.md" <<'DRAFT'
-### 受理人
-
-维护者
-
 ### 目标
 
 让分工的载体从当日文档换成 issue —— 一条工作一个 issue，assignee 就是受理人。
@@ -110,10 +106,10 @@ awk 'BEGIN{skip=0} /^### 回报$/{skip=1; next} /^### /{skip=0} !skip{print}' "$
 expect "T2 抓到字段缺失" 1 "字段与规范不符"
 echo
 
-echo "── T3 受理人写人名（不许写 handle）"
+echo "── T3 受理人不写进正文草案"
 reset_fixture
-sed -i 's/^维护者$/LaT-SKY/' "$T/drafts/case.md"
-expect "T3 抓到受理人写人名" 1 "人名"
+{ printf '### 受理人\n\n@LaT-SKY\n\n'; cat "$T/drafts/case.md"; } >"$T/x" && mv "$T/x" "$T/drafts/case.md"
+expect "T3 抓到过时的受理人正文段" 1 "字段与规范不符"
 echo
 
 echo "── T4 验收写成「跑起来了」"

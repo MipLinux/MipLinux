@@ -111,8 +111,8 @@ def locale_conf(locale: str) -> str:
 
 
 def environment_text() -> str:
-    # 与 Live 出厂（profile/airootfs/etc/environment）同一份真相：fcitx5 需要这三个
-    # 变量才会被 GTK / Qt 程序选为输入法模块，没有它们「装了 fcitx5 也打不了中文」。
+    # 只写进目标系统：Live 安装器不装输入法；装后系统需要这三个变量，
+    # GTK / Qt 程序才会选用已安装的 fcitx5 输入法模块。
     return "GTK_IM_MODULE=fcitx\nQT_IM_MODULE=fcitx\nXMODIFIERS=@im=fcitx\n"
 
 

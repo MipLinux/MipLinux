@@ -27,7 +27,7 @@ MipLinux 解决两个 Arch 系发行版的常见麻烦：
 | 构建环境与基线 | ✅ 未修改的 `releng` 构建出 ISO，QEMU（UEFI）引导到 `[root@archiso ~]#` |
 | 自有 profile | ✅ `profile/` 进仓库并改名 MipLinux，产物 `miplinux-<日期>-x86_64.iso`（1.5 GiB，构建 2 分 08 秒） |
 | 装系统链路 | ✅ 安装器 M0、M1 实测：空盘装出能启动的系统（检查点 4），装后 `pacman -Syu` 成功（检查点 6）；检查点 5 到配置层 |
-| 国内源与中文本地化 | 🚧 国内源、`zh_CN.UTF-8`、CJK fallback、终端字体已并主线；装后系统的源继承、用户 / sudo、输入法环境变量已实测生效。CJK 字体与 `fcitx5` 的**包在 Live 清单里**，但**装后清单还没有**（[P10](docs/knowledge/06-待定事项.md)）；`reflector` 防线随 M4（[Issue #23](https://github.com/MipLinux/MipLinux/issues/23)） |
+| 国内源与中文本地化 | 🚧 国内源、`zh_CN.UTF-8`、CJK fallback、终端字体已并主线；装后系统的源继承、用户 / sudo、输入法环境变量已实测生效。清单现为 Live 保留 Noto CJK，装后系统列入 CJK 字体、Maple Mono 与 `fcitx5`；这次仅调整清单，安装后效果尚未重测（[P10](docs/knowledge/06-待定事项.md)）；`reflector` 防线随 M4（[Issue #23](https://github.com/MipLinux/MipLinux/issues/23)） |
 | NVIDIA 驱动 | 🚧 Live 清单已加 `nvidia-open` / `nvidia-utils`；真机第一次验证 ✅（09-22，RTX 5060 Max-Q，独显模式）：驱动加载、`nvidia-smi`、内屏点亮、`nmcli` 联网；装完重启后能用未做，由 M3 带 |
 | 安装程序 | 🚧 M0 / M1 完成、后端单测 239 全绿；M2 曾于 2026-09-26 用**当时的** Qt 前端实测通过。界面层此后两度重建，2026-10-04 定为 **Electron**（D14）：12 个页面（普通 8 + 高级 4）已能在 QEMU 的 Live 里走通（维护者 10-04 实机逐屏点过并提了 7 批反馈，已全部修完），ISO 体积 +104.5 MiB 实测；**键盘全流程 / 首帧预算 / 真机 NVIDIA 硬件渲染仍未实测**（[tech/11](docs/work/tech/11-安装器前端实测.md)） |
 | 桌面环境 / 品牌化 | ⬜ 未开始。P5 已定不做 DE，niri / Hyprland 待真机各跑一轮 |
@@ -35,7 +35,7 @@ MipLinux 解决两个 Arch 系发行版的常见麻烦：
 
 **「✅」= 本机实测过**，不代表下载到的成品已具备该能力。每阶段验到第几个检查点，以[测试方法](docs/knowledge/05-测试方法.md)的六个检查点为准。
 
-> **还没做：** 安装器界面层（Electron，D14 2026-10-04 改定）· 桌面环境 / 品牌化 · 装后系统的 CJK 字体与 `fcitx5` 包（P10）· NVIDIA 装后系统半段（M3）· 键盘目前只有 `us` 生效（[Issue #64](https://github.com/MipLinux/MipLinux/issues/64)）。
+> **还没做：** 安装器界面层（Electron，D14 2026-10-04 改定）· 桌面环境 / 品牌化 · 装后系统的 CJK 字体、Maple Mono 与 `fcitx5` 安装效果验证（P10）· NVIDIA 装后系统半段（M3）· 键盘目前只有 `us` 生效（[Issue #64](https://github.com/MipLinux/MipLinux/issues/64)）。
 
 ---
 

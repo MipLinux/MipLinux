@@ -12,8 +12,8 @@
 # 维护者拍板（方案 A）：中文三件套与 N 卡驱动进装后基础清单 —— D8 定的是
 # 「驱动由安装器装进装后系统」，configure.py 又已把 fcitx 的环境变量与 CJK
 # 字体 fallback 写进目标：包不进来，那两处配置就是死配置（installer/AGENTS.md
-# 里 D6 的反例：「Live 里中文能打字、装完不能」）。下面四段的包名与 Live
-# 清单同名段逐字对应；P10 定案只改清单**落位**，不再讨论这些包装不装。
+# 里 D6 的反例：「Live 里中文能打字、装完不能」）。安装器不需输入法或代码字体，
+# 因此 Maple Mono 与 fcitx 只列在装后清单；Noto CJK 字体同时供 Live 安装器显示中文。
 
 base
 linux
@@ -30,6 +30,8 @@ noto-fonts
 noto-fonts-cjk
 noto-fonts-emoji
 ttf-maplemono-nf-cn-unhinted
+ttf-maplemono-nf-unhinted
+ttf-maplemono
 # <== 中文支持 · 字体 <==
 
 # ==> 中文支持 · 输入法==>

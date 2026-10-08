@@ -99,7 +99,12 @@ docs/work/
 
 ### 怎么发布
 
-草案存 `out/issue-drafts/<主题>.md`（`out/` 已 gitignore，草案不是仓库资产），填好之后三条路：
+草案默认存 `out/issue-drafts/<主题>.md`（`out/` 已 gitignore，草案不是仓库资产），填好之后三条路：
+
+**`out/` 不可写时不必用 root 写普通文本。** `mipl.sh` 以 root 跑过后 `out/` 可能归 root、普通用户写不进去
+（属主处理由 Issue #93 单独决定，本规范不改它）—— 把草案存进任何可写的目录（如 `/tmp/mipl-drafts/<主题>.md`），
+校验改用 `MIPL_WORK_DRAFTS=<目录> ./scripts/check-work-issue.sh`（查整个目录）或
+`./scripts/check-work-issue.sh <草案路径>`（只查一份），两者都不需要 root；发布命令的 `--body-file` 指向草案实际路径。
 
 | 路 | 谁来做 | 怎么做 |
 |---|---|---|
@@ -115,7 +120,8 @@ docs/work/
 
 ### 守卫查到哪、查不到哪
 
-`./scripts/check-work-issue.sh`（不需要 root、只读）校验 `out/issue-drafts/*.md`：字段齐备且顺序正确、
+`./scripts/check-work-issue.sh`（不需要 root、只读）校验草案（默认 `out/issue-drafts/*.md`；`out/` 不可写时
+用 `MIPL_WORK_DRAFTS=<目录>` 换目录，或直接给草案路径，见[「怎么发布」](#怎么发布)）：字段齐备且顺序正确、
 验收段含命令与期望、实现段写出文件路径、没把 YAML frontmatter 或 HTML 注释
 抄进 issue 正文、≤60 行；外加**骨架与表单的字段是否漂移**（`TEMPLATE.md` ↔ `task.yml`）。
 assignee 是 GitHub issue 元数据，不属于正文草案，因此本地守卫不校验受理人。

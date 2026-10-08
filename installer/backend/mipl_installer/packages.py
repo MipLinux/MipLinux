@@ -26,8 +26,10 @@ M1 先读包内 `data/target-packages.x86_64`）。
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+from .events import step_event
 from .util import (
     EXIT_PACKAGES,
     EXIT_USAGE,
@@ -94,20 +96,66 @@ def init_keyring(runner: Runner, target: str) -> None:
     """在目标系统里建好并填充 keyring（**必须在 pacstrap 之前**，理由见模块开头）。"""
     gpgdir = f"{target}/etc/pacman.d/gnupg"
     ensure_dir(runner, f"{target}/etc/pacman.d")
+    # 这两步是实机上「界面像卡死」的高发点（gpg 等熵、导入并签几百个键），
+    # 而它们自己的输出又少 —— 先说一句「在动、要多久」，进度页才不至于沉默
+    runner.reporter.emit(step_event("packages", "keyring-init", "初始化目标密钥环"))
+    runner.reporter.note("缺熵的机器上这一步可能看似停住几十秒")
     runner.run(["pacman-key", "--gpgdir", gpgdir, "--init"], exit_code=EXIT_PACKAGES)
+    runner.reporter.emit(step_event("packages", "keyring-populate", "导入并签署 Arch 密钥"))
+    runner.reporter.note("几百个键要导入并签署，几十秒")
     runner.run(["pacman-key", "--gpgdir", gpgdir, "--populate", "archlinux"], exit_code=EXIT_PACKAGES)
 
 
-def pacstrap(runner: Runner, target: str, packages: list[str], pacman_conf: str) -> None:
+#: pacman 的进度行：`(14/345) installing foo`。**只认数字与括号** ——
+#: 括号后面那句人话会被 LANG 翻译（`正在安装`），而数字和括号在任何语言下都一样。
+#: 分母就是这一批要处理的包数（含依赖），由 pacman 自己数出来 ——
+#: 不用我们再问一遍仓库，也就不会出现「我们算 21、它装 345」那种对不上的分母。
+PACKAGE_PROGRESS = re.compile(r"\((\d+)/(\d+)\)")
+
+
+class PackageCounter:
+    """把 pacman 的 `(14/345)` 接成阶段内的细进度。
+
+    为什么要它：pacstrap 一次要处理几百个包、几分钟里没有别的动静，而界面上除了一句
+    「正在下载并安装软件包」什么都没有 —— pacman 其实一直在报「第几个 / 共几个」。
+    接出来的方式见 `Runner.run(on_line=…)`：回调拿到的是**同一条清洗过的行**，
+    与日志里那行一字不差。
+
+    同一个包会打多行（装包、检查密钥各一行），所以按 `(step, total)` 去重；
+    认不出来的行直接放过 —— 这条解析只影响「有没有细进度」，绝不影响装包。
+    """
+
+    def __init__(self, reporter) -> None:
+        self.reporter = reporter
+        self._last: tuple[int, int] | None = None
+
+    def feed(self, line: str) -> None:
+        match = PACKAGE_PROGRESS.search(line)
+        if not match:
+            return
+        current = (int(match.group(1)), int(match.group(2)))
+        if current == self._last:
+            return
+        self._last = current
+        self.reporter.emit(step_event(
+            "packages", "install", f"安装软件包 {current[0]}/{current[1]}",
+            step=current[0], total=current[1],
+        ))
+
+
+def pacstrap(runner: Runner, target: str, packages: list[str], pacman_conf: str,
+             counter: PackageCounter | None = None) -> None:
     """装包。
 
     `-C` 显式给 conf（不用运行环境默认的那份含糊）；`-G` 不抄运行系统的 keyring
     （我们已经建好目标自己的）；`-M` 不抄它的 mirrorlist（`configure.py` 写）。
+    `counter` 给了就一边跑一边把 `(n/m)` 接成细进度。
     """
     ensure_dir(runner, target)
     runner.run(
         ["pacstrap", "-C", pacman_conf, "-G", "-M", target, *packages],
         exit_code=EXIT_PACKAGES,
+        on_line=counter.feed if counter is not None else None,
     )
 
 
@@ -121,7 +169,8 @@ def install(
     packages = read_package_list(packages_file)
     runner.reporter.note(f"目标包清单：{packages_file}（{len(packages)} 个包）")
     init_keyring(runner, target)
-    pacstrap(runner, target, packages, pacman_conf)
+    runner.reporter.emit(step_event("packages", "install", "下载并安装软件包"))
+    pacstrap(runner, target, packages, pacman_conf, counter=PackageCounter(runner.reporter))
     # configure.py 里还会再 `pacman-key --populate archlinux` 一次（幂等）：
     # roadmap §M1 把这条写进了 configure 的职责，留着它，检查点 6 的排查路径才和文档对得上。
     return packages

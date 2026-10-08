@@ -1,8 +1,8 @@
-"""QEMU / Live 那一轮的预期画面，用假 sysfs 钉住。
+"""QEMU / Live 那一轮的设备形状，用假 sysfs 钉住。
 
-**为什么值得单独一个文件：** M2 的验收是「QEMU 里全程图形化装完一次」，而那一轮要
-root、要重建 ISO。真跑之前，至少要把**界面该显示什么**先算出来 —— 否则现场看到的
-每一个字都要现判断「这对不对」，而判断不了的东西等于没测。
+**为什么值得单独一个文件：** 验收是「QEMU 里全程图形化装完一次」，而那一轮要 root、
+要重建 ISO。真跑之前，至少要把**这一轮会看到哪几块盘**先算出来 —— 否则现场看到的
+每一项都要现判断「这对不对」，而判断不了的东西等于没测。
 
 QEMU 那一轮的设备是个很具体的形状（`scripts/mipl.sh` 的 qemu 参数决定）：
 
@@ -11,25 +11,22 @@ QEMU 那一轮的设备是个很具体的形状（`scripts/mipl.sh` 的 qemu 参
     Live 自带 zram               →  /dev/zram0 （没有 device 链接）
 
 目标盘是 `mipl target` 刚建出来的**空盘**，所以磁盘页应当显示「整块未使用」、
-比例条整条是未分配、并且因为只有一块可用盘而**自动选中**。这些都在下面断言。
+比例条整条是未分配、并且它是唯一可选的那一块。这些都在下面断言。
+
+> **界面那一半的断言搬到哪去了（Issue #97）。** 「这块盘在界面上显示成什么样」
+> ——`sizeLabel`、「（型号未报告）」、推荐标记、只列能装的盘—— 现在归
+> `installer/frontend/app/renderer/js/backend.js`（真跑时是它把后端事实翻成界面形状）。
+> 那个文件的断言在 `installer/frontend/app/tests/backend.test.mjs`。
+> 这里只留**后端这一侧**：这一轮会枚举出哪几块盘、各自是什么事实。
 """
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from mipl_installer import disk
-
-#: 测试要直接调 `bridge/records.py`（纯函数、不依赖 Qt），而 `tests/__init__.py`
-#: 只把 backend 接上 sys.path —— 所以这里补 frontend，路径知识不留第二份。
-_FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-if str(_FRONTEND) not in sys.path:
-    sys.path.insert(0, str(_FRONTEND))
-
-from bridge import records  # noqa: E402  （必须在 sys.path 补好之后）
 
 GiB = 1024 ** 3
 
@@ -74,7 +71,7 @@ def candidates(root: str) -> list[disk.Candidate]:
 
 
 class TestQemuLiveShape(unittest.TestCase):
-    """`linux` 那一轮的设备形状 → 界面该显示什么。"""
+    """`linux` 那一轮的设备形状 → 后端会报出哪几块盘。"""
 
     def test_sees_only_the_virtio_target_disk(self):
         """候选表里**只有** /dev/vda：光驱与 zram 都不该出现。"""
@@ -83,45 +80,30 @@ class TestQemuLiveShape(unittest.TestCase):
             found = candidates(tmp)
         self.assertEqual([c.path for c in found], ["/dev/vda"])
 
-    def test_empty_target_disk_looks_like_a_blank_disk(self):
-        """空盘（`mipl target` 刚建的）在磁盘页上应当就是「整块未使用」。"""
+    def test_empty_target_disk_is_usable(self):
+        """空盘（`mipl target` 刚建的）必须是能装的那一块 —— 不然这一轮根本开不了工。"""
         with tempfile.TemporaryDirectory() as tmp:
             build_sysfs(tmp)
-            record = records.disk_record(candidates(tmp)[0])
-        self.assertEqual(record["summary"], "整块未使用")
-        self.assertEqual(record["segments"], [{"kind": "free", "share": 1.0}])
-        self.assertEqual(record["size"], "40.0 GiB")
-        self.assertTrue(record["selectable"], "空盘必须可选 —— 不然 M2 那一轮根本开不了工")
-        self.assertEqual(record["badges"], [], "空盘没有任何要提醒的状态")
+            candidate = candidates(tmp)[0]
+        self.assertTrue(candidate.usable)
+        self.assertFalse(candidate.in_use)
+        self.assertFalse(candidate.too_small)
+        self.assertEqual(candidate.partitions, ())
+        self.assertEqual(candidate.size, 40 * GiB)
 
     def test_virtio_blk_has_no_model_and_we_do_not_invent_one(self):
         """virtio-blk 的 sysfs 里没有 model，`vendor` 是 PCI 厂商号 `0x1af4`。
 
-        界面显示「（型号未报告）」——**这是有意的**，不是漏了：界面上每个字都要能
-        指出出处（`DiskPage.qml` 文件头）。真机上（NVMe / SATA / USB）型号都在，
-        只有 QEMU 这种虚拟盘没有。
-
         **这条是实测补上的**：真 ISO 里那一行曾经显示成 `0x1af4`（PCI 厂商号被
         当成型号读出来了）—— 用户看到它学不到任何东西，比空着更糟。
+        界面把空型号显示成「（型号未报告）」，那是**界面**的措辞（见 Node 侧断言）。
         """
         with tempfile.TemporaryDirectory() as tmp:
             build_sysfs(tmp)
-            candidate = candidates(tmp)[0]
-            self.assertEqual(candidate.model, "")
-            self.assertEqual(records.disk_record(candidate)["model"], "（型号未报告）")
-
-    def test_only_one_usable_disk_so_the_page_auto_selects(self):
-        """恰好一块可用盘 → 磁盘页自动选中（`DiskPage.qml` 的 `autoSelected`）。
-
-        这一条是「默认路径只留一个真决策」在 QEMU 那一轮的实际形态。
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            build_sysfs(tmp)
-            usable = [c for c in candidates(tmp) if c.usable]
-        self.assertEqual(len(usable), 1)
+            self.assertEqual(candidates(tmp)[0].model, "")
 
     def test_second_install_run_shows_the_previous_layout(self):
-        """第二次装（盘上已有分区）时，比例条与摘要要来自**真分区**，不是猜的。"""
+        """第二次装（盘上已有分区）时，分区事实要来自**真 sysfs**，不是猜的。"""
         with tempfile.TemporaryDirectory() as tmp:
             # 1 MiB 对齐的 ESP 512 MiB + 剩下的数据分区，盘尾留 1 MiB
             total_sectors = 40 * GiB // 512
@@ -132,12 +114,15 @@ class TestQemuLiveShape(unittest.TestCase):
                 ("vda1", str(esp_start), str(esp_size)),
                 ("vda2", str(data_start), str(data_size)),
             ])
-            record = records.disk_record(candidates(tmp)[0])
-        self.assertEqual([s["kind"] for s in record["segments"]], ["os", "os"])
-        self.assertIn("512.0 MiB", record["summary"])
-        self.assertIn("39.5 GiB", record["summary"])
-        # 1 MiB 的对齐零头不值得出现在摘要里（FREESPACE_NOISE 那条阈值）
-        self.assertNotIn("未分配", record["summary"])
+            candidate = candidates(tmp)[0]
+        self.assertEqual([part.number for part in candidate.partitions], [1, 2])
+        self.assertEqual(candidate.partitions[0].size, esp_size * 512)
+        self.assertEqual(
+            sum(part.size for part in candidate.partitions),
+            (esp_size + data_size) * 512,
+        )
+        # 已有分区的盘仍然能装（重装到同一块盘是正常流程），只是不再被标成「推荐」
+        self.assertTrue(candidate.usable)
 
 
 if __name__ == "__main__":

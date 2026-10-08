@@ -9,6 +9,7 @@
 
 import { h } from '../dom.js';
 import { pageHead, panel } from '../components.js';
+import { DEFAULTS } from '../setup.js';
 import { selectableList } from './shared.js';
 import { dedupeZones, matchesZone } from '../tz-names.js';
 
@@ -17,9 +18,9 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
+    const { setup, backend } = ctx;
 
-    const zones = dedupeZones(mock.timezones, ctx.i18n);
+    const zones = dedupeZones(backend.timezones, ctx.i18n);
 
     const list = selectableList(
       {
@@ -27,6 +28,7 @@ export default {
         searchId: 'timezone-search',
         searchKey: 'timezone.search',
         selected: setup.data.timezone,
+        defaultValue: DEFAULTS.timezone,
         items: zones.map((zone) => ({
           value: zone.canonical,
           display: zone.display,

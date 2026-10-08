@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { FLOWS, flowFor, STEP_TITLE_KEY, NO_BACK } from '../renderer/js/steps.js';
+import { FLOWS, flowFor, STEP_TITLE_KEY, NO_BACK, shouldRestartRun } from '../renderer/js/steps.js';
 import { PAGES } from '../renderer/js/pages/index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -63,4 +63,27 @@ test('进度页与完成页不许后退', () => {
   assert.ok(NO_BACK.has('progress'));
   assert.ok(NO_BACK.has('finish'));
   assert.ok(!NO_BACK.has('summary'));
+});
+
+test('装失败之后不许自己重开一轮（无限重装是个真会写出来的 bug）', () => {
+  const failed = { percent: 40, phase: 1, startedAt: 1, done: false, cancelled: false, failed: true };
+
+  // 进度页自己重画（`finish()` 里那句 `ctx.rerender()`，为的是把后端那句话摆出来）：
+  // 这一条要是返回 true，就会出现「失败 → 清空状态 → 又 startRun() → 又失败」的死循环
+  assert.equal(
+    shouldRestartRun(failed, { cameFromProgress: true }),
+    false,
+    '进度页自己的重画绝不是「重新进入」'
+  );
+
+  // 从别的页走过来才算重跑（用户点了返回、又从前面的页面走到这一步）
+  assert.equal(shouldRestartRun(failed, { cameFromProgress: false }), true);
+  assert.equal(shouldRestartRun({ cancelled: true }, { cameFromProgress: false }), true);
+  assert.equal(shouldRestartRun({ done: true }, { cameFromProgress: false }), true);
+
+  // 一轮正在跑的时候，怎么进来都不该清状态
+  const running = { percent: 40, phase: 1, startedAt: 1, done: false, cancelled: false, failed: false };
+  assert.equal(shouldRestartRun(running, { cameFromProgress: false }), false);
+  assert.equal(shouldRestartRun(running, { cameFromProgress: true }), false);
+  assert.equal(shouldRestartRun(undefined, {}), false);
 });

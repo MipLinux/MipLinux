@@ -7,6 +7,7 @@
 
 import { h } from '../dom.js';
 import { pageHead, panel } from '../components.js';
+import { DEFAULTS } from '../setup.js';
 import { selectableList } from './shared.js';
 
 export default {
@@ -14,7 +15,7 @@ export default {
 
   render(ctx) {
     const t = ctx.t;
-    const { setup, mock } = ctx;
+    const { setup, backend } = ctx;
 
     const list = selectableList(
       {
@@ -22,7 +23,8 @@ export default {
         searchId: 'locale-search',
         searchKey: 'locale.search',
         selected: setup.data.locale,
-        items: mock.locales.map((locale) => ({
+        defaultValue: DEFAULTS.locale,
+        items: backend.locales.map((locale) => ({
           value: locale.id,
           display: locale.name,
           meta: locale.id,

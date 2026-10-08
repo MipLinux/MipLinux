@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import util
 from .configure import TargetConfig
+from .events import step_event
 from .util import (
     EXIT_BOOT,
     InstallerError,
@@ -35,6 +36,13 @@ from .util import (
 TITLE = "MipLinux"
 ENTRY_NAME = "miplinux.conf"
 LOADER_TIMEOUT = 3
+
+#: 碰固件 NVRAM 的命令的超时（秒）。健康机器上这几条都是秒级；固件变量存储
+#: 满 / 碎的时候 SetVariable / GetNextVariableName 能沉默地挂几十分钟（实机教训：
+#: 引导阶段挂 40 分钟、只能强杀）。超时不是失败 —— 是「NVRAM 这条路不可信」，
+#: 走可移除介质路径照样装得完、起得来。
+BOOTCTL_TIMEOUT = 120
+EFIBOOTMGR_TIMEOUT = 60
 
 ESP_SYSTEMD_BOOT = "EFI/systemd/systemd-bootx64.efi"
 ESP_REMOVABLE_PATH = "EFI/BOOT/BOOTX64.EFI"
@@ -60,19 +68,37 @@ def entry_path(cfg: TargetConfig) -> str:
 
 
 def write_entries(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
+    runner.reporter.emit(step_event("boot", "entry", "写引导项"))
     write_text(runner, entry_path(cfg), loader_entry(root_uuid))
     write_text(runner, f"{cfg.target}/boot/loader/loader.conf", loader_conf())
 
 
 def install_bootloader(runner: Runner, cfg: TargetConfig, root_uuid: str, *, no_nvram: bool = False) -> None:
     """装 systemd-boot 到 ESP（顺带写 NVRAM，除非 no_nvram）。"""
+    runner.reporter.emit(step_event("boot", "bootctl", "安装 systemd-boot 到 ESP"))
     argv = ["bootctl", "--esp-path=/boot"]
     if no_nvram:
         argv.append("--no-variables")
         runner.reporter.note("--no-nvram：只装文件，不碰固件引导项")
     argv.append("install")
-    runner.run(chroot_argv(cfg.target, argv), exit_code=EXIT_BOOT)
+    nvram_sick = False
+    try:
+        runner.run(chroot_argv(cfg.target, argv), exit_code=EXIT_BOOT, timeout=BOOTCTL_TIMEOUT)
+    except InstallerError as exc:
+        if exc.reason != "timeout":
+            raise
+        # bootctl 的大部分工作（拷 EFI 文件）在写 NVRAM 之前就做完了；超时意味着
+        # 固件变量存储不可信（盘上原本就有引导项、变量存满时尤其常见）。文件照装、
+        # NVRAM 不再碰，引导来源交给可移除介质路径 —— 与 NVRAM 写不进同一条退路。
+        nvram_sick = True
+        runner.reporter.note(
+            "bootctl 超时：固件 NVRAM 写入停滞（变量存储被旧引导项占满是常见原因）。"
+            "EFI 文件照装、不再碰 NVRAM，改留可移除介质路径保证能起"
+        )
     write_entries(runner, cfg, root_uuid)
+    if nvram_sick:
+        fallback_removable(runner, cfg)
+        return
     ensure_efi_entry(runner, cfg, no_nvram=no_nvram)
 
 
@@ -83,13 +109,23 @@ def ensure_efi_entry(runner: Runner, cfg: TargetConfig, *, no_nvram: bool = Fals
     这一步失败意味着「盘上的系统是好的，但固件不知道去哪找它」，
     正好是失败模式清单里那条。
     """
+    runner.reporter.emit(step_event("boot", "nvram", "写固件引导项"))
     if no_nvram:
         # 不动固件，那就必须留一条「不靠 NVRAM」的路，否则这块盘在真机上起不来
         runner.reporter.note("--no-nvram：不写固件引导项，改留可移除介质路径")
         fallback_removable(runner, cfg)
         return
 
-    listing = runner.run(chroot_argv(cfg.target, ["efibootmgr"]), capture=True, check=False)
+    try:
+        listing = runner.run(chroot_argv(cfg.target, ["efibootmgr"]), capture=True, check=False,
+                             timeout=EFIBOOTMGR_TIMEOUT)
+    except InstallerError as exc:
+        if exc.reason != "timeout":
+            raise
+        # 读都卡 = 固件变量存储不可信：再 --create 只会卡第二次，直接走退路
+        runner.reporter.note("efibootmgr 读固件引导项超时：NVRAM 整条路不再碰，改留可移除介质路径")
+        fallback_removable(runner, cfg)
+        return
     if listing is None or listing == util.DRY:
         runner.reporter.note("dry-run：读不到固件引导项，跳过校验")
         return
@@ -101,7 +137,8 @@ def ensure_efi_entry(runner: Runner, cfg: TargetConfig, *, no_nvram: bool = Fals
         chroot_argv(
             cfg.target,
             ["efibootmgr", "--create", "--label", TITLE, "--loader", r"\EFI\systemd\systemd-bootx64.efi"],
-        )
+        ),
+        timeout=EFIBOOTMGR_TIMEOUT,
     ):
         fallback_removable(runner, cfg)
 
@@ -137,6 +174,7 @@ def verify(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
     现场极难定位。第二道是 entry 里的 UUID 与实际 root 分区的 UUID 一致 ——
     UUID 写错的话，内核起得来、找不到根，掉进 emergency shell。
     """
+    runner.reporter.emit(step_event("boot", "verify", "校验引导"))
     if runner.dry_run:
         return
     missing = [name for name in ("vmlinuz-linux", "initramfs-linux.img")

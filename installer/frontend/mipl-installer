@@ -10,10 +10,12 @@
 `/usr/local/bin/mipl-{installer,kiosk}` 软链过去 —— 所以**本文件必须用
 `os.path.realpath(__file__)` 找自己**，否则软链路径下找不到同级 `app/` 与 `theme/`。
 
-本文件只干三件事，**不实现任何安装逻辑**：
+本文件只干四件事，**不实现任何安装逻辑**：
 1. **Chromium 初始化之前**算好首帧主题与设备层缩放（两者都必须在进程启动前定下来）；
 2. 把 `--theme` / `--scale` / `--lang` 透给 Electron 主进程；
-3. `exec` Electron —— 本进程被替换掉，信号直接落到 Electron 上，kiosk 的 stop/kill 语义才干净。
+3. **多显示器统一成镜像**（cage 默认并排摆输出，kiosk 全屏窗口只盖住一块 —— 实机
+   教训：其余屏黑着。本进程是 cage 的客户端，wlr-randr 使得上；失败不挡安装）；
+4. `exec` Electron —— 本进程被替换掉，信号直接落到 Electron 上，kiosk 的 stop/kill 语义才干净。
 
 主题与缩放都是**纯函数**（`frontend/theme/*.py`，有单测）：
   - 主题：`--theme=auto|light|dark`；**默认 auto** —— 按本地时间（07:00–18:59 亮）；
@@ -222,6 +224,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def mirror_outputs(display_layout, retries: int = 4) -> None:
+    """把所有输出统一到 (0,0) + 同一模式 = 镜像（cage 默认并排，kiosk 要镜像）。
+
+    本进程是 cage 的客户端（`WAYLAND_DISPLAY` 已就位），wlr-randr 使得上。输出可能
+    比客户端晚一点就绪，所以重试几次。**任何失败都不挡安装**：最坏就是退回「只有
+    一块屏亮」的老样子，日志里留一句话。
+    """
+    import json
+    import subprocess
+    import time
+
+    for _ in range(retries):
+        try:
+            probe = subprocess.run(["wlr-randr", "--json"], capture_output=True, text=True)
+        except OSError as exc:
+            LOG.info("多显示器镜像：wlr-randr 不可用（%s），保持合成器默认布局", exc)
+            return
+        if probe.returncode == 0:
+            try:
+                outputs = json.loads(probe.stdout)
+            except ValueError:
+                outputs = None
+            if isinstance(outputs, list):
+                commands = display_layout.plan_mirror_commands(outputs)
+                for argv in commands:
+                    subprocess.run(argv, capture_output=True)
+                if commands:
+                    LOG.info("多显示器镜像：wlr-randr 把 %d 个输出统一到同一 viewport", len(commands))
+                else:
+                    LOG.info("多显示器镜像：点亮的输出不足两个，不动布局")
+                return
+        time.sleep(0.7)
+    LOG.info("多显示器镜像：wlr-randr 没给出可用结果，保持合成器默认布局")
+
+
 def find_electron(explicit):
     if explicit:
         return explicit
@@ -249,6 +286,7 @@ def main(argv=None) -> int:
     try:
         theme_mode = load_pure_module("mipl_theme_mode", theme_dir / "theme_mode.py")
         device_scale_module = load_pure_module("mipl_device_scale", theme_dir / "device_scale.py")
+        display_layout = load_pure_module("mipl_display_layout", theme_dir / "display_layout.py")
     except (OSError, ImportError) as exc:
         LOG.error("加载 theme 纯函数失败：%s", exc)
         return 1
@@ -300,7 +338,10 @@ def main(argv=None) -> int:
         print(" ".join(command))
         return 0
 
-    # ---- ④ exec：本进程被 Electron 取代（信号直落 Electron，stop/kill 语义才干净）----
+    # ---- ④ 多显示器镜像（必须在 cage 会话里跑；--print-plan 不动环境，已先返回）----
+    mirror_outputs(display_layout)
+
+    # ---- ⑤ exec：本进程被 Electron 取代（信号直落 Electron，stop/kill 语义才干净）----
     try:
         os.execv(electron, command)
     except OSError as exc:

@@ -9,6 +9,22 @@ import { h, clear, attachScrollFade } from '../dom.js';
 import { searchInput, option, emptyState, listBox } from '../components.js';
 
 /**
+ * 把**默认值**那一项排到第一行，其余保持后端给的顺序。
+ *
+ * 为什么置顶的是「默认值」而不是「当前选中」（维护者 2026-10-05）：选中项一置顶，
+ * 点一条列表就在手指底下重排一次 —— 紧接着的第二次点击会落到**刚挪上来**的那一行上。
+ * 默认值是开工时就定下、之后不再变的那个，放在第一行既让人一眼看到「不选会得到什么」，
+ * 列表本身又是稳的：**选中不参与排序**。
+ *
+ * 纯函数（不碰 DOM）：排序规则是这一页最容易写错的一处，单独测。
+ */
+export function withDefaultFirst(items, defaultValue) {
+  const index = items.findIndex((item) => item.value === defaultValue);
+  if (index <= 0) return items;
+  return [items[index], ...items.slice(0, index), ...items.slice(index + 1)];
+}
+
+/**
  * 可搜索的单选列表。
  *
  * @param {object} config
@@ -16,6 +32,7 @@ import { searchInput, option, emptyState, listBox } from '../components.js';
  * @param {string} config.searchId      搜索框 id
  * @param {Array}  config.items         候选（含 display / meta 字段）
  * @param {string} config.selected      当前选中的值
+ * @param {string} config.defaultValue  默认值 —— 这一项排第一行（见 `withDefaultFirst`）
  * @param {Function} config.onPick      (item) => void
  * @param {Function} config.iconFor     (item) => 图标名
  * @param {Function} config.emptyText   () => 空态文案
@@ -27,8 +44,11 @@ export function selectableList(config, ctx) {
   const wrapper = h('div', { class: 'list-wrap', id: config.id });
   let query = '';
 
+  // 顺序在过滤**之前**定下来：搜索时默认项也还在第一行（它不匹配就不会出现在结果里）
+  const ordered = withDefaultFirst(config.items, config.defaultValue);
+
   const renderItems = () => {
-    const matched = config.items.filter((item) => config.matches(item, query));
+    const matched = ordered.filter((item) => config.matches(item, query));
     const box =
       matched.length > 0
         ? listBox(

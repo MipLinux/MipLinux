@@ -13,10 +13,14 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import stat
 import subprocess
+import threading
+import time
 from pathlib import Path
+from typing import Callable
 
 from .events import Reporter
 
@@ -35,16 +39,92 @@ DRY = "<dry-run>"
 
 
 class InstallerError(Exception):
-    """带退出码的失败。消息面向用户，hint 是「接下来敲什么」。"""
+    """带退出码的失败。消息面向用户，hint 是「接下来敲什么」。
 
-    def __init__(self, message: str, exit_code: int = EXIT_UNEXPECTED, hint: str | None = None) -> None:
+    `reason` 是给**界面**用的机器可读代码（`format` / `notInList` / `notFound` …）：
+    界面有一份自己的文案表（中/英），不能把后端这句中文直接摆上去 —— 英文模式会露馅。
+    有 `reason` 时界面走它自己的句子，没有就当普通失败只显示消息。
+    **只有校验类失败需要它**；装包/引导那些失败的文案本来就不翻译。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        exit_code: int = EXIT_UNEXPECTED,
+        hint: str | None = None,
+        *,
+        reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         self.hint = hint
+        self.reason = reason
 
     def render(self) -> str:
         text = str(self)
         return f"{text}\n  → {self.hint}" if self.hint else text
+
+
+#: 一条命令跑满多少秒就在日志里留一句「耗时 Ns」。这一句是给实机复盘用的：
+#: 「二十分钟花在哪了」该由日志回答，不该由截图猜（Issue #97 实机教训）。
+SLOW_COMMAND_SECONDS = 15
+
+
+class LineFeeder:
+    """把子进程的输出切成「干净的可读行」。
+
+    进度条类工具（mke2fs、pacman、mkinitcpio）会对终端耍三种花活：`\\b` 擦掉前一个
+    字符、`\\r` 回到行首覆写、ANSI 转义序列改颜色。这些都不是内容 —— 原样漏进日志或
+    界面，轻则满屏豆腐块（Issue #97 的实机教训：mke2fs 的 `\\b` 在安装日志里画成方块），
+    重则把 JSON 事件流冲垮。在这里把它们**当场应用掉**，出来的就是普通文本行。
+    """
+
+    def __init__(self) -> None:
+        self._current: list[str] = []
+        #: text | esc | csi | osc —— 转义序列的三个状态，免得序列跨块时被当成内容
+        self._state = "text"
+
+    def feed(self, chunk: str) -> list[str]:
+        """吃一块输出，返回其中**完整**的行（半行留着跟下一块拼）。"""
+        lines: list[str] = []
+        for ch in chunk:
+            if self._state == "esc":
+                self._state = "csi" if ch == "[" else "osc" if ch == "]" else "text"
+            elif self._state == "csi":
+                if 0x40 <= ord(ch) <= 0x7E:      # CSI 的终止字节
+                    self._state = "text"
+            elif self._state == "osc":
+                if ch == "\x07":
+                    self._state = "text"
+                elif ch == "\x1b":
+                    self._state = "esc"
+            elif ch == "\x1b":
+                self._state = "esc"
+            elif ch == "\n":
+                lines.append("".join(self._current).rstrip())
+                self._current = []
+            elif ch == "\r":
+                self._current = []               # 回行首：接下来的内容整行覆写
+            elif ch == "\b":
+                if self._current:
+                    self._current.pop()          # 擦掉前一个字符
+            elif ch == "\t" or (ord(ch) >= 0x20 and ch != "\x7f"):
+                self._current.append(ch)
+            # 其余 C0 控制字符（响铃、竖制表……）：不是内容，直接丢
+        return lines
+
+    def flush(self) -> list[str]:
+        """输出结束时剩下的半行（有的工具收尾不补换行）。"""
+        line = "".join(self._current).rstrip()
+        self._current = []
+        return [line] if line else []
+
+
+def clean_terminal_text(text: str) -> str:
+    """把一整块已捕获的输出过一遍 `LineFeeder`（报错消息之类用）。"""
+    feeder = LineFeeder()
+    lines = feeder.feed(text) + feeder.flush()
+    return "\n".join(line for line in lines if line)
 
 
 class Runner:
@@ -70,11 +150,30 @@ class Runner:
         exit_code: int = EXIT_UNEXPECTED,
         input: str | None = None,
         cwd: str | None = None,
+        timeout: float | None = None,
+        on_line: Callable[[str], None] | None = None,
     ) -> str | None:
         """跑一条命令。
 
         capture=True 时返回 stdout（去掉尾部换行）；dry-run 下返回 `DRY`。
         check=True 时非零退出码抛 `InstallerError`（带 exit_code）。
+        capture=False 时**输出逐行清洗后交给 reporter**（见 `_run_streamed`），绝不继承
+        本进程的 stdout：界面下 stdout 是 JSON 事件流，混进一行原文就是满屏
+        「后端输出无法解析」。
+        `input` 给了就写进子进程的 stdin（配合 capture=True 用）—— 密码那条红线：
+        argv 会留在进程列表与日志里，所以「问一句答一句」的命令走它。
+        `on_line` 给「要**边跑边读**输出」的调用方用（pacman 的 `(14/345)` 就是
+        这么变成细进度的）：每清洗出一行回调一次，**在**它被当旁白记下来之前。
+        只在流式路径（`capture=False`）上有意义 —— 捕获路径要收完才返回。
+        timeout 给了就超时杀进程并抛 `reason="timeout"` 的 `InstallerError` ——
+        给**会去碰固件 NVRAM 的命令**用的：固件变量存储卡住时那些命令能沉默地
+        挂几十分钟（实机教训：引导阶段挂 40 分钟），安装器不该陪着等。
+
+        **`input` 与 `stdin=` 不能同时给** `subprocess.run`（它自己会抛
+        `ValueError: stdin and input arguments may not both be used.`）。所以这里
+        按「给没给 input」二选一：给了就走 `input=`（它内部会接 PIPE），
+        没给才显式接 `DEVNULL` —— 后端的 stdin 走着密码，子进程万一去读 stdin
+        会把密码字节吞掉（与 `_run_streamed` 同一条纪律）。
         """
         argv = [str(a) for a in argv]
         self.history.append(argv)
@@ -82,52 +181,189 @@ class Runner:
         if self.dry_run:
             return DRY if capture else None
 
-        try:
-            proc = subprocess.run(
-                argv,
-                capture_output=capture,
-                text=True,
-                input=input,
-                cwd=cwd,
-                check=False,
+        # 先查工具在不在：流式路径套了 stdbuf 之后，「命令不存在」会变成 stdbuf
+        # 退出 127 —— 那句报错对不上事实（该说「装哪个包」而不是「命令失败」）
+        if not self.have(argv[0]):
+            raise InstallerError(
+                f"找不到命令：{argv[0]}",
+                EXIT_USAGE,
+                hint="这个命令属于哪个包见 cli.py 的 TOOL_PACKAGES —— 先装它，再重跑",
             )
+
+        started = time.monotonic()
+        try:
+            if capture:
+                # `input=` 会自己接 PIPE，`:stdin=` 只能在没有 input 时给 ——
+                # 两个同时传是 ValueError，而那条路正是 `nmcli --ask` 连 Wi-Fi 走的路
+                # （实机症状：网络页上点「连接」必报错，命令行手敲 `nmcli d wifi connect`
+                # 反倒一次就成）。
+                pipes = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
+                try:
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        cwd=cwd,
+                        check=False,
+                        timeout=timeout,
+                        **pipes,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise self._timeout_error(argv, timeout, exit_code) from exc
+                stdout: str | None = (proc.stdout or "").rstrip("\n")
+            else:
+                proc = self._run_streamed(argv, input=input, cwd=cwd,
+                                          timeout=timeout, exit_code=exit_code,
+                                          on_line=on_line)
+                stdout = None
         except FileNotFoundError as exc:
             raise InstallerError(
                 f"找不到命令：{argv[0]}",
                 EXIT_USAGE,
                 hint="这个命令属于哪个包见 cli.py 的 TOOL_PACKAGES —— 先装它，再重跑",
             ) from exc
+        self._note_if_slow(argv, started)
 
         if check and proc.returncode != 0:
             detail = ""
             if capture and proc.stderr:
-                detail = "：\n    " + proc.stderr.strip().replace("\n", "\n    ")
+                detail = "：\n    " + clean_terminal_text(proc.stderr).strip().replace("\n", "\n    ")
             raise InstallerError(f"命令失败（退出码 {proc.returncode}）：{' '.join(argv)}{detail}", exit_code)
 
-        if capture:
-            return (proc.stdout or "").rstrip("\n")
-        return None
+        return stdout
+
+    def _timeout_error(self, argv: list[str], timeout: float | None, exit_code: int) -> InstallerError:
+        return InstallerError(
+            f"命令超时（{int(timeout or 0)}s）：{' '.join(argv)}",
+            exit_code,
+            hint="固件 NVRAM 写入停滞、设备不应是常见原因；现场已保留，先看日志再按该阶段的退路绕行或重跑",
+            reason="timeout",
+        )
+
+    def _run_streamed(self, argv: list[str], *, input: str | None = None, cwd: str | None = None,
+                      timeout: float | None = None, exit_code: int = EXIT_UNEXPECTED,
+                      on_line: Callable[[str], None] | None = None):
+        """跑一条命令，输出逐行（清洗后）转发给 reporter。
+
+        五条纪律：
+
+        * **不继承 stdout**：mke2fs / pacman 的进度条、mkinitcpio 的旁白是给终端看的，
+          直接流进本进程的 stdout，在界面下会把 JSON 事件流冲成满屏「后端输出无法解析」，
+          在 CLI 下会把日志的缩进冲垮。收过来、洗干净、当旁白发，两边日志才都读得下去。
+        * **不继承 stdin**：后端的 stdin 走着密码；不给 input 的子进程一律接 DEVNULL。
+        * **C 工具强制行缓冲**：pacman / mke2fs 这类 C 实现的工具 stdout 接管道时是
+          **全缓冲** —— 攒满 4 KiB 或进程退出才吐一次，实机症状是「一个阶段爆出一堆
+          日志、随后装死」。有 stdbuf 就套 `stdbuf -oL -eL`（脚本类工具无副作用）。
+        * **读用 `read1()`，不用 `read()`**：文本管道的 `read(n)` 要**攒满 n 个字符
+          或等到 EOF** 才返回（实测：三行分 0.8 秒输出，1.21 秒才一次性到达）——
+          于是上面那条 stdbuf 白做，日志仍然一段一段的。`read1()` 是「有多少给多少」，
+          子进程吐一行就转发一行。这两个字之差就是「日志是流式还是分段」的全部原因。
+        * **`on_line` 先于旁白**：想在输出里认东西的调用方（pacman 的 `(14/345)`）
+          拿到的是**同一条清洗过的行**，与日志里那行一字不差；认出来的进度因此不会
+          与日志对不上。回调抛异常不吞 —— 那是调用方的 bug，不该在管道里静默。
+        """
+        exec_argv = argv
+        if self.have("stdbuf"):
+            exec_argv = ["stdbuf", "-oL", "-eL", *argv]
+        proc = subprocess.Popen(
+            exec_argv,
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            cwd=cwd,
+        )
+        feeder = LineFeeder()
+
+        def deliver(line: str) -> None:
+            if on_line is not None:
+                on_line(line)
+            self.reporter.note(line)
+
+        def pump() -> None:
+            out = proc.stdout
+            if out is None:
+                return
+            # 走底层字节流：`TextIOWrapper` 上没有 read1，而它的 `read()` 正是要避开的那一个。
+            # 解码用**这个流自己的编码**（`out.encoding`），与原来 text=True 的行为一致；
+            # 多字节字符被管道从中间切开时，增量解码器会把它留到下一块拼起来。
+            stream = getattr(out, "buffer", out)
+            read1 = getattr(stream, "read1", None) or stream.read
+            decoder = codecs.getincrementaldecoder(getattr(out, "encoding", None) or "utf-8")("replace")
+            try:
+                while True:
+                    chunk = read1(4096)
+                    if not chunk:
+                        break
+                    text = decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
+                    for line in feeder.feed(text):
+                        if line:
+                            deliver(line)
+                for line in feeder.flush():
+                    if line:
+                        deliver(line)
+            finally:
+                out.close()
+
+        if input is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(input)
+            except BrokenPipeError:
+                pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
+            proc.stdin.close()
+
+        if timeout is None:
+            pump()
+            proc.wait()
+            return proc
+
+        # 带超时：读输出放到守护线程里，主线程等进程；超时杀进程后线程自然随管道 EOF 收掉
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            reader.join(5)
+            raise self._timeout_error(argv, timeout, exit_code)
+        reader.join(10)
+        return proc
+
+    def _note_if_slow(self, argv: list[str], started: float) -> None:
+        elapsed = time.monotonic() - started
+        if elapsed >= SLOW_COMMAND_SECONDS:
+            self.reporter.note(f"耗时 {int(round(elapsed))}s：{' '.join(argv)}")
 
     def have(self, program: str) -> bool:
         from shutil import which
 
         return which(program) is not None
 
-    def attempt(self, argv: list[str], *, input: str | None = None) -> bool:
+    def attempt(self, argv: list[str], *, input: str | None = None, timeout: float | None = None) -> bool:
         """跑一条命令，只回报成没成功。
 
         用于「失败有退路」的场合（NVRAM 写不进 → 退到可移除介质路径）。
         普通的失败路径别用它 —— 抛异常的 `run()` 才带得上退出码与提示。
+        超时算失败（并留一句旁白）：碰固件的命令卡住时，退路才有意义。
         """
         argv = [str(a) for a in argv]
         self.history.append(argv)
         self.reporter.command(argv)
         if self.dry_run:
             return True
+        started = time.monotonic()
         try:
-            proc = subprocess.run(argv, text=True, input=input, check=False)
+            # 输出捕获后丢掉：语义是「只报成败」，但输出同样不许漏进本进程 stdout
+            proc = subprocess.run(argv, capture_output=True, text=True, input=input,
+                                  check=False, timeout=timeout)
         except FileNotFoundError:
             return False
+        except subprocess.TimeoutExpired:
+            self.reporter.note(f"命令超时（{int(timeout or 0)}s）：{' '.join(argv)}（按失败走退路）")
+            return False
+        self._note_if_slow(argv, started)
         return proc.returncode == 0
 
     def require(self, programs: list[str], *, tools: dict[str, str] | None = None) -> None:
@@ -166,15 +402,17 @@ TOOL_PACKAGES = {
     "bootctl": "systemd",
     "efibootmgr": "efibootmgr",
     "pacman": "pacman",
+    # 流式输出靠它把 C 工具切成行缓冲（见 Runner._run_streamed）
+    "stdbuf": "coreutils",
 }
 
 #: 每个阶段需要哪些工具（开跑前一次性检查，别跑到一半才炸）
 STEP_TOOLS = {
     "disk": ["parted", "partprobe", "wipefs", "udevadm", "mkfs.vfat", "mkfs.ext4",
-             "mount", "umount", "blkid", "mknod", "chown", "chmod"],
-    "packages": ["pacstrap", "pacman-key", "pacman"],
-    "configure": ["arch-chroot"],
-    "boot": ["bootctl", "efibootmgr"],
+             "mount", "umount", "blkid", "mknod", "chown", "chmod", "stdbuf"],
+    "packages": ["pacstrap", "pacman-key", "pacman", "stdbuf"],
+    "configure": ["arch-chroot", "stdbuf"],
+    "boot": ["bootctl", "efibootmgr", "stdbuf"],
 }
 
 

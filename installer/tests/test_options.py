@@ -179,6 +179,61 @@ class TestValidators(_RootCase):
                     options.validate_hostname(hostname)
                 self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
 
+    def test_locale_must_be_in_the_list(self):
+        """Issue #63：界面里能选、写进目标却不生效的正是「名单外的那一个」。
+
+        目标系统的 `locale.gen` 里没有这一行时，装出来的系统每个程序都报
+        `setlocale` 警告 —— 而那时盘已经擦了。
+        """
+        supported = self.root / "SUPPORTED"
+        supported.write_text("zh_CN.UTF-8 UTF-8\nen_US.UTF-8 UTF-8\n", encoding="utf-8")
+        options.validate_locale("zh_CN.UTF-8", str(supported))              # 名单里，不该抛
+        with self.assertRaises(InstallerError) as ctx:
+            options.validate_locale("ja_JP.UTF-8", str(supported))
+        self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+        self.assertEqual(ctx.exception.reason, "notInList")
+
+    def test_locale_rejects_a_typo_even_though_it_looks_well_formed(self):
+        """**写形如 `xx_YY.UTF-8` 还不够。** 这条是刻意与源 issue 的字面读法分岔的地方：
+
+        若按「在名单里**或**形如 `xx_YY.UTF-8` 就放行」，`ja_XX.UTF-8` 这种拼错的名字
+        会通过 preflight，然后在 chroot 里以 `EXIT_CONFIGURE` 失败 —— 而那正是
+        `preflight()` 存在的理由（把失败提到动盘之前）。所以名单读得到时按名单。
+        """
+        supported = self.root / "SUPPORTED"
+        supported.write_text("ja_JP.UTF-8 UTF-8\n", encoding="utf-8")
+        with self.assertRaises(InstallerError) as ctx:
+            options.validate_locale("ja_XX.UTF-8", str(supported))
+        self.assertEqual(ctx.exception.reason, "notInList")
+
+    def test_locale_falls_back_to_shape_when_the_list_is_unreadable(self):
+        """名单读不到时不装作能判断，但也不放垃圾过去（与 `validate_keymap` 同形）。"""
+        missing = str(self.root / "nope")
+        options.validate_locale("ja_JP.UTF-8", missing)                     # 形如 xx_YY.UTF-8 → 放行
+        for bad in ("中文", "ja_JP", "ja_JP.utf8", "", "../etc/passwd"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InstallerError) as ctx:
+                    options.validate_locale(bad, missing)
+                self.assertEqual(ctx.exception.reason, "format")
+
+    def test_every_validation_carries_a_reason_code_for_the_interface(self):
+        """界面有一份自己的中英文案表，**不能**直接把后端这句中文摆上去 ——
+        英文模式会露馅。所以校验类失败一律带 `reason`，界面拿它查卡片。"""
+        (self.root / "us.map.gz").write_bytes(b"fake")
+        supported = self.root / "SUPPORTED"
+        supported.write_text("zh_CN.UTF-8 UTF-8\n", encoding="utf-8")
+        cases = [
+            (lambda: options.validate_keymap("teapot", str(self.root)), "notInList"),
+            (lambda: options.validate_locale("ja_JP.UTF-8", str(supported)), "notInList"),
+            (lambda: options.validate_timezone("Nowhere/Nope", str(self.root)), "notFound"),
+            (lambda: options.validate_hostname("-x"), "format"),
+        ]
+        for call, reason in cases:
+            with self.subTest(reason=reason):
+                with self.assertRaises(InstallerError) as ctx:
+                    call()
+                self.assertEqual(ctx.exception.reason, reason)
+
 
 if __name__ == "__main__":
     unittest.main()

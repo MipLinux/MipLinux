@@ -513,6 +513,71 @@ module.exports = async function probe({ app, win, launch }) {
     check(reachable.ok, '选中 WiFi 后主动作仍在视口内且可点', JSON.stringify(reachable));
     await shot('network-wifi-selected-1024x768');
 
+    // ---------------------------------------------------------- 6.6b 网络页的「重新扫描」与现状自动刷新
+    // 9a99666 那次「重新扫描挪到列表下方」在 disk.js 挪对了，在网络页却是**直接删掉**
+    // （`?: null`）—— 于是网卡住时既没有手动入口，也没有自动刷新（维护者 2026-10-05）。
+    const rescanButton = await run(`(() => {
+      const btn = document.getElementById('wifi-rescan');
+      if (!btn) return { exists: false };
+      const list = document.querySelector('#page-network .list');
+      return {
+        exists: true,
+        // 「在列表下方」：按钮顶边不低于列表底边（空列表时没有列表可依，只判存在）
+        below: list ? btn.getBoundingClientRect().top >= list.getBoundingClientRect().bottom - 1 : true,
+        label: btn.textContent.trim(),
+      };
+    })()`);
+    check(rescanButton.exists && rescanButton.below, '网络页有「重新扫描」，位置在列表下方', JSON.stringify(rescanButton));
+
+    const rescanRan = await run(`(async () => {
+      document.getElementById('wifi-rescan').click();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const scanning = Boolean(document.querySelector('#page-network .skeleton'));
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      return { scanning, options: document.querySelectorAll('#page-network .option').length };
+    })()`);
+    check(rescanRan.scanning && rescanRan.options > 0, '点「重新扫描」：先出「正在扫描」，扫完列表还在', JSON.stringify(rescanRan));
+
+    // 停留本页时，「外面的世界变了」界面得自己发现：这一页没连上就不让往下走，
+    // 只在开工时读一次现状的话，网通了人也出不去。
+    const unplugged = await run(`(() => {
+      const badge = () => document.querySelector('#page-network .badge').textContent;
+      const before = badge();
+      window.__mipl.setLink(false);   // 只改「现状」，不改上一次问回来的结果
+      return { before, stillShown: badge() };   // 同一个同步块里读：中间插不进一轮轮询
+    })()`);
+    await sleep(3800);   // 等一轮轮询（POLL_MS = 3000）
+    await settle();
+    const afterUnplug = await run(`(() => ({
+      badge: document.querySelector('#page-network .badge').textContent,
+      disabled: document.getElementById('nav-primary').disabled,
+    }))()`);
+    check(
+      unplugged.before === unplugged.stillShown && afterUnplug.badge !== unplugged.before && afterUnplug.disabled === true,
+      '停在网络页：拔网线之后界面自己变成「未连接」并拦住「下一步」',
+      JSON.stringify({ ...unplugged, ...afterUnplug })
+    );
+
+    // 再插回去 —— 这一条**要求上一轮轮询先落地**（`beforePlug` 必须是「未连接 + 拦住」），
+    // 否则「网通了能解锁」在网络页从头到尾没刷新的情况下也会绿：那是假绿。
+    const beforePlug = await run(`(() => ({
+      badge: document.querySelector('#page-network .badge').textContent,
+      disabled: document.getElementById('nav-primary').disabled,
+    }))()`);
+    await run('window.__mipl.setLink(true)');
+    await sleep(3800);
+    await settle();
+    const afterPlug = await run(`(() => ({
+      badge: document.querySelector('#page-network .badge').textContent,
+      disabled: document.getElementById('nav-primary').disabled,
+    }))()`);
+    check(
+      beforePlug.disabled === true && afterPlug.disabled === false && afterPlug.badge !== beforePlug.badge,
+      '停在网络页：网通了界面自己发现，「下一步」随之解锁（原来卡住的正是这一步）',
+      JSON.stringify({ beforePlug, afterPlug })
+    );
+    await shot('network-replugged-1024x768');
+
     // 完成页必须一屏放得下（实机反馈：安装完成界面居然能滚）
     await run('window.__mipl.goTo("finish")');
     await sleep(360);
@@ -597,6 +662,43 @@ module.exports = async function probe({ app, win, launch }) {
     check(fadeStates.middle === 'both', '列表在中间：两侧都渐隐', JSON.stringify(fadeStates));
     check(fadeStates.bottom === 'top', '列表在底部：只在顶部渐隐', JSON.stringify(fadeStates));
 
+    // 默认项在第一行，且**选中别的项不会让列表重排**（选中项不参与排序）。
+    // 置顶的是「默认值」而不是「当前选中」：选中一置顶，点一条列表就在手指底下
+    // 重排一次，紧接着的第二次点击会落到刚挪上来的那一行上（维护者 2026-10-05）。
+    const orderBefore = await run(`[...document.querySelectorAll('#timezone-list .option')].map((el) => el.id)`);
+    const pickedId = orderBefore[4];
+    await run(`document.getElementById(${JSON.stringify(pickedId)}).click()`);
+    await sleep(360);
+    await settle();
+    const orderAfter = await run(`[...document.querySelectorAll('#timezone-list .option')].map((el) => el.id)`);
+    check(orderBefore[0] === 'timezone-list-asia-shanghai', '时区页：默认项（Asia/Shanghai）在第一行', orderBefore[0]);
+    check(
+      JSON.stringify(orderAfter) === JSON.stringify(orderBefore),
+      '选中别的时区之后列表不重排（第一行仍是默认项）',
+      `选中 ${pickedId} 前后：${JSON.stringify({ before: orderBefore.slice(0, 3), after: orderAfter.slice(0, 3) })}`
+    );
+
+    // 选中之后**不许跳回开头**：整页会重画一次（子树是新的），滚动位置得还回去。
+    // 以前这里是「在几百条语言里挑一条，列表跳回开头」（维护者 2026-10-05）。
+    const scrollKept = await run(`(async () => {
+      const list = document.querySelector('#timezone-list .list');
+      list.scrollTop = 240;
+      const before = list.scrollTop;
+      const target = [...document.querySelectorAll('#timezone-list .option')].find(
+        (el) => el.getBoundingClientRect().top > 260
+      ) || [...document.querySelectorAll('#timezone-list .option')].at(-1);
+      target.click();
+      await new Promise((resolve) => setTimeout(resolve, 420));
+      const fresh = document.querySelector('#timezone-list .list');
+      return { before, after: fresh.scrollTop, rebuilt: fresh !== list };
+    })()`);
+    check(
+      scrollKept.before > 0 && scrollKept.rebuilt && scrollKept.after === scrollKept.before,
+      '选中之后列表不回开头（整页确实重画了，滚动位置还回去了）',
+      JSON.stringify(scrollKept)
+    );
+    await shot('timezone-scroll-kept-1024x768');
+
     await run('window.__mipl.goTo("locale")');   // 5 项，放得下 → 不该有任何遮罩
     await sleep(320);
     await settle();
@@ -624,55 +726,166 @@ module.exports = async function probe({ app, win, launch }) {
     })()`);
     check(focusRing.focused && focusRing.inputOutline === 'none', '搜索框焦点只有一层（容器），内层不再叠 outline', JSON.stringify(focusRing));
 
-    // 键盘页：试打区在列表上方；预览按需出现
+    // 键盘页：主键区图在列表上方，且画的是**真布局**（Issue #65 用它替掉了试打框）
     await run('window.__mipl.goTo("keymap")');
-    await sleep(340);
+    await sleep(420);
     await settle();
     const keymapBefore = await run(`(() => {
-      const tryInput = document.getElementById('keymap-try');
-      const preview = document.getElementById('keymap-preview');
+      const block = document.getElementById('keymap-block');
       const list = document.querySelector('#keymap-list .list');
       const stage = document.getElementById('stage');
-      const tryBox = tryInput.getBoundingClientRect();
+      if (!block) return { missing: true };
+      const blockBox = block.getBoundingClientRect();
       const listBox = list ? list.getBoundingClientRect() : null;
+      const caps = [...block.querySelectorAll('.keycap')];
       return {
-        previewHidden: preview.hidden,
-        tryAboveList: listBox ? tryBox.top < listBox.top : false,
+        rows: block.querySelectorAll('.keyblock__row').length,
+        caps: caps.length,
+        labelled: caps.filter((cap) => (cap.textContent || '').trim()).length,
+        width: Math.round(blockBox.width),
+        height: Math.round(blockBox.height),
+        aboveList: listBox ? blockBox.bottom <= listBox.top + 1 : false,
         stageFits: stage.scrollHeight <= stage.clientHeight + 1,
       };
     })()`);
-    check(keymapBefore.previewHidden, '没有输入时预览不显示', JSON.stringify(keymapBefore));
-    check(keymapBefore.tryAboveList, '试打框在列表上方', JSON.stringify(keymapBefore));
+    check(!keymapBefore.missing, '键盘页画出了主键区图', JSON.stringify(keymapBefore));
+    check(
+      keymapBefore.rows >= 5 && keymapBefore.labelled >= 30,
+      `主键区图有 5 行、至少 30 个键有字（实际 ${keymapBefore.rows} 行 / ${keymapBefore.labelled} 个）`,
+      JSON.stringify(keymapBefore)
+    );
+    check(keymapBefore.aboveList, '键位图在列表上方', JSON.stringify(keymapBefore));
     check(keymapBefore.stageFits, '键盘页：页面本体不滚动', JSON.stringify(keymapBefore));
 
-    const keymapAfter = await run(`(() => {
-      const input = document.getElementById('keymap-try');
-      input.value = 'qwertz';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      const preview = document.getElementById('keymap-preview');
-      return { hidden: preview.hidden, text: preview.textContent };
+    // 换一份布局，图要跟着变 —— 这是「图来自所选映射」而不是「一张通用键盘图」的证据
+    const labelAt = (code) =>
+      run(`(() => {
+        const cap = document.querySelector('.keycap[data-code="${code}"]');
+        return cap ? cap.querySelector('.keycap__label').textContent : null;
+      })()`);
+    const qwertyQ = await labelAt(16);
+    const switched = await run(`(() => {
+      const item = [...document.querySelectorAll('#keymap-list .option')].find((el) => el.textContent.includes('dvorak'));
+      if (!item) return false;
+      item.click();
+      return true;
     })()`);
-    await sleep(280);
-    const previewVisible = await run(`(() => {
-      const preview = document.getElementById('keymap-preview');
-      const style = getComputedStyle(preview);
-      return { opacity: style.opacity, transform: style.transform, text: preview.textContent };
-    })()`);
-    check(!keymapAfter.hidden && keymapAfter.text === 'qwertz', '输入后预览出现并显示所打内容', JSON.stringify(keymapAfter));
-    check(Number(previewVisible.opacity) > 0.95, '预览淡入完成（出现有动画）', JSON.stringify(previewVisible));
-    await shot('keymap-preview-1024x768');
+    await sleep(420);
+    await settle();
+    const dvorakAt16 = await labelAt(16);
+    check(switched, '键盘页列表里找得到 dvorak', String(switched));
+    check(
+      qwertyQ && dvorakAt16 && qwertyQ !== dvorakAt16,
+      `换布局之后同一个键位的字跟着变（q → ${dvorakAt16}）`,
+      `qwerty=${qwertyQ} dvorak=${dvorakAt16}`
+    );
+    await shot('keymap-block-1024x768');
 
-    const keymapCleared = await run(`(() => {
-      const input = document.getElementById('keymap-try');
-      input.value = '';
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      return document.getElementById('keymap-preview').hidden;
-    })()`);
-    check(keymapCleared, '清空输入后预览消失', String(keymapCleared));
+    // 提交回来的布局名要真的写进 setup（后端 `Plan.keymap` 读的就是它）
+    const pickedKeymap = await run('window.__mipl.state().data.keymap');
+    check(pickedKeymap === 'dvorak', '选中的布局写进了状态', String(pickedKeymap));
+    await run('window.__mipl.setData("keymap", "us")');
 
     win.setContentSize(1440, 900);
     await sleep(360);
     await run('window.__mipl.setAdvanced(false)');
+
+    // ---------------------------------------------------------- 6.8 进度页：环不被子步骤顶动
+    // 2026-10-06 实机反馈：子进度一展开，阶段圆圈就往下跳 —— 根因是 `.progress-layout`
+    // 用 `align-items: center`，右列长高一次它就把环重新居中一次。改成顶部对齐之后，
+    // 环的位置只由它自己的尺寸决定。这条断言把它钉住（量的是**位置**，不是长相）。
+    // 这条要的是**一轮全新的假安装**：探针前面已经把进度页走过一次，
+// 那一轮的事件早就发完了（离开这一页时订阅已退掉），接回去只会停在一个
+// 早就不动的画面上 —— 量它没有任何意义。所以先把状态清掉，让它真开一轮。
+    await run('window.__mipl.setData("progress", {})');
+    await run('window.__mipl.goTo("progress")');
+    await sleep(140);
+    // 先等进场动效停下来再量：`pageEnter` 会给整页一个 translateY，
+    // 第一拍采到动画中间态的话，量到的是动效的位移，不是布局的位移
+    await settle();
+    const ringTrack = await run(`(async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const ringNow = () => document.getElementById('progress-rings');
+      // 先等这一页真的挂上（goTo 不等 renderPage 完成），再开始采样 ——
+      // 不然第一拍就落空，这条断言会「什么都没验」地绿掉
+      for (let i = 0; i < 20 && !ringNow(); i += 1) await wait(120);
+      // 再等进场动效（pageEnter 的 translateY）跑完：不然第一拍量到的是动效的位移
+      await wait(700);
+      const seen = [];
+      for (let i = 0; i < 16; i += 1) {
+        const ring = ringNow();
+        const right = document.querySelector('#page-progress .progress-layout > .stack');
+        if (!ring || !right) break;
+        seen.push({
+          top: Math.round(ring.getBoundingClientRect().top),
+          right: Math.round(right.getBoundingClientRect().height),
+          steps: document.querySelectorAll('#progress-steps .phase').length,
+        });
+        await wait(220);
+      }
+      return seen;
+    })()`);
+    const ringTops = [...new Set(ringTrack.map((item) => item.top))];
+    check(ringTrack.some((item) => item.steps > 0), '进度页：子步骤真的出现过（不然这条什么都没验）',
+      ringTrack.map((item) => item.steps));
+    check(ringTrack.some((item) => item.right > ringTrack[0].right + 20), '进度页：右列确实被撑高过',
+      ringTrack.map((item) => item.right));
+    check(ringTops.length === 1, '进度页：环的纵向位置不随子步骤变化（不重新居中）', ringTops);
+
+    // ---------------------------------------------------------- 6.9 失败页：能一键卸载
+    // 2026-10-06 实机反馈两条：错误提示丑、`/mnt` 被占用时只能切 tty 手敲 umount。
+    //
+    // 怎么造这个现场：先让这一轮假安装跑起来（`startedAt` 有值 = 这是**当前**这一轮），
+    // 再在**页面内**把失败状态注进去并重画。不能靠「先去别的页、再带着失败状态进来」——
+    // 那条路会被 `shouldRestartRun()` 正确清掉（它是防无限重装的那道闸）。
+    // `cancelRequested` 是顺手把假安装的定时器停掉：不停的话它下一秒就把失败状态冲了。
+    await run('window.__mipl.setData("progress", {})');
+    await run('window.__mipl.goTo("progress")');
+    await sleep(700);
+    await run(`window.__mipl.setData('progress', {
+      phaseIndex: 0, stepId: null, step: null, total: null, steps: [], lines: [],
+      startedAt: Date.now(), done: false, cancelled: false,
+      cancelRequested: true, cancelSent: false,
+      failed: true,
+      failure: '/mnt 已经是个挂载点，拒绝把系统装上去',
+      failureHint: '手动卸载后再跑；安装器不替谁卸载机器上已有的挂载',
+      failureReason: 'targetMounted',
+    })`);
+    await run('window.__mipl.rerender()');
+    await sleep(320);
+    const failureView = await run(`(() => {
+      const block = document.getElementById('progress-error');
+      if (!block) return { missing: true };
+      const btn = document.getElementById('failure-unmount');
+      return {
+        title: block.querySelector('.failure__title')?.textContent || '',
+        hint: block.querySelector('.failure__hint')?.textContent || '',
+        // 失败卡里**不该再有任何折叠块 / 原始输出框**：那两句要么已被上面的文案
+        // 说过、要么就是标题本身（实机反馈：「技术细节删除，没有用处」）
+        extra: block.querySelectorAll('details, pre').length,
+        button: btn ? btn.textContent.trim() : null,
+      };
+    })()`);
+    check(!failureView.missing && failureView.title === '目标挂载点已经被占用',
+      '失败页：标题走本地化文案（不是后端那句原文）', failureView.title);
+    check(Boolean(failureView.hint), '失败页：下一步那句话在', failureView.hint);
+    check(failureView.extra === 0, '失败页：没有多余的折叠块 / 原始输出框', failureView.extra);
+    check(failureView.button === '卸载 /mnt', '失败页：有「卸载 /mnt」按钮', failureView.button);
+    await shot('failure-target-mounted-1024x768');
+
+    const afterUnmount = await run(`(async () => {
+      const btn = document.getElementById('failure-unmount');
+      if (!btn) return { missing: true };
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      return {
+        button: Boolean(document.getElementById('failure-unmount')),
+        done: document.querySelector('.failure__done')?.textContent || '',
+        snackbar: document.querySelector('.snackbar')?.textContent || '',
+      };
+    })()`);
+    check(!afterUnmount.button && Boolean(afterUnmount.done),
+      '失败页：按一下就把「卸载 /mnt」变成「已卸载」（按钮不该留在那儿等人重复点）', afterUnmount);
 
     // ---------------------------------------------------------- 7. reduced-motion
     try {

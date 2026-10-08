@@ -43,11 +43,15 @@ class FakeRunner:
         self.history: list[list[str]] = []
         self.outputs = outputs or {}
         self.fail_patterns: set[str] = set()
+        #: 每次 run 收到的行回调（`on_line=`）—— 有的测试要断言「谁把输出接出去了」
+        self.line_hooks: list = []
 
     # ── 与真 Runner 同签名 ────────────────────────────────────────────
-    def run(self, argv, *, check=True, capture=False, exit_code=7, input=None, cwd=None):
+    def run(self, argv, *, check=True, capture=False, exit_code=7, input=None, cwd=None,
+            timeout=None, on_line=None):
         argv = [str(a) for a in argv]
         self.history.append(argv)
+        self.line_hooks.append(on_line)
         joined = " ".join(argv)
         if check:
             for pattern in self.fail_patterns:
@@ -59,9 +63,18 @@ class FakeRunner:
                 if key in joined:
                     return value
             return ""
+        # 流式路径：把替身准备的输出**逐行喂给行回调**，与真 Runner 一样
+        # （`on_line` 拿到的就是清洗过的那一行；这里不模拟 \r / \b 清洗）
+        if on_line is not None:
+            for key, value in self.outputs.items():
+                if key in joined:
+                    for line in value.splitlines():
+                        if line.strip():
+                            on_line(line)
+                    break
         return None
 
-    def attempt(self, argv, *, input=None):
+    def attempt(self, argv, *, input=None, timeout=None):
         argv = [str(a) for a in argv]
         self.history.append(argv)
         joined = " ".join(argv)

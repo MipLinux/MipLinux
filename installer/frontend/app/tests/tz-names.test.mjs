@@ -30,12 +30,25 @@ test('港 / 澳 / 台北收敛到 Asia/Shanghai', () => {
   assert.equal(canonicalId('Asia/Tokyo'), 'Asia/Tokyo');
 });
 
-test('有名时区：显示名 + UTC 偏移；无名时区：只给偏移', async () => {
+test('有名时区给显示名 + 偏移；无名时区照实给 IANA id，绝不硬造名字', async () => {
   const t = await fakeI18n('zh_CN');
   assert.equal(formatZone({ id: 'Asia/Tokyo', offset: '+09:00' }, t), '日本标准时间（UTC+09:00）');
-  // Kathmandu 故意不在名表里 —— 绝不硬造名字，只显示偏移
+  // Kathmandu 故意不在名表里：显示 tzdata 自己的标识符。
+  // 不编一个名字（那是我们要长期背的合规产物），也不像更早那样只剩「UTC+05:45」——
+  // 真名单有 312 条、其中 278 条没名字，只留偏移会让它们塌成二十来行一模一样的字。
   assert.equal(displayName('Asia/Kathmandu', t), null);
-  assert.equal(formatZone({ id: 'Asia/Kathmandu', offset: '+05:45' }, t), 'UTC+05:45');
+  assert.equal(formatZone({ id: 'Asia/Kathmandu', offset: '+05:45' }, t), 'Asia/Kathmandu（UTC+05:45）');
+});
+
+test('同偏移的两条无名时区不许并成一条（偏移不是时区）', async () => {
+  const t = await fakeI18n('zh_CN');
+  const zones = [
+    { id: 'Europe/Amsterdam', offset: '+01:00' },
+    { id: 'Africa/Lagos', offset: '+01:00' },
+  ];
+  const rows = dedupeZones(zones, t);
+  assert.equal(rows.length, 2, '它们现在同偏移，夏天却不是一个时区');
+  assert.deepEqual(rows.map((row) => row.canonical), ['Europe/Amsterdam', 'Africa/Lagos']);
 });
 
 test('英文模式下名字跟着换', async () => {

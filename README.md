@@ -101,8 +101,8 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c   # 装完：从盘启�
 | [sync-profile-progress.sh](scripts/sync-profile-progress.sh) | 把本 README 的进度表同步进组织主页，写完自跑守卫，不通过就回滚 |
 | [check-doc-sync.test.sh](scripts/check-doc-sync.test.sh) | 上面两个脚本的回归测试：塞进各种漂移，验证抓得住也不误报 |
 | [check-readme-links.sh](scripts/check-readme-links.sh) | README 可点性检查：仓库内死链、跨仓库死链、死锚点、进度表标记（**不需要 root**） |
-| [check-work-issue.sh](scripts/check-work-issue.sh) | 工作 issue 草案守卫：`out/issue-drafts/` 里的草案是否符合[工作 issue 规范](docs/work/README.md)（字段齐备、受理人写角色、验收含命令与期望、≤60 行），并比对骨架与表单的字段是否漂移（**不需要 root、只读**） |
-| [check-work-issue.test.sh](scripts/check-work-issue.test.sh) | 上面那个守卫的回归测试：九个用例塞进字段缺失 / 受理人写人名 / 验收没命令 / 超行数 / 骨架或表单漂移，验证抓得住也不误报（**不需要 root**） |
+| [check-work-issue.sh](scripts/check-work-issue.sh) | 工作 issue 草案守卫：`out/issue-drafts/` 里的草案是否符合[工作 issue 规范](docs/work/README.md)（字段齐备、验收含命令与期望、≤60 行），并比对骨架与表单的字段是否漂移（**不需要 root、只读**） |
+| [check-work-issue.test.sh](scripts/check-work-issue.test.sh) | 上面那个守卫的回归测试：九个用例塞进字段缺失 / 过时的受理人正文段 / 验收没命令 / 超行数 / 骨架或表单漂移，验证抓得住也不误报（**不需要 root**） |
 
 ---
 

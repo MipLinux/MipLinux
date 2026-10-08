@@ -4,7 +4,7 @@ tags: [work, template, issue]
 ---
 
 <!--
-  用法：**只复制「正文骨架」那一节**（从 `### 受理人` 到文件末尾），存成 `out/issue-drafts/<主题>.md`
+  用法：**只复制「正文骨架」那一节**（从 `### 目标` 到文件末尾），存成 `out/issue-drafts/<主题>.md`
   （`out/` 已 gitignore，草案不是仓库资产）。填好 → 给人过目 → 发布。
 
   别把本文件的 frontmatter 与这段注释抄进草案：issue 不是仓库文档，不接受 YAML frontmatter 与 HTML
@@ -21,10 +21,6 @@ tags: [work, template, issue]
 -->
 
 ## 正文骨架（从下一行开始复制）
-
-### 受理人
-
-<维护者 / 协作者 A / 协作者 B> —— 只写角色，不写人名。
 
 ### 目标
 

@@ -1,7 +1,15 @@
-## 中国大陆
+## 原 pacman.conf [archlinuxcn] 段的服务器，保持原有顺序
 Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.aliyun.com/archlinuxcn/$arch
 Server = https://mirrors.ustc.edu.cn/archlinuxcn/$arch
+Server = https://mirror.sjtu.edu.cn/archlinuxcn/$arch
+Server = https://mirrors.huaweicloud.com/archlinuxcn/$arch
+Server = https://mirror-hk.koddos.net/archlinuxcn/$arch
+Server = https://sg.mirror.rackspace.com/archlinuxcn/$arch
+Server = https://jp.mirror.rackspace.com/archlinuxcn/$arch
+Server = https://ftp.harukasan.org/archlinuxcn/$arch
+
+## 中国大陆
 Server = https://mirrors.hit.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.sustech.edu.cn/archlinuxcn/$arch
 Server = https://mirrors.cloud.tencent.com/archlinuxcn/$arch

@@ -1,8 +1,8 @@
-# 本文件是 MipLinux/.github（组织级）中同名文件的副本，内容保持一致。
+# 本文件与 MipLinux/.github（组织级）中的同名文件保持一致。
 # 原因：组织级 ISSUE_TEMPLATE 在本仓库实测不生效（New issue 选择页空白），
 # 而仓库级模板一定会显示。修改请先改组织级，再同步到这里。
 name: 工作分配
-description: 维护者/协作者领取的一条工作：目标、改哪些文件、验收判据、要交什么证据
+description: 一条有明确目标、实现范围、验收判据与回报要求的工作
 title: "[工作] "
 labels: ["task"]
 body:
@@ -15,19 +15,7 @@ body:
         [工作 issue 规范](https://github.com/MipLinux/MipLinux/blob/main/docs/work/README.md)；
         骨架样板见 [TEMPLATE.md](https://github.com/MipLinux/MipLinux/blob/main/docs/work/TEMPLATE.md)。
 
-        > 本表单公开可见，谁都可以起草。**受理人角色只是候选**，由维护者确认后才生效。
-
-  - type: dropdown
-    id: assignee-role
-    attributes:
-      label: 受理人
-      description: 只填角色，不写人名 —— 角色到人的对应只在 docs/work/README.md 维护一份。
-      options:
-        - 维护者
-        - 协作者 A
-        - 协作者 B
-    validations:
-      required: true
+        > 本表单公开可见，谁都可以起草。创建 issue 时，请用 GitHub 的 Assignees 控件选择实际受理人；草案正文不记录受理人。
 
   - type: input
     id: goal

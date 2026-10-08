@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 工作 issue 草案守卫：`out/issue-drafts/*.md` 里的草案是否符合 docs/work/README.md 的「工作 issue 规范」。
 #
-# 为什么有它：规范写在文档里没人执行，就会像旧版当日文档那样各写各的 —— 受理人写人名、验收写成
+# 为什么有它：规范写在文档里没人执行，就会像旧版当日文档那样各写各的 —— 实现范围含糊、验收写成
 # 「跑起来了」。分工的载体从当日文档换成 issue 之后，**能在本地拦住的只剩草案阶段**：
 # issue 一旦发出去就是 GitHub 上的数据，仓库里没有副本，本地没有任何东西可查（见规范「守卫查到哪、查不到哪」）。
 #
@@ -25,14 +25,9 @@ TEMPLATE=${MIPL_WORK_TEMPLATE:-$PROJECT_ROOT/docs/work/TEMPLATE.md}
 FORM=${MIPL_WORK_FORM:-$PROJECT_ROOT/.github/ISSUE_TEMPLATE/task.yml}
 
 # 字段清单与顺序：规范里「表单里每个字段的来历」那张表就是这几个，改哪儿都要一起改。
-FIELDS=(受理人 目标 实现 验收 回报 依赖)
+FIELDS=(目标 实现 验收 回报 依赖)
 # 草案行数上限：一个 issue 只留目标/实现/验收/回报/依赖，过程和实测输出进 docs/work/tech/。
 MAX_LINES=60
-# 受理人只认这三个角色（映射表在 docs/work/README.md）。
-ROLES=('维护者' '协作者 A' '协作者 B')
-# 受理人里出现这些 handle 就算写了人名。
-HANDLES='LaT-SKY|ieer040126|yks0630'
-
 problems=0
 fail() { printf '❌ %s\n' "$1"; problems=$((problems + 1)); }
 ok()   { printf '✅ %s\n' "$1"; }
@@ -83,35 +78,14 @@ check_draft() { # $1=草案文件
     fail "$rel 的字段与规范不符 —— 应为「${FIELDS[*]}」各一次、顺序不变，实际是「$(printf '%s ' $got_seq)」（共 $n_got 个 ### 小节）"
   fi
 
-  # 3. 受理人：三个角色之一，且不写人名
-  local assignee
-  assignee=$(section "$f" 受理人 | grep -vE '^[[:space:]]*$' | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
-  if [ -z "$assignee" ]; then
-    fail "$rel 的「受理人」是空的"
-  else
-    local matched=""
-    local r
-    for r in "${ROLES[@]}"; do
-      case "$assignee" in "$r"|"$r"*) matched="$r"; break ;; esac
-    done
-    if [ -n "$matched" ]; then
-      ok "受理人：$matched"
-    else
-      fail "$rel 的受理人「$assignee」不是三个稳定角色之一（只写 维护者 / 协作者 A / 协作者 B）"
-    fi
-    if printf '%s' "$assignee" | grep -qE "$HANDLES"; then
-      fail "$rel 的受理人里写了人名 —— 只写角色，映射表在 docs/work/README.md"
-    fi
-  fi
-
-  # 4. 实现：必须写出文件路径，否则所有权切不开
+  # 3. 实现：必须写出文件路径，否则所有权切不开
   if section "$f" 实现 | grep -qE '(^|[^[:alnum:]_])(scripts|docs|installer|profile|\.github|out)/'; then
     ok "实现里写了文件路径"
   else
     fail "$rel 的「实现」里没有一条文件路径 —— 所有权按文件切，路径写出来才拦得住撞车"
   fi
 
-  # 5. 验收：命令 + 期望结果
+  # 4. 验收：命令 + 期望结果
   local accept
   accept=$(section "$f" 验收)
   if printf '%s' "$accept" | grep -q '`' && printf '%s' "$accept" | grep -qE '期望|→'; then
@@ -120,17 +94,17 @@ check_draft() { # $1=草案文件
     fail "$rel 的「验收」要写成命令 + 期望结果（含反引号包住的命令，并写出期望）——「跑起来了」不是判据"
   fi
 
-  # 6. 其余字段不许空（依赖没有就写「无」）
+  # 5. 其余字段不许空（依赖没有就写「无」）
   local field
   for field in 回报 依赖; do
     nonempty "$(section "$f" "$field")" || fail "$rel 的「$field」是空的"
   done
 
-  # 7. AI 起草声明与开工命令（草案是人发给维护者过目的，读者有权知道来源）
+  # 6. AI 起草声明与开工命令（草案是人发给维护者过目的，读者有权知道来源）
   grep -q 'AI 起草' "$f" || fail "$rel 缺「本 issue 由 AI 起草」声明"
   grep -q 'git switch main' "$f" || fail "$rel 缺「开工前请执行」里的 git switch main"
 
-  # 8. 行数
+  # 7. 行数
   local lines
   lines=$(wc -l <"$f")
   if [ "$lines" -gt "$MAX_LINES" ]; then

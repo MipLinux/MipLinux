@@ -223,7 +223,7 @@ sudo ./scripts/mipl.sh doctor
 > 列这张表不是为了让你手抄 —— 手抄正是 Issue #8 的成因。
 > 列出来是为了**探测失败时你知道去哪看**。
 >
-> 探测结果要回报给文档（线 B4）：`sudo ./scripts/mipl.sh doctor --report`
+> 探测结果记入本轮工作 issue 的回报：`sudo ./scripts/mipl.sh doctor --report`
 
 ### B.4 准备 UEFI 变量文件
 
@@ -339,7 +339,7 @@ convert /tmp/boot.ppm /tmp/boot.png     # 打开看是不是出现了提示符
 
 ### C.4 挂一块目标盘（装系统 / 装完重启）
 
-线 B 的安装器要有地方装。A5 把这件事固化成三条命令：
+安装器需要一块目标盘。`mipl.sh target` 与 QEMU 启动命令组成这条测试流程：
 
 ```bash
 sudo ./scripts/mipl.sh target                              # 建 out/target.qcow2（40G 虚拟，qcow2）
@@ -420,7 +420,7 @@ archiso login: root
 
 > **改名后复验通过**（2026-09-18 20:16 的 `miplinux-2026.09.18-x86_64.iso`）：
 > UEFI 菜单标题变成 `MipLinux install medium (x86_64, UEFI)`，仍能进
-> `[root@archiso ~]#`（主机名属线 C，这次没动）。**BIOS 那条 bootmode 也验了**
+> `[root@archiso ~]#`（主机名由 `profile/airootfs/etc/hostname` 提供，这次没动）。**BIOS 那条 bootmode 也验了**
 > —— 去掉两个 `-drive if=pflash` 参数就是 SeaBIOS，菜单标题是 `MipLinux`。
 > 产物的卷标 / publisher / application 由 `./scripts/check-identity.sh --iso`
 > 断言，不需要 root。
@@ -431,8 +431,8 @@ archiso login: root
 > 无头复现方式见上面的 C.3。
 >
 > **改名（A6）之后这两行文字不会变，这是对的：** `Arch Linux <版本>` 来自
-> `/etc/issue`（`filesystem` 包提供），`archiso` 来自 `/etc/hostname` —— 两者都在
-> `airootfs/`，属线 C 的文件，A6 只改了 ISO 元数据与引导菜单。看到它们没变，
+> `/etc/issue`（`filesystem` 包提供），`archiso` 来自 `/etc/hostname` —— 后者由
+> `profile/airootfs/etc/hostname` 提供，A6 只改了 ISO 元数据与引导菜单。看到它们没变，
 > 说明改名没有越界，不是没改成功。待办登记在 [06-待定事项 P1](../../knowledge/06-待定事项.md)。
 
 ### ⚠️ 关键：官方 releng 没有桌面环境
@@ -453,7 +453,7 @@ sddm / gdm / lightdm          ✗
 - [ ] QEMU 窗口出现，且能进入 UEFI 引导流程
 - [ ] 引导菜单出现（systemd-boot），**标题是 `MipLinux install medium (x86_64, UEFI)`**（A6 起）
 - [ ] 内核与 initramfs 加载，无报错
-- [ ] 进入 Live 环境，出现登录提示（`archiso login:` —— 主机名属线 C，还没改）
+- [ ] 进入 Live 环境，出现登录提示（`archiso login:` —— `profile/airootfs/etc/hostname` 还没改）
 - [ ] 以 `root` 登录成功（**无密码**）
 - [ ] 能执行 `pacman -Q | wc -l` 并看到包数量
 

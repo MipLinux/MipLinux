@@ -1,0 +1,12 @@
+[Unit]
+Description=Load nouveau for unbound NVIDIA display devices in Live
+After=systemd-udev-trigger.service
+Before=mipl-installer.service
+
+[Service]
+Type=oneshot
+# nvidia-utils blacklists nouveau's device aliases. An explicit modprobe
+# still loads the module, so use it only when udev left an NVIDIA display GPU
+# without a driver. The installed system does not enable this Live-only unit.
+ExecStart=/usr/bin/bash -c 'set -e; /usr/bin/udevadm settle; for device in /sys/bus/pci/devices/*; do [[ -r "$device/vendor" && -r "$device/class" ]] || continue; vendor=$(<"$device/vendor"); class=$(<"$device/class"); if [[ "$vendor" == 0x10de && "$class" == 0x03* && ! -L "$device/driver" ]]; then /usr/bin/modprobe nouveau; fi; done'
+RemainAfterExit=yes

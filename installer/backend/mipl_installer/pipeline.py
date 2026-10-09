@@ -18,11 +18,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from . import boot, configure, disk, options, packages, util
 from .configure import TargetConfig
-from .events import Event, Reporter
+from .events import Event, Reporter, step_event
 from .util import EXIT_USAGE, InstallerError, Runner
 
 #: 执行顺序即依赖顺序：分区 → 装包 → 配置 → 引导
@@ -141,6 +142,8 @@ def step_disk(runner: Runner, plan: Plan, cfg: TargetConfig, layout: disk.Layout
     state.esp, state.root = disk.wipe_and_partition(runner, plan.disk, layout)
     disk.make_filesystems(runner, state.esp, state.root)
     disk.mount_target(runner, state.root, state.esp, cfg.target)
+    # 两个 UUID 是 fstab 与引导项的原料，读不到会当场报错（见 disk.uuid_of）
+    runner.reporter.emit(step_event("disk", "uuids", "读取分区 UUID"))
     state.root_uuid = disk.uuid_of(runner, state.root)
     state.esp_uuid = disk.uuid_of(runner, state.esp)
 
@@ -165,6 +168,35 @@ def step_boot(runner: Runner, plan: Plan, cfg: TargetConfig, state: State) -> No
     boot.verify(runner, cfg, state.root_uuid)
 
 
+#: 目标系统里安装日志的固定位置（从挂载起持续并写，不是收尾拷贝）
+TARGET_LOG_NAME = "var/log/mipl-installer-install.log"
+
+
+def attach_target_log(runner: Runner, plan: Plan, reporter: Reporter) -> None:
+    """目标盘挂上之后，把日志**持续并写**进目标盘。
+
+    目标盘是安装期间唯一既写得进、又活得过重启/断电的地方。持续写（而不是收尾
+    抄一份）意味着：某一步挂死被强杀时，盘上躺着的是到挂死点为止的完整日志 ——
+    挂载之前的那几行也由 reporter 在挂落点时从内存补写进去。测试阶段 Bug 多，
+    复盘材料必须**默认**就在，不需要任何开关。
+    """
+    attach = getattr(reporter, "attach_log_path", None)
+    if attach is None or runner.dry_run:
+        return
+    dest = Path(plan.target) / TARGET_LOG_NAME
+    util.ensure_dir(runner, str(dest.parent))
+    try:
+        attach(str(dest))
+    except OSError as exc:
+        # 日志写不进去不许把安装拖下水：Live 侧那份还在。这一句要说 ——
+        # 它意味着「出事后盘上没有证据」，与「日志会写进盘里」正相反。
+        reporter.note(f"日志写不进目标盘（{dest}）：{exc}；只保留 Live 侧日志")
+        return
+    # **挂上了不说。** 「我们把日志写到哪儿了」在正常流程里是自我指涉的噪音
+    # （实机反馈）；它只在出事时有用，那时由 `cli.log_locations()` 报出来 ——
+    # 而且那时它会先看一眼文件到底在不在，不报一个推测出来的路径。
+
+
 # ── 动盘之前 ──────────────────────────────────────────────────────────
 def preflight(plan: Plan) -> None:
     """**动盘之前**把参数能查的都查掉。
@@ -176,6 +208,7 @@ def preflight(plan: Plan) -> None:
     """
     configure.validate_user(plan.user)
     options.validate_hostname(plan.hostname)
+    options.validate_locale(plan.locale)
     options.validate_timezone(plan.timezone)
     options.validate_keymap(plan.keymap)
 
@@ -244,6 +277,9 @@ def run(
             if step == "disk":
                 step_disk(runner, plan, cfg, layout, state)
                 mounted = not dry_run
+                if mounted:
+                    # 盘挂上了就有了持久化落点：从这一刻起日志并写到目标盘
+                    attach_target_log(runner, plan, reporter)
             elif step == "packages":
                 step_packages(runner, plan, cfg, state)
             elif step == "configure":
@@ -252,7 +288,7 @@ def run(
                 step_boot(runner, plan, cfg, state)
     except BaseException:
         # 失败（或取消）就卸干净：留一堆挂载只会让下一次尝试更难查，
-        # 也不许在残骸上接着装。
+        # 也不许在残骸上接着装。（日志不用抢救：一直在目标盘上并写着）
         if mounted:
             reporter.note("失败收尾：卸载目标")
             disk.unmount_target(runner, cfg.target)

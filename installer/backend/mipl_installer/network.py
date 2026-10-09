@@ -192,16 +192,48 @@ def wifi_networks(runner: Runner, *, rescan: bool = False) -> list[dict]:
     return sorted(best.values(), key=lambda item: item["signal"], reverse=True)
 
 
+#: 连接失败的分类。界面按它查 `network.err.*` 的句子（**错误码是数据，句子是文案**）。
+#: 顺序即优先级 —— nmcli 一句报错里可能同时出现「密码」和「超时」，先认更具体的那条。
+FAILURE_PATTERNS = (
+    ("auth", ("secrets were required", "no secrets", "802-11-wireless-security",
+              "password", "psk", "802.1x", "authentication")),
+    ("notFound", ("no network with ssid", "not found", "no such")),
+    ("timeout", ("timeout", "timed out", "time out")),
+)
+
+
+def classify_failure(text: str) -> str:
+    """nmcli 的报错 → `auth` / `notFound` / `timeout` / `other`。
+
+    为什么不让界面自己读 nmcli 的英文报错：那是**外部工具**的措辞，换一版 NM
+    就可能变，而界面要按它选中英两套句子。在这里收敛成四个码，界面的分支就固定了。
+    认不出来的一律 `other` —— 编一个具体的失败原因比说「连接失败」更糟。
+    """
+    lowered = (text or "").lower()
+    for code, needles in FAILURE_PATTERNS:
+        if any(needle in lowered for needle in needles):
+            return code
+    return "other"
+
+
 def connect(runner: Runner, ssid: str, password: str = "") -> None:
     """连一个无线网络。
 
     **密码走 stdin，不进 argv**（`--ask` 让 nmcli 自己从标准输入读密钥）。
-    其它失败原样抛 `InstallerError` —— 界面把 `render()` 的第二行当「下一步」显示。
+    失败时抛带 `reason` 的 `InstallerError`，界面拿 `reason` 去查 `network.err.*`。
+
+    `capture=True` 是为了拿到 nmcli 的 stderr 才能分类 —— 不捕获的话失败信息里
+    只有退出码，四个失败码会全部塌成 `other`，界面就只能说一句「连接失败」。
     """
     if not ssid:
-        raise InstallerError("没有选中网络", EXIT_USAGE)
+        raise InstallerError("没有选中网络", EXIT_USAGE, reason="notFound")
     argv = ["nmcli", "--ask", "device", "wifi", "connect", ssid]
     if runner.dry_run:
         runner.run(argv)
         return
-    runner.run(argv, input=f"{password}\n" if password else "\n")
+    try:
+        runner.run(argv, input=f"{password}\n" if password else "\n",
+                   capture=True, exit_code=EXIT_USAGE)
+    except InstallerError as exc:
+        raise InstallerError(str(exc), exc.exit_code, exc.hint,
+                             reason=classify_failure(str(exc))) from exc

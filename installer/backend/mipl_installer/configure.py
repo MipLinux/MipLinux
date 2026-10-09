@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import options
+from .events import step_event
 from .util import (
     EXIT_CONFIGURE,
     InstallerError,
@@ -110,8 +111,8 @@ def locale_conf(locale: str) -> str:
 
 
 def environment_text() -> str:
-    # 与 Live 出厂（profile/airootfs/etc/environment）同一份真相：fcitx5 需要这三个
-    # 变量才会被 GTK / Qt 程序选为输入法模块，没有它们「装了 fcitx5 也打不了中文」。
+    # 只写进目标系统：Live 安装器不装输入法；装后系统需要这三个变量，
+    # GTK / Qt 程序才会选用已安装的 fcitx5 输入法模块。
     return "GTK_IM_MODULE=fcitx\nQT_IM_MODULE=fcitx\nXMODIFIERS=@im=fcitx\n"
 
 
@@ -358,12 +359,15 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     validate_user(cfg.user)
 
     # 1. 用户与密码：密码走 stdin，**不进 argv**（argv 会留在进程列表与日志里）
+    runner.reporter.emit(step_event("configure", "user", f"创建用户 {cfg.user}"))
     runner.run(chroot_argv(target, ["useradd", "-m", "-G", "wheel", "-s", "/bin/bash", cfg.user]),
                exit_code=EXIT_CONFIGURE)
+    runner.reporter.emit(step_event("configure", "user-password", "设置用户密码"))
     runner.run(chroot_argv(target, ["chpasswd"]), input=f"{cfg.user}:{password}\n", exit_code=EXIT_CONFIGURE)
     verify_password(runner, cfg, cfg.user)
 
     # 2. root：设了就验，没设就明说 —— 不许静默留一个登不进去的 root
+    runner.reporter.emit(step_event("configure", "root-password", "root 密码"))
     if root_password is not None:
         runner.run(chroot_argv(target, ["chpasswd"]), input=f"root:{root_password}\n", exit_code=EXIT_CONFIGURE)
         verify_password(runner, cfg, "root")
@@ -375,22 +379,33 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
         )
 
     # 3. locale：写在 /etc/locale.gen 里的是「要生成什么」，locale-gen 才真的生成
+    runner.reporter.emit(step_event("configure", "locale", f"生成语言环境 {cfg.locale}"))
     runner.run(chroot_argv(target, ["locale-gen"]), exit_code=EXIT_CONFIGURE)
 
     # 4. keyring 再 populate 一次（幂等）—— roadmap §M1 把它算在 configure 的职责里，
     #    也是检查点 6 的排查入口：这一步没做，装后系统的 pacman -Syu 必挂
+    runner.reporter.emit(step_event("configure", "keyring-refresh", "填充目标密钥环"))
+    runner.reporter.note("几十秒")
     runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinux"]), exit_code=EXIT_CONFIGURE)
 
     # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
+    runner.reporter.emit(step_event("configure", "services", "启用 NetworkManager"))
     runner.run(chroot_argv(target, ["systemctl", "enable", "NetworkManager"]), exit_code=EXIT_CONFIGURE)
 
     # 5.5 reflector 守卫（#23）：装了才关，没装就不产生任何命令
     if target_has_reflector(target):
+        runner.reporter.emit(step_event("configure", "reflector", "关掉 reflector 的定时器"))
         runner.run(chroot_argv(target, reflector_guard(True)), exit_code=EXIT_CONFIGURE)
         runner.reporter.note("目标里有 reflector，已 disable reflector.timer / reflector.service（#23）")
 
     # 6. initramfs 放最后：它要往 /boot（= ESP）里写内核与 initramfs，
     #    所以必须在 ESP 挂好之后、boot.py 校验之前跑
+    #    -P 连 fallback 救援镜像一起生成：弱 CPU 上这一步以分钟计，**先说出来**
+    #    才有用（实机「卡了六分钟」的高发点之一）—— 说「要等几分钟」是给用户的
+    #    预期，说「输出会持续到达」是替工具打包票（mkinitcpio 大部分时间在压缩，
+    #    本来就不怎么输出），而那句空头支票实机反馈里被点过名。
+    runner.reporter.emit(step_event("configure", "initramfs", "生成 initramfs（含救援镜像）"))
+    runner.reporter.note("弱 CPU 上以分钟计；大部分时间在压缩，期间不会有新输出")
     runner.run(chroot_argv(target, ["mkinitcpio", "-P"]), exit_code=EXIT_CONFIGURE)
 
 

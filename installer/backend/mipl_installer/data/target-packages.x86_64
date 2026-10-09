@@ -2,12 +2,18 @@
 #
 # 为什么不是 profile/packages.x86_64：那是 **Live** 的清单。D6 要的是
 # 「唯一来源、禁止手写第二份」，不是「只能有一个文件」—— 这里不抄它，
-# 只列装后系统的最小集。两份清单的关系见 P10（docs/knowledge/06-待定事项.md），
+# 只列装后系统需要的。两份清单的关系见 P10（docs/knowledge/06-待定事项.md），
 # 定案后本文件删除，改为指向唯一来源。
 #
-# 为什么这么短：检查点 4 只要求「能启动」，检查点 6 要求「能 pacman -Syu」——
-# 所以内核、firmware、网络、sudo 必须在；桌面、输入法、N 卡驱动属 M3。
+# 最小集部分：检查点 4 只要求「能启动」，检查点 6 要求「能 pacman -Syu」——
+# 所以内核、firmware、网络、sudo 必须在。
 # 每加一个包都会拉长 Live 里的安装时间（在线安装，包从国内源现拉）。
+#
+# 维护者拍板（方案 A）：中文三件套与 N 卡驱动进装后基础清单 —— D8 定的是
+# 「驱动由安装器装进装后系统」，configure.py 又已把 fcitx 的环境变量与 CJK
+# 字体 fallback 写进目标：包不进来，那两处配置就是死配置（installer/AGENTS.md
+# 里 D6 的反例：「Live 里中文能打字、装完不能」）。安装器不需输入法或代码字体，
+# 因此 Maple Mono 与 fcitx 只列在装后清单；Noto CJK 字体同时供 Live 安装器显示中文。
 
 base
 linux
@@ -17,4 +23,30 @@ networkmanager
 sudo
 efibootmgr
 nano
-vim
+nvim
+
+# ==> 中文支持 · 字体==>
+noto-fonts
+noto-fonts-cjk
+noto-fonts-emoji
+ttf-maplemono-nf-cn-unhinted
+ttf-maplemono-nf-unhinted
+ttf-maplemono
+# <== 中文支持 · 字体 <==
+
+# ==> 中文支持 · 输入法==>
+fcitx5
+fcitx5-configtool
+fcitx5-chinese-addons
+fcitx5-gtk
+fcitx5-qt
+# <== 中文支持 · 输入法 <==
+
+# ==> 中文支持 · 本地化 ==>
+man-pages-zh_cn
+# <== 中文支持 · 本地化 <==
+
+# ==> NVIDIA 驱动 · Turing 及更新==>
+nvidia-open
+nvidia-utils
+# <== NVIDIA 驱动 · Turing 及更新 <==

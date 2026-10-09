@@ -1,0 +1,148 @@
+name: PR acceptance（验收对账）
+
+# 把 PR 正文里的「验证方式」与它关掉的那条 issue 的「验收」对成一张分档表（Issue #99）。
+# 判据的唯一源是 docs/work/ai-review-rubric.md 第十节（那份文档就是 system prompt）。
+#
+# 分工：scripts/pr-acceptance-context.sh 抽判据、抽声称、给机械信号（含多对多关联）；
+#       模型逐条复核并定档（尤其 R2「被更强的证据替代」这种机械信号判不出来的）。
+#
+# 本检查**不判定真伪**：机器人看不到本机实测，也不出「通过 / 不通过」。
+
+on:
+  pull_request:
+    # 刻意**不挂 synchronize**：每次 push 都刷一条评论 = 噪音，而且那时判据往往还没跑完。
+    types: [opened, ready_for_review]
+  # 手动重跑：改完 PR 正文、或想刷新那条已经过期的评论时用（能 dispatch 的人本来就有写权限，
+  # 所以这条路径不需要再过 author_association 那道门）。
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR 编号'
+        required: true
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  acceptance:
+    # 只对与本仓库有关联的人跑（与 ai-summary 同一套门；仓库公开，陌生人不该花我们的 token）。
+    # CONTRIBUTOR 必须保留 —— 实测本仓库里作者是组织 owner 时事件负载给的也是 CONTRIBUTOR。
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (!github.event.pull_request.draft &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: fork PR 没有 secret，明确跳过（不是失败）
+        id: fork
+        run: |
+          # 手动重跑时不检查 fork（能 dispatch 的人有写权限，secret 也拿得到）
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::来自 fork 的 PR 拿不到本仓库的 secret，本次跳过验收对账（按 rubric §10.3 的约定）。"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 生成上下文（脚本算机械信号）
+        id: ctx
+        if: steps.fork.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+        # 产物写进工作区：下面的 action 是 Docker action（WORKDIR=/app，runner 的 /tmp 不与容器共享）
+        run: |
+          set -euo pipefail
+          ./scripts/pr-acceptance-context.sh --pr "$PR" --out "$GITHUB_WORKSPACE/.pr-acceptance"
+
+      - name: head 没变就不重复评论
+        id: gate
+        if: steps.fork.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+        run: |
+          set -euo pipefail
+          head=$(awk -F'\t' '$1=="head"{print $2}' .pr-acceptance/meta.tsv | cut -c1-7)
+          [ -n "$head" ] || { echo "::error::读不到 head sha"; exit 1; }
+          echo "head=$head" >>"$GITHUB_OUTPUT"
+
+          old=$(gh api "repos/{owner}/{repo}/issues/$PR/comments" --paginate \
+                  -q '.[] | select(.body | contains("mipl-acceptance: head=")) | .id' | tail -1 || true)
+          echo "comment_id=$old" >>"$GITHUB_OUTPUT"
+          if [ -n "$old" ]; then
+            oldhead=$(gh api "repos/{owner}/{repo}/issues/comments/$old" -q .body \
+                        | sed -n 's/.*mipl-acceptance: head=\([0-9a-f]\{7\}\).*/\1/p' | head -1)
+            if [ "$oldhead" = "$head" ]; then
+              echo "skip=true" >>"$GITHUB_OUTPUT"
+              echo "head 没变（$head），跳过。"
+            else
+              echo "skip=false" >>"$GITHUB_OUTPUT"
+            fi
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 逐条复核（AI 定档）
+        id: ai
+        if: steps.fork.outputs.skip != 'true' && steps.gate.outputs.skip != 'true'
+        # 钉版本的理由见 ai-summary.yml：浮动的 @v1 仍指向以 uid 1000 运行、写不了 GITHUB_OUTPUT 的 v1.3.1
+        uses: appleboy/LLM-action@v1.4.0
+        with:
+          base_url: 'https://api.deepseek.com'
+          api_key: ${{ secrets.DEEPSEEK_API_KEY }}
+          model: 'deepseek-v4-flash'
+          # 判断类任务压温度：同一份正文跑三次，档位不该变
+          temperature: '0.2'
+          # 默认 1000 会把复核意见截断
+          max_tokens: '8000'
+          # 必须是**容器内**的工作区挂载点（Docker action 的 WORKDIR 是 /app）
+          system_prompt: 'file:///github/workspace/docs/work/ai-review-rubric.md'
+          input_prompt: 'file:///github/workspace/.pr-acceptance/context.md'
+
+      - name: 发评论（新建或就地编辑）
+        if: steps.fork.outputs.skip != 'true' && steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+          COMMENT_ID: ${{ steps.gate.outputs.comment_id }}
+          HEAD: ${{ steps.gate.outputs.head }}
+          SEMANTIC: ${{ steps.ai.outputs.response }}
+        run: |
+          set -euo pipefail
+          {
+            cat .pr-acceptance/facts.md
+            echo
+            if [ -n "$SEMANTIC" ]; then
+              printf '%s\n' "$SEMANTIC"
+            else
+              echo "⚠️ 逐条复核本次没有输出，上面只有脚本算出的机械信号（不是判决）。"
+            fi
+            echo
+            echo '---'
+            echo '本评论由 `scripts/pr-acceptance-context.sh` 按 `docs/work/ai-review-rubric.md` 第十节生成：**只对账，不裁决** —— 不判真伪、不出「通过 / 不通过」、不打 label、不 request changes。'
+            echo
+            printf '<!-- mipl-acceptance: head=%s -->\n' "$HEAD"
+          } >.pr-acceptance/comment.md
+
+          if [ -n "$COMMENT_ID" ]; then
+            gh api -X PATCH "repos/{owner}/{repo}/issues/comments/$COMMENT_ID" \
+              -f body="$(cat .pr-acceptance/comment.md)" >/dev/null
+            echo "已就地更新评论 $COMMENT_ID"
+          else
+            gh api -X POST "repos/{owner}/{repo}/issues/$PR/comments" \
+              -f body="$(cat .pr-acceptance/comment.md)" >/dev/null
+            echo "已新建评论"
+          fi
+
+          [ -n "$SEMANTIC" ] || exit 1

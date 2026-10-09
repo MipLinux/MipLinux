@@ -1,0 +1,426 @@
+/* ============================================================================
+ * base.css —— 重置、外壳版式、背景氛围、字体排版
+ * ========================================================================= */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+/* 高度架构（2026-10-04 实机反馈）：
+ * 整窗 = 固定高度，**只有内容区内部滚动**。缺了 #root 的高度，`.app` 的 100% 会退化成
+ * auto，页面就会随内容长高 —— 高级安装多出 4 步、WiFi 展开输入框，都会把底部动作区顶出视口。
+ * 这也是「选中高级安装后整个应用高度重绘」的根因。 */
+#root {
+  height: 100%;
+  min-height: 0;
+}
+
+body {
+  /* kiosk 不是文档：文本一律不可选（输入框单独放行，见下） */
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: var(--font-sans);
+  font-size: calc(var(--t-body) * var(--ui-scale));
+  line-height: var(--lh-body);
+  color: var(--text);
+  background: var(--bg-gradient, var(--bg));
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden; /* kiosk：不出现滚动条，滚动交给内部面板 */
+}
+
+h1,
+h2,
+h3,
+p,
+figure,
+ul,
+ol {
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--r-field);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------ 背景氛围 */
+
+.aurora {
+  position: fixed;
+  inset: -20%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: var(--aurora-opacity);
+  filter: blur(40px) saturate(115%);
+  transition: opacity var(--dur-slow) var(--ease-in);
+}
+
+.aurora__blob {
+  position: absolute;
+  width: 58vmax;
+  height: 58vmax;
+  border-radius: 50%;
+  mix-blend-mode: screen;
+  will-change: transform;
+}
+
+.aurora__blob--1 {
+  top: -12%;
+  left: -6%;
+  background: radial-gradient(circle at 50% 50%, var(--aurora-1), transparent 62%);
+  animation: drift-1 74s var(--ease-in) infinite alternate;
+}
+
+.aurora__blob--2 {
+  right: -10%;
+  top: 8%;
+  background: radial-gradient(circle at 50% 50%, var(--aurora-2), transparent 60%);
+  animation: drift-2 92s var(--ease-in) infinite alternate;
+}
+
+.aurora__blob--3 {
+  left: 24%;
+  bottom: -28%;
+  background: radial-gradient(circle at 50% 50%, var(--aurora-3), transparent 64%);
+  animation: drift-3 110s var(--ease-in) infinite alternate;
+}
+
+[data-theme='light'] .aurora__blob {
+  mix-blend-mode: multiply;
+}
+
+@keyframes drift-1 {
+  to {
+    transform: translate3d(9%, 7%, 0) scale(1.12);
+  }
+}
+
+@keyframes drift-2 {
+  to {
+    transform: translate3d(-7%, 10%, 0) scale(1.06);
+  }
+}
+
+@keyframes drift-3 {
+  to {
+    transform: translate3d(6%, -8%, 0) scale(1.1);
+  }
+}
+
+/* 细微噪点：只挂在固定层上，不进滚动容器 */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------------------------------------------------------------- 外壳 */
+
+.app {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--gutter);
+  gap: var(--gutter);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+}
+
+.topbar__spacer {
+  flex: 1;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.brand__mark {
+  width: calc(34px * var(--ui-scale));
+  height: calc(34px * var(--ui-scale));
+  flex: none;
+  background: url('../assets/logo/logo-128.png') center / contain no-repeat;
+  filter: drop-shadow(0 4px 12px rgba(37, 118, 233, 0.35));
+}
+
+.brand__text {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.brand__name {
+  font-size: calc(var(--t-h3) * var(--ui-scale));
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.brand__sub {
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gutter);
+  min-height: 0;
+}
+
+@media (min-width: 840px) {
+  .shell {
+    grid-template-columns: calc(var(--rail-w) * var(--ui-scale)) minmax(0, 1fr);
+  }
+}
+
+.rail {
+  display: none;
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (min-width: 840px) {
+  .rail {
+    display: block;
+  }
+}
+
+/* 内容区是**唯一**允许滚动的容器 */
+.stage {
+  position: relative;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  /* 给最后一个面板的阴影留出空间 —— 否则会被滚动容器切出一条硬边 */
+  padding-bottom: calc(var(--space-3) * var(--ui-scale));
+}
+
+.stage__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+  min-height: 0;
+  height: 100%;
+}
+
+/* 页面的根节点填满内容区 —— 不然「面板填满 + 列表自己滚」这条链在根节点就断了
+ * （面板会按内容高度长，把整个页面撑出滚动条）。 */
+.stage__inner > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 窄屏时的步骤条（宽屏由 rail 承担） */
+.stepsbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+@media (min-width: 840px) {
+  .stepsbar {
+    display: none;
+  }
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* 分隔线两侧的留白也走 --gutter，跟窗口四周同一套 */
+  padding-top: var(--gutter);
+  border-top: 1px solid var(--hairline);
+}
+
+.actions__hint {
+  flex: 1;
+  min-width: 0;
+  font-size: calc(var(--t-label) * var(--ui-scale));
+  color: var(--text-faint);
+}
+
+.actions__blocked {
+  color: var(--danger);
+}
+
+/* ---------------------------------------------------------------- 排版 */
+
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.page-title {
+  font-size: var(--t-h1);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+
+.page-desc {
+  max-width: 62ch;
+  color: var(--text-muted);
+  font-size: calc(var(--t-lead) * var(--ui-scale));
+  line-height: var(--lh-snug);
+  /* 中文段落也不许在词中间断开（「中文本地 / 化」这种） */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+  text-wrap: pretty;
+}
+
+.lead {
+  font-size: var(--t-display);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.025em;
+  font-weight: 600;
+  max-width: 26ch;
+  /* 真要折行时让两行长度相近，而不是「欢迎使用 / MipLinux」这种一头沉 */
+  text-wrap: balance;
+  /* 中文标题不许在词中间断开（`word-break: break-all` 会出现「欢迎使 / 用」） */
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.faint {
+  color: var(--text-faint);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.label {
+  font-size: calc(var(--t-label) * var(--ui-scale));
+  font-weight: 550;
+  color: var(--text-muted);
+}
+
+.caption {
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  color: var(--text-faint);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ 滚动条 */
+
+/* 滚动条**不占位、不可见**（维护者 2026-10-04）：滚动照旧（滚轮 / 键盘 / 触屏），
+ * 只是不画出那条会挤动布局的槽 —— 出现/消失时页面不会横向抖一下。 */
+* {
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 图片不许拖拽（拖出去会变成「复制图片」的拖动源），也不参与选中 */
+img {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* 输入框里要能选中/编辑文本（kiosk 下这是唯一的例外） */
+input,
+textarea,
+[contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+
+/* ------------------------------------------------------------ 低配模式 */
+
+/* 软件渲染（SwiftShader / virtio GPU）下，模糊与大面积阴影是纯 CPU 开销 ——
+ * 实机上表现为「动画卡顿 + 操作延迟」。这里按启动器判定的渲染模式自动降级：
+ * **布局、字号、交互一律不变**，只去掉氛围层与高斯模糊。 */
+[data-renderer='software'] .aurora,
+[data-renderer='software'] .grain,
+[data-renderer='software'] .welcome__glow {
+  display: none;
+}
+
+[data-renderer='software'] .welcome__logo,
+[data-renderer='software'] .finish__logo,
+[data-renderer='software'] .brand__mark {
+  filter: none;
+}
+
+[data-renderer='software'] .welcome__ring {
+  opacity: 0.3;
+}
+
+[data-renderer='software'] .scrim {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+}
+
+[data-renderer='software'] .panel,
+[data-renderer='software'] .steps {
+  box-shadow: var(--shadow-1);
+}

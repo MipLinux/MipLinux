@@ -1,6 +1,6 @@
 # MipLinux 安装器 · ROADMAP
 
-> 最后更新：2026-09-21 · 技术栈定案见 [README](../../README.md) 决策表 **D14**
+> 最后更新：2026-10-04（界面层改定 Electron）· 技术栈定案见 [README](../../README.md) 决策表 **D14**
 >
 > 本文是**计划**：写「接下来做什么、怎么算做完」。已定案的结论在 `docs/knowledge/`，这里不重复推导。
 
@@ -12,7 +12,7 @@
 
 | | 内容 |
 |---|---|
-| **v0.1 做** | UEFI 引导 · 整盘擦除 · GPT（ESP + ext4 单根）· Qt6 图形界面 · NetworkManager 联网 · systemd-boot |
+| **v0.1 做** | UEFI 引导 · 整盘擦除 · GPT（ESP + ext4 单根）· Electron 图形界面 · NetworkManager 联网 · systemd-boot |
 | **v0.1 不做** | 双系统（保留已有系统）· LUKS · BIOS(legacy) · btrfs 子卷/快照 · LVM · 离线安装 · 多桌面选择 |
 
 **三条不变的约束**（来自 [01-概念模型](../knowledge/01-概念模型.md) 与 [05-测试方法](../knowledge/05-测试方法.md)）：
@@ -28,13 +28,13 @@
 | 层 | 选型 | 一句话理由 |
 |---|---|---|
 | 语言 | Python 3 | Live 里本来就有（`reflector` 依赖它，与 `archinstall` 无关）；测试与迭代最省事 |
-| 界面 | Qt Quick（QML）+ PySide6（宿主） | **界面用 QML**（路线 B：`QtQuick.Controls.Basic` + 自建 MD3 层，见 [tech/08 §5](tech/08-界面设计方向.md)）；`qt6-base` 已因 `fcitx5-qt` 在 Live 里，`pyside6` 在官方仓库 |
+| 界面 | **Electron（HTML/CSS/JS）+ 官方仓库 `electron44`** | **2026-10-04 维护者改定，覆盖原「Qt Quick(QML) + PySide6」**：QML 书写成本过高；应用本体只有 HTML/CSS/JS，运行时用系统包、不打包、不引 npm 依赖。体积账见 [knowledge/06 P6](../knowledge/06-待定事项.md)（净 ≈ +100 MiB） |
 | kiosk 合成器 | `cage` | 单窗口全屏的 Wayland 合成器，专为这种场景而生；与 P5 的用户桌面（niri / Hyprland）不冲突 |
 | 分区 | `python-pyparted` | 官方 Python 绑定（`archinstall` 同栈）；后续做双系统沿用同一条路 |
 | 联网 | NetworkManager + `nmcli` | Issue #30；安装器直接调命令行，不用自己写 D-Bus |
 | 引导（装后系统） | systemd-boot | UEFI-only 下与 ISO 自身的 `uefi.systemd-boot` 一致，少维护一套 |
 
-**明确排除：** C++/Qt6 + kpmcore（要编译、迭代慢，而它的强项「缩小已有分区」v0.1 用不上）、Rust / Go（静态二进制要自建仓库分发，撞 D5 与 P2 的成本）、纯 TUI（放弃图形体验）。
+**明确排除：** C++/Qt6 + kpmcore（要编译、迭代慢，而它的强项「缩小已有分区」v0.1 用不上）、Rust / Go（静态二进制要自建仓库分发，撞 D5 与 P2 的成本）、纯 TUI（放弃图形体验）、**Qt Quick/QML 前端**（书写成本高，2026-10-04 改用 Electron，理由与实测见 [knowledge/06 P6](../knowledge/06-待定事项.md)）、**GTK4 + WebKitGTK**（同样能写 HTML/CSS/JS，但依赖包数是 Electron 的三倍多，只省约 20 MiB）。
 
 ---
 
@@ -42,7 +42,7 @@
 
 ```
 installer/
-├── backend/mipl_installer/  核心逻辑：不依赖 Qt，可被 CLI 与测试直接驱动
+├── backend/mipl_installer/  核心逻辑：不依赖界面技术栈，可被 CLI 与测试直接驱动
 │   ├── disk.py              擦盘、建 GPT、ESP + root（pyparted）
 │   ├── packages.py          pacstrap 驱动 + 读目标包清单
 │   ├── configure.py         chroot 配置：locale / 用户 / fstab / keyring / mirrorlist
@@ -51,10 +51,15 @@ installer/
 │   ├── util.py              外部命令与写文件的唯一出口（Runner，可注入替身）
 │   ├── cli.py / __main__.py 无界面入口：`python3 -m mipl_installer`
 │   └── data/                M1 的临时目标包清单（P10 定案后删）
-├── frontend/                Qt Quick（QML）前端：只画界面，不实现逻辑
-│   ├── mipl-installer       入口，由 cage 拉起（待落地，见 #79）
-│   ├── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage；待落地，见 #79）
-│   └── qml/                 MD3 实现；接口准据见 qml/README.md
+├── frontend/                Electron 前端：只画界面，不实现逻辑
+│   ├── mipl-installer       Python 启动器：算首帧主题与设备缩放 → `exec electron`（由 cage 拉起）
+│   ├── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage）
+│   ├── theme/               theme_mode.py / device_scale.py 纯函数 + 单测（不依赖界面栈）
+│   └── app/                 Electron 应用；接口准据见 app/README.md
+│       ├── main.js / preload.js   kiosk 窗口、启动参数与后端通道；不实现安装逻辑
+│       ├── renderer/              HTML/CSS/JS：12 个页面、i18n、backend.js（真数据）/ mock.js（离屏自检）、时区名表
+│       ├── design/color.json      唯一色源（由 tools 下的断言脚本与 08 对齐）
+│       └── tools/                 check-tokens.py / check-contrast.py / probe-*.js
 ├── tests/                   单测 test_*.py + Live 内排练脚本（*.sh）
 ```
 
@@ -68,12 +73,11 @@ installer/
 
 ## 4. 里程碑
 
-**正在跑的线（2026-09-23 布置）：** 线 G → 启动链收尾 → M2 前端（关键路径）、
-线 H → 装后系统（M3 前半）、线 I → 镜像源自动切换（#18）+ 独立复现；
-分工与文件所有权见 [2026-09-23.md](2026-09-23.md)（假期里降速推进）。
+**当前工作分配：** 见 [GitHub 上带 `task` 标签的 issue 列表](https://github.com/MipLinux/MipLinux/issues?q=label%3Atask)；
+本节只跟踪里程碑与验证状态。
 
 **到 2026-09-26 的实际状态：** M0 与 M1 已收 —— 启动链与检查点 1 / 2 实测通过、
-`F` 线补了真机 Live（[tech/04 §5](tech/04-安装逻辑与实测.md)），M1 的检查点 4 由 PR #42 验过。
+真机 Live 的验证记录见 [tech/05 §2](tech/05-装后系统验证.md)，M1 的检查点 4 由 PR #42 验过。
 **M2 验收通过**（2026-09-26）：界面已接真后端（候选盘 / 事件流 / 四份名单 / 参数守卫），
 并且「**QEMU 里全程图形化装完一次**」已经真跑过 —— 用 `tools/gui-install.py`
 （无头：`screendump` + `input-send-event`，不需要显示器）点完整条链，装出来的系统
@@ -84,7 +88,7 @@ installer/
 |---|---|---|---|---|
 | **M0** | 骨架与可测环境 | QEMU 里开机直进安装器界面（还没有真功能） | 界面能起来；安装器崩了能落回 TTY | 无 |
 | **M1** | 逻辑闭环（无界面） | core 单独跑通「空盘 → 能启动的系统」 | 检查点 4 + 检查点 6 | 无 |
-| **M2** | Qt6 前端最小可用 | 五个页面把 M1 的流程包起来 | QEMU 里全程图形化装完一次 | M1 |
+| **M2** | Electron 前端最小可用 | 12 个页面（普通 8 步 / 高级 12 步）把 M1 的流程包起来 | QEMU 里全程图形化装完一次 | M1 |
 | **M3** | 装后系统完整 | 中文、输入法、N 卡、国内源、桌面 | 检查点 5 + 真机 NVIDIA（两次） | P10、P5 |
 | **M4** | 联网与镜像 | 安装器里选网、测速、写源 | QEMU 用户网络 + 真机 Wi-Fi | M2、P11 |
 | **M5** | 发布准备 | 签名、校验和、Release、中文文档 | 一条命令产出可发布产物 | D10、D13 |
@@ -94,7 +98,7 @@ installer/
 先把「能起来、能测」这条路铺平，**不写任何真功能**。
 
 - 建 `installer/`（§3 的布局）与入口 `frontend/mipl-installer`
-- Live 包清单加 `networkmanager`、`cage`、`qt6-wayland`、`pyside6`、`python-pyparted`
+- Live 包清单加 `networkmanager`、`cage`、`electron44`（`qt6-wayland` / `pyside6` 随界面换栈一并去掉）、`python-pyparted`
 - `airootfs`：kiosk unit（`cage` + 安装器）＋**把它走掉之后的 tty1 交回 `getty` 的兜底单元**（`mipl-installer.service` 的 `OnSuccess=` / `OnFailure=` → `mipl-installer-tty.service`；**不自动重启**安装器 —— 崩了不该在残骸上接着装，理由见 [archive](../archive/2026-09-25-tty1落不回去.md)）、NetworkManager 的无 GUI 配置；`getty` autologin **保留为兜底**
 - `baseline-build.sh` 把 `installer/` 拷进 airootfs；`mipl.sh` 加 `installer` 子命令（建盘 + 启动 + 串口日志落 `out/`）
 
@@ -113,11 +117,22 @@ installer/
 **验收：** `mipl qemu --disk target.qcow2 --boot c` 能从盘启动（检查点 4），进系统后确认 `cat /sys/module/nvidia_drm/parameters/modeset` 输出 `Y`，并使 `pacman -Syu` 成功（检查点 6）；全程只在 `out/target.qcow2` 上做。
 **产出：** `docs/work/tech/04-安装逻辑与实测.md`
 
-### M2 · Qt6 前端最小可用
+### M2 · Electron 前端最小可用
 
-页面流：欢迎（语言 / 键盘）→ 磁盘选择 + 擦盘二次确认 → 用户与密码 → 进度与日志 → 完成重启。
+页面流：普通 8 步（欢迎 → 网络 → 目标盘 → 账户 → 摘要 → 擦除确认 → 进度 → 完成）/ 高级 12 步
+（多出语言 / 键盘 / 时区 / 主机名四页）—— 步骤表与全部过审文案见
+[tech/09 §二 · 流程](tech/09-安装器界面文案.md)。
 
-**进度来自 `core/events.py` 的事件流** —— Qt 层不许出现分区或装包逻辑，否则 M1 的测试就白做了。
+**已经是真数据了**（#97，2026-10-06）：12 页吃 `--print-*` 只读出口报上来的运行系统事实，
+进度来自 `events.JsonReporter` 的 JSON 行事件流，选择经 `pipeline.Plan` 真的写进目标系统；
+`mock.js` 退成**只给离屏探针**用的替身（两者同形）。耦合层的冻结接口见
+[frontend/app/README.md](../../installer/frontend/app/README.md) §7。
+
+**进度来自 `core/events.py` 的事件流** —— 界面层不许出现分区或装包逻辑，否则 M1 的测试就白做了。
+
+**验收口径：** 宿主机上的 Node 单测与 Electron 离屏探针只是**旁证**，不算 W3C 意义上的「跑过界面」。
+V3 的 `cage` 12 页实机测试由维护者于 2026-10-08 报告已完成，记录与证据待补，见
+[tech/11 §5](tech/11-安装器前端实测.md)；V5 / V7 / V8 仍未实测。
 
 **验收：** QEMU 里全程图形化装完一次。
 **可后置：** Issue #22（等待界面小游戏）挂在进度页。
@@ -150,7 +165,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | # | 验什么 | 怎么验 |
 |---|---|---|
 | S1 | 分区 | `pyparted` 在 `out/target.qcow2` 上擦盘 + 建 GPT/ESP/root，重复执行结果一致 |
-| S2 | 界面能起来 | QEMU（无 GPU）里 `cage` + Qt6 全屏可见；不亮时 `WLR_RENDERER=pixman` 兜底 |
+| S2 | 界面能起来 | QEMU（无 GPU）里 `cage` + Electron 全屏可见；不亮时 `WLR_RENDERER=pixman` + Chromium 自带 SwiftShader 软渲染 |
 | S3 | 端到端 | `mipl.sh target --force` → `qemu --disk` → 安装 → `qemu --disk … --boot c` |
 | S4 | 联网 | QEMU 用户网络（有线）+ 真机 Wi-Fi，都走 `nmcli` |
 | S5 | 装后系统 | `guestmount` 静态检查 + 检查点 5 + 真机 NVIDIA |
@@ -167,13 +182,15 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | 失败模式 | 兜底 / 验收 |
 |---|---|
 | NVRAM 写不进（主板满 / 只读） | 复制到 `\EFI\BOOT\BOOTX64.EFI`（可移除介质路径），并在界面上说明 |
-| 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续） |
+| 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续）　✅ 2026-10-04 QEMU 实测（[tech/04 §7.2](tech/04-安装逻辑与实测.md)） |
 | `pacman-key` 没初始化 | 检查点 6 会暴露 —— M1 的 `configure.py` 必须做 `--init` / `--populate` |
 | `reflector` 覆盖 mirrorlist | 装后系统不启用它的 timer（#23 已经踩过） |
 | 安装器崩溃 | `OnFailure=` 拉起 `mipl-installer-tty.service`，把 tty1 交回 `getty`（**不自动重启**安装器）；日志看 `journalctl -u mipl-installer` 与 `journalctl -u mipl-installer-tty` |
-| QEMU 无 GPU，Qt6 起不来 | `WLR_RENDERER=pixman` 软件渲染（M0 先验） |
+| QEMU 无 GPU，Electron 起不来 | `WLR_RENDERER=pixman` + Chromium 自带的 SwiftShader 软渲染（M2 先验） |
+| Electron 以 root 身份起不来 | Chromium 沙箱在 root 下拒绝启动 → 启动器固定加 `--no-sandbox`（整个 Live 就是可信 kiosk 场景，风险写入 D14 条目） |
+| Electron 在 cage 里不走 Wayland | 启动器固定 `--ozone-platform=wayland`；XWayland **不在** Live 清单里，不许依赖它兜底 |
 | 中文 SSID / 密码 | `nmcli` 走 UTF-8；界面 CJK 字体已在 Live 清单里 |
-| 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次 |
+| 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次　✅ 2026-10-04 QEMU 实测（[tech/04 §7.1](tech/04-安装逻辑与实测.md)） |
 
 ---
 

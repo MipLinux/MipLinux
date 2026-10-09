@@ -133,18 +133,7 @@ zsh
 noto-fonts
 noto-fonts-cjk
 noto-fonts-emoji
-ttf-maplemono-nf-cn-unhinted
-ttf-maplemono-nf-unhinted
-ttf-maplemono
 # <== 中文支持 · 字体 <==
-
-# ==> 中文支持 · 输入法 ==>
-fcitx5
-fcitx5-configtool
-fcitx5-chinese-addons
-fcitx5-gtk
-fcitx5-qt
-# <== 中文支持 · 输入法 <==
 
 # ==> 中文支持 · 本地化 ==>
 man-pages-zh_cn
@@ -157,9 +146,7 @@ networkmanager
 # ==> 安装器 ==>
 cage
 wlr-randr
-qt6-wayland
-qt6-svg
-pyside6
+electron44
 python-pyparted
 # <== 安装器 <==
 

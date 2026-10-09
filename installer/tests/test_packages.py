@@ -15,7 +15,7 @@ from pathlib import Path
 
 from mipl_installer import packages
 from mipl_installer.util import EXIT_USAGE, InstallerError
-from tests.support import FakeRunner
+from tests.support import FakeRunner, RecordingReporter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -86,6 +86,74 @@ class TestInstallOrder(unittest.TestCase):
         self.assertEqual(command, f"pacstrap -C /etc/pacman.conf -G -M {tmp} base linux")
         # -K 会把 keyring 重置成空的，后面 pacman -S 就装不动了
         self.assertNotIn(" -K", command)
+
+
+class TestPackageCounter(unittest.TestCase):
+    """pacman 的 `(14/345)` → 阶段内的细进度（2026-10-06 进度重做的那一半）。
+
+    两条要点：
+
+    * **分母取自 pacman 自己** —— 不另问仓库，也就不会出现「按清单算 21、
+      它连依赖装了 345」那种对不上的分母；
+    * 解析**只认数字与括号**，所以 LANG 把「installing」翻成「正在安装」也不影响它。
+    """
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.counter = packages.PackageCounter(self.reporter)
+
+    def feed(self, *lines: str) -> list[tuple[int, int]]:
+        for line in lines:
+            self.counter.feed(line)
+        return [(event.step, event.total) for event in self.reporter.events]
+
+    def test_reads_step_and_total(self):
+        self.assertEqual(self.feed("(3/345) installing foo"), [(3, 345)])
+
+    def test_translated_output_is_still_read_correctly(self):
+        self.assertEqual(self.feed("(3/345) 正在安装 foo"), [(3, 345)])
+
+    def test_the_same_package_reported_twice_is_deduped(self):
+        # 同一个包会打好几行（查密钥、装包）；全发出去等于让界面白重画几次
+        self.assertEqual(self.feed("(3/345) checking keys", "(3/345) installing foo"), [(3, 345)])
+
+    def test_lines_without_a_counter_are_left_alone(self):
+        """认不出来就放过 —— 这条解析只影响「有没有细进度」，绝不影响装包。"""
+        self.assertEqual(self.feed(":: 正在获取软件包...", "foo-1.0-1 下载中", ""), [])
+
+    def test_event_shape_matches_the_contract(self):
+        self.counter.feed("(1/7) installing a")
+        event = self.reporter.events[0]
+        self.assertEqual(event.phase, "packages")
+        self.assertEqual(event.step_id, "install")
+        self.assertEqual((event.step, event.total), (1, 7))
+        self.assertIsNone(event.percent, "细进度不带全局百分比")
+
+    def test_install_wires_the_counter_to_pacstrap_output(self):
+        """整条路：`install()` → `pacstrap` → 行回调 → 事件（替身把输出逐行喂回来）。"""
+        reporter = RecordingReporter()
+        runner = FakeRunner(reporter=reporter, outputs={
+            "pacstrap": "(1/3) installing a\n(2/3) installing b\n(3/3) installing c\n",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "pkgs"
+            manifest.write_text("base\n", encoding="utf-8")
+            packages.install(runner, tmp, str(manifest), "/etc/pacman.conf")
+        install_events = [e for e in reporter.events if e.step_id == "install"]
+        # 先声明「开始下载并安装」（这一步数不出总数），再按 pacman 的报数逐条更新
+        self.assertIsNone(install_events[0].step)
+        self.assertEqual([(e.step, e.total) for e in install_events[1:]], [(1, 3), (2, 3), (3, 3)])
+
+    def test_pacstrap_only_takes_a_hook_when_a_counter_is_given(self):
+        plain = FakeRunner()
+        packages.pacstrap(plain, "/mnt", ["base"], "/etc/pacman.conf")
+        self.assertEqual(plain.line_hooks, [None])
+
+        wired = FakeRunner()
+        packages.pacstrap(wired, "/mnt", ["base"], "/etc/pacman.conf",
+                          counter=packages.PackageCounter(RecordingReporter()))
+        self.assertEqual(len(wired.line_hooks), 1)
+        self.assertTrue(callable(wired.line_hooks[0]))
 
 
 if __name__ == "__main__":

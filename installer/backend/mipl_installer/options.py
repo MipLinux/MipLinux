@@ -37,6 +37,10 @@ LOCALE_SUPPORTED = "/usr/share/i18n/SUPPORTED"
 #: 前端改成调用（「唯一来源」在验证逻辑上的翻版，见 frontend/README.md）。
 HOSTNAME_RE = re.compile(r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
 
+#: 语言名的规范形态：`xx_YY.UTF-8`（`SUPPORTED` 里带字符集的那些）。
+#: 用它只在**名单读不到**时兜底 —— 见 `validate_locale()` 的说明。
+LOCALE_RE = re.compile(r"[a-z]{2,3}_[A-Z]{2}\.UTF-8")
+
 MAX_HOSTNAME = 63
 
 
@@ -154,6 +158,7 @@ def validate_timezone(tz: str, root: str = ZONEINFO) -> None:
             f"时区不存在：{tz}",
             EXIT_CONFIGURE,
             hint="用 IANA 名字，例如 Asia/Shanghai；可选名单见安装器的时区页",
+            reason="notFound",
         )
 
 
@@ -172,6 +177,7 @@ def validate_keymap(keymap: str, root: str = KEYMAP_ROOT) -> None:
             f"键盘映射不存在：{keymap}",
             EXIT_CONFIGURE,
             hint="用 localectl 的写法，例如 us、be-latin1；可选名单见安装器的键盘页",
+            reason="notInList",
         )
 
 
@@ -183,4 +189,38 @@ def validate_hostname(hostname: str) -> None:
             f"主机名不合法：{hostname!r}",
             EXIT_CONFIGURE,
             hint=f"字母或数字开头、字母或数字结尾，中间可以有连字符，最长 {MAX_HOSTNAME} 字符",
+            reason="format",
+        )
+
+
+def validate_locale(locale: str, path: str = LOCALE_SUPPORTED) -> None:
+    """语言必须是这台机器**生成得出来**的一个（Issue #63）。
+
+    要拦的是什么：界面上列了一份名单、用户挑了其中一项，而目标系统 `locale.gen`
+    里根本没有这一行 —— 装出来的系统每个程序都报 `setlocale` 警告。
+    `configure.py` 落盘前还会对着目标的 `locale.gen` 再查一遍（最后一道），
+    但那已经是**盘擦干净之后**了；所以这一关提前到 `preflight()`。
+
+    **名单读得到就按名单，读不到才退到形状检查。** 与 `validate_keymap()` 同形：
+    名单为空时不装作能判断，只是把「一眼就不像」的名字挡掉。
+    这里没有采用「在名单里**或**形如 `xx_YY.UTF-8` 就放行」的读法 —— 那样一个
+    拼错的名字（`ja_XX.UTF-8`）会通过 preflight，然后在 chroot 里以
+    `EXIT_CONFIGURE` 失败，而那正是这条校验要提前的失败。
+    """
+    available = locales(path)
+    if locale in available:
+        return
+    if available:
+        raise InstallerError(
+            f"语言不在名单里：{locale}",
+            EXIT_CONFIGURE,
+            hint="用 /usr/share/i18n/SUPPORTED 里的写法，例如 zh_CN.UTF-8；可选名单见安装器的语言页",
+            reason="notInList",
+        )
+    if not LOCALE_RE.fullmatch(locale):
+        raise InstallerError(
+            f"语言名不合法：{locale!r}",
+            EXIT_CONFIGURE,
+            hint="形如 xx_YY.UTF-8，例如 ja_JP.UTF-8；这台机器列不出名单，只能按写法判断",
+            reason="format",
         )

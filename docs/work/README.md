@@ -46,8 +46,11 @@ docs/work/
     ├── 03-术语表.md
     ├── 04-安装逻辑与实测.md
     ├── 05-装后系统验证.md
-    ├── 06-镜像源与联网.md     镜像源与联网：网络变更后测速换源（Issue #18 的 Live 侧）
-    └── 08-界面设计方向.md   安装器 MD3 设计方向；阶段 0 的接口准据在 `installer/frontend/qml/README.md`
+    ├── 06-镜像源与联网.md
+    ├── 08-界面设计方向.md   安装器 MD3 设计方向（2026-10-04 起为历史参考）
+    ├── 09-安装器界面文案.md 104 条界面文案 + 34 条时区名的审核记录（唯一源）
+    ├── 10-安装器界面视觉方向.md  当前 UI 准据；接口冻结在 `installer/frontend/app/README.md`
+    └── 11-安装器前端实测.md  Electron 前端的实测记录与未实测清单
 ```
 
 脚本在仓库根目录的 `scripts/`，不在 `docs/` 下；清单见[根 README 的脚本表](../../README.md)。
@@ -61,10 +64,11 @@ docs/work/
 [task.yml](../../.github/ISSUE_TEMPLATE/task.yml) 填 —— 两边字段逐字相同，守卫会比对，改一边必须改另一边。
 这一节是判据：模板与表单里没写清楚的地方以这里为准。
 
-### 受理人写角色，不写人名
+### 受理人用 GitHub 的 Assignees 控件选择
 
-项目里人会用角色称呼（见 [docs/AGENTS.md](../AGENTS.md)）：人名会变，角色不变。
-角色到人的对应**只在本表维护**，每日文档不许再抄一遍：
+创建工作 issue 时，在 GitHub issue 页面使用原生 **Assignees** 控件选择受理人；成员选项由 GitHub 当前仓库权限动态提供，模板不维护静态账号清单。`gh` 或 REST 创建 issue 时，也要单独设置 assignee 元数据。
+
+项目协作仍按角色描述（见 [docs/AGENTS.md](../AGENTS.md)），角色到人的对应**只在本表维护**，每日文档不许再抄一遍：
 
 | 角色 | 是谁 | 宿主机 | 能碰的范围 |
 |---|---|---|---|
@@ -73,8 +77,7 @@ docs/work/
 | 协作者 B | [@yks0630](https://github.com/yks0630) | Arch Linux | 同上 |
 
 人够三条线并行，所以同一轮**通常同时开三个 issue**（每个都要写明文件路径，见下）。
-角色名是稳定的外壳，handle 只在这张表里出现 —— 账号改名只改一处。
-**GitHub 上的 assignee 是 handle**：issue 正文写角色，assignee 用人名；两者对不上时以正文为准，并当场问维护者。
+角色名用于讨论权限和分工；实际 issue 受理人以 GitHub 保存的 assignee 元数据为准，正文不重复记录受理人。
 
 ### 编号：用 issue 号
 
@@ -96,7 +99,12 @@ docs/work/
 
 ### 怎么发布
 
-草案存 `out/issue-drafts/<主题>.md`（`out/` 已 gitignore，草案不是仓库资产），填好之后三条路：
+草案默认存 `out/issue-drafts/<主题>.md`（`out/` 已 gitignore，草案不是仓库资产），填好之后三条路：
+
+**`out/` 不可写时不必用 root 写普通文本。** `mipl.sh` 以 root 跑过后 `out/` 可能归 root、普通用户写不进去
+（属主处理由 Issue #93 单独决定，本规范不改它）—— 把草案存进任何可写的目录（如 `/tmp/mipl-drafts/<主题>.md`），
+校验改用 `MIPL_WORK_DRAFTS=<目录> ./scripts/check-work-issue.sh`（查整个目录）或
+`./scripts/check-work-issue.sh <草案路径>`（只查一份），两者都不需要 root；发布命令的 `--body-file` 指向草案实际路径。
 
 | 路 | 谁来做 | 怎么做 |
 |---|---|---|
@@ -105,34 +113,37 @@ docs/work/
 | REST + token | 有 token 的机器 | `POST /repos/MipLinux/MipLinux/issues`，正文经 `jq -Rs` 塞进 JSON 的 `body` |
 
 **红线：** issue 会以**维护者账号公开发布**，发布前必须给人过目；AI 只产草案，不自己建 issue、
-不自己建 label、不自己开 PR。表单里的「受理人」只是候选，**维护者确认后才生效**。
+不自己建 label、不自己开 PR。发布者在创建页面用 Assignees 控件确认受理人；草案正文不包含 assignee。
 
 标签用 `task`（**已于 2026-10-01 建好**）。表单里写了 `labels: ["task"]`，但**标签不存在时 GitHub 是静默忽略**
 （不报错）—— 换仓库或换标签时要先建，否则新 issue 身上不会带标签。
 
 ### 守卫查到哪、查不到哪
 
-`./scripts/check-work-issue.sh`（不需要 root、只读）校验 `out/issue-drafts/*.md`：字段齐备且顺序正确、
-受理人是三个角色之一、验收段含命令与期望、实现段写出文件路径、没把 YAML frontmatter 或 HTML 注释
+`./scripts/check-work-issue.sh`（不需要 root、只读）校验草案（默认 `out/issue-drafts/*.md`；`out/` 不可写时
+用 `MIPL_WORK_DRAFTS=<目录>` 换目录，或直接给草案路径，见[「怎么发布」](#怎么发布)）：字段齐备且顺序正确、
+验收段含命令与期望、实现段写出文件路径、没把 YAML frontmatter 或 HTML 注释
 抄进 issue 正文、≤60 行；外加**骨架与表单的字段是否漂移**（`TEMPLATE.md` ↔ `task.yml`）。
+assignee 是 GitHub issue 元数据，不属于正文草案，因此本地守卫不校验受理人。
 
 **它查不到发出去之后的 issue** —— 仓库没有 CI，issue 正文是 GitHub 上的数据，本地没有副本。
 所以「字段齐、有验收」这件事只在草案阶段拦得住，发布之后靠人看。
 
-守卫自己也有回归测试：`./scripts/check-work-issue.test.sh` 用临时夹具塞进字段缺失、受理人写人名、
+守卫自己也有回归测试：`./scripts/check-work-issue.test.sh` 用临时夹具塞进字段缺失、正文混入过时的受理人小节、
 验收没命令、超行数、骨架/表单漂移等九种情形，验证抓得住也不误报（夹具不碰真实仓库）。
 
 ### 表单里每个字段的来历
 
 | 字段 | 为什么有 |
 |---|---|
-| 受理人 | 所有权按文件切，受理人必须明确到角色（handle 只在上面那张表里维护） |
 | 目标 | 一句话说清「什么从不能变成能」，避免把做法当成目标 |
 | 实现 | **逐个写文件路径** —— 两条工作撞在同一批文件上就没法并行，写出来才拦得住 |
 | 验收 | 命令 + 期望结果；「跑起来了」不是判据（见上） |
 | 回报 | 完成时要交的证据：命令输出、文件路径、实测截图 |
 | 依赖 | 被哪个 issue / P 编号 / 里程碑卡住；不写「无」会让人以为漏了一行 |
 | 开工前请执行 | 把 `git switch main && git pull` 与分支命名钉成命令，避免「在别人分支上顺手加东西」 |
+
+受理人通过 GitHub 的 Assignees 控件单独设置，不是 issue 正文表单字段，也不进入本地草案。
 
 ---
 

@@ -1,0 +1,600 @@
+/* ============================================================================
+ * pages.css —— 页面级编排（欢迎页主视觉 / 磁盘卡 / 危险区 / 进度 / 完成）
+ * ========================================================================= */
+
+/* ---------------------------------------------------------------- 欢迎 */
+
+/* 一屏一件事：文案列 + 主视觉列，整块在内容区垂直居中 */
+#page-welcome {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.welcome {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--space-6) * var(--ui-scale));
+  align-items: center;
+}
+
+@media (min-width: 1000px) {
+  .welcome {
+    /* 文案列比主视觉列宽一点：大标题需要横向余量，窄了就会在中途断行 */
+    grid-template-columns: minmax(0, 1.14fr) minmax(0, 0.86fr);
+    gap: calc(var(--space-7) * var(--ui-scale));
+  }
+}
+
+.welcome__copy {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space-4) * var(--ui-scale));
+}
+
+/* 欢迎页的正文降一档：它是英雄区副文案，跟页面描述同号会显得压过大标题 */
+.welcome__copy .page-desc {
+  font-size: calc(var(--t-body) * var(--ui-scale));
+}
+
+/* 高级安装开关：一条细边行，不套整块面板（实机反馈：欢迎页组件「胖」） */
+.welcome__toggle {
+  margin-top: calc(var(--space-2) * var(--ui-scale));
+  max-width: calc(420px * var(--ui-scale));
+  padding: calc(var(--space-1) * var(--ui-scale)) calc(var(--space-2) * var(--ui-scale));
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-field);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow-1);
+}
+
+.welcome__art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  isolation: isolate;
+}
+
+/* 主视觉的三层：柔光 → 细环 → logo（logo 略微前倾，像被托住） */
+.welcome__glow {
+  position: absolute;
+  width: min(560px, 96%);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 46% 44%,
+    color-mix(in srgb, var(--aurora-1) 34%, transparent),
+    color-mix(in srgb, var(--aurora-2) 18%, transparent) 46%,
+    transparent 70%
+  );
+  filter: blur(26px);
+  z-index: -1;
+}
+
+.welcome__logo {
+  width: min(370px, 72%);
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 34px 70px color-mix(in srgb, var(--aurora-1) 32%, transparent));
+  will-change: transform;
+}
+
+.welcome__ring {
+  position: absolute;
+  width: min(462px, 86%);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px solid var(--accent-line);
+  opacity: 0.45;
+  z-index: -1;
+}
+
+/* ---------------------------------------------------------------- 目标盘 */
+
+.disk-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: calc(var(--space-4) * var(--ui-scale));
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-field);
+  background: var(--surface-2);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease-in),
+    background-color var(--dur-fast) var(--ease-in),
+    transform var(--dur-fast) var(--ease-in);
+}
+
+.disk-card:hover {
+  border-color: var(--hairline-strong);
+}
+
+.disk-card[aria-selected='true'] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.disk-card__size {
+  font-size: calc(var(--t-h2) * var(--ui-scale));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.disk-card__bar {
+  display: flex;
+  gap: 3px;
+  height: calc(6px * var(--ui-scale));
+  margin-top: calc(8px * var(--ui-scale));
+  max-width: calc(240px * var(--ui-scale));
+}
+
+.disk-card__seg {
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  min-width: 8px;
+}
+
+.disk-card__seg--esp {
+  background: var(--accent-line);
+}
+
+/* ---------------------------------------------------------------- 危险区 */
+
+.danger-zone {
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  background: var(--danger-soft);
+  border-radius: var(--r-field);
+  padding: calc(var(--space-4) * var(--ui-scale));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.danger-zone__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--danger);
+  font-size: calc(var(--t-h3) * var(--ui-scale));
+  font-weight: 600;
+}
+
+.danger-zone__title svg {
+  width: var(--icon-md);
+  height: var(--icon-md);
+  fill: currentColor;
+}
+
+/* ---------------------------------------------------------------- 进度 */
+
+.progress-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--space-5) * var(--ui-scale));
+  /* **顶部对齐，不是居中**：环在左列、阶段与子步骤在右列，右列每长出一行
+   * （子步骤展开、日志行变多），居中就得把环重新摆一次 —— 表现是「子进度一出现，
+   * 圆圈就往下跳」（2026-10-06 实机反馈）。顶部对齐之后环的位置只由它自己的
+   * 尺寸决定，右列怎么长都不动它。 */
+  align-items: start;
+}
+
+@media (min-width: 1000px) {
+  .progress-layout {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: calc(var(--space-6) * var(--ui-scale));
+  }
+}
+
+.phase-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.phase {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px var(--space-3);
+  border-radius: var(--r-field);
+  color: var(--text-faint);
+  font-size: calc(var(--t-label) * var(--ui-scale));
+  transition: color var(--dur-base) var(--ease-in), background-color var(--dur-base) var(--ease-in);
+}
+
+.phase[data-state='active'] {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.phase[data-state='done'] {
+  color: var(--text-muted);
+}
+
+.phase__mark {
+  width: var(--icon-md);
+  height: var(--icon-md);
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+}
+
+.phase[data-state='done'] .phase__mark {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.phase[data-state='active'] .phase__mark {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.phase__mark svg {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+  fill: currentColor;
+}
+
+/* 子步骤（进度页）：比阶段矮一档、缩进一格 —— 它属于上面那个阶段 */
+.phase-list--sub {
+  margin: 2px 0 calc(var(--space-2) * var(--ui-scale)) calc(var(--space-5) * var(--ui-scale));
+  gap: 0;
+}
+
+.phase-list--sub .phase {
+  padding: 6px var(--space-3);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+}
+
+/* 文本占满中间：尾巴（计数）因此靠右对齐，与阶段名分开 */
+.phase__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.phase__tail {
+  flex: none;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 阶段内细进度那一行：条占满、计数靠右。
+ * `.meter` 自己没有宽度（它原来住在 `.stack` 里靠 stretch 撑开），
+ * 放进 `.row` 之后必须显式 flex —— 否则它缩成 0 宽，屏幕上什么都没有。 */
+.progress-meter .meter {
+  flex: 1;
+  min-width: 0;
+}
+
+.progress-meter .caption {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 失败那一块：什么坏了 / 怎么办 / 能点什么 / 技术细节。
+ *
+ * 为什么不复用 `.callout`：那里只放得下一句话（网络页的「密码不正确」正合适），
+ * 而一次装失败的现场要说四件事，还得塞得下一个补救按钮
+ * （2026-10-06 实机反馈：错误提示有点丑，且「/mnt 被占用」那时只能切 tty 手敲 umount）。 */
+.failure {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space-4) * var(--ui-scale));
+  padding: calc(var(--space-5) * var(--ui-scale));
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  /* **底色要实心**：`--danger-soft` 是半透明的（0.08/0.14），而这一块是直接摆在
+   * 页面上的（不在面板里），用它会透出背后的极光渐变 —— 一张失败卡片上一片灰底，
+   * 这正是「有点丑」的来源之一。这里把红调**混进**实心底色里，出来的仍然是实心。 */
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface-solid));
+  border-radius: var(--r-shell);
+}
+
+.failure__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.failure__head svg {
+  flex: none;
+  width: var(--icon-lg);
+  height: var(--icon-lg);
+  fill: var(--danger);
+  margin-top: 2px;
+}
+
+.failure__body {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space-2) * var(--ui-scale));
+  min-width: 0;
+}
+
+.failure__title {
+  font-size: calc(var(--t-h3) * var(--ui-scale));
+  font-weight: 600;
+  color: var(--text);
+}
+
+.failure__hint {
+  font-size: calc(var(--t-label) * var(--ui-scale));
+  color: var(--text-muted);
+}
+
+.failure__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.failure__done {
+  color: var(--success);
+  font-size: calc(var(--t-label) * var(--ui-scale));
+}
+
+.log {
+  font-family: var(--font-mono);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  line-height: 1.7;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-field);
+  padding: var(--space-4);
+  max-height: 190px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log__line--ok {
+  color: var(--success);
+}
+
+.log__line--warn {
+  color: var(--warning);
+}
+
+/* ---------------------------------------------------------------- 完成 */
+
+/* 完成页：一屏放得下、整体居中 —— 它不该滚动（2026-10-04 实机反馈） */
+#page-finish {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.finish {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: calc(var(--space-4) * var(--ui-scale));
+  padding: 0;
+}
+
+.finish__art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
+  margin-top: calc(var(--space-2) * var(--ui-scale));
+}
+
+.finish__logo {
+  width: min(210px, 46%);
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 18px 34px color-mix(in srgb, var(--aurora-1) 26%, transparent));
+  will-change: transform;
+}
+
+.finish__art .welcome__glow {
+  width: min(320px, 92%);
+}
+
+.finish__check {
+  display: grid;
+  place-items: center;
+  width: calc(64px * var(--ui-scale));
+  height: calc(64px * var(--ui-scale));
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+.finish__check svg {
+  width: var(--icon-xl);
+  height: var(--icon-xl);
+  fill: currentColor;
+}
+
+/* ---------------------------------------------------------------- 杂项 */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: calc(var(--space-6) * var(--ui-scale));
+  text-align: center;
+  color: var(--text-faint);
+  border: 1px dashed var(--hairline-strong);
+  border-radius: var(--r-field);
+}
+
+.empty svg {
+  width: var(--icon-lg);
+  height: var(--icon-lg);
+  fill: currentColor;
+}
+
+/* 选中 Wi-Fi 后的展开区：跟列表项同宽内收一点，按钮不要横贯整行 */
+.wifi-editor {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space-3) * var(--ui-scale));
+  max-width: 380px;
+  padding: 0 4px calc(var(--space-3) * var(--ui-scale));
+}
+
+.wifi-editor .btn {
+  align-self: flex-start;
+}
+
+.net-item__signal {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+}
+
+.net-item__signal i {
+  width: 3px;
+  border-radius: 2px;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+.net-item__signal i:nth-child(1) {
+  height: 5px;
+}
+
+.net-item__signal i:nth-child(2) {
+  height: 9px;
+}
+
+.net-item__signal i:nth-child(3) {
+  height: 13px;
+}
+
+.net-item__signal i:nth-child(4) {
+  height: 16px;
+}
+
+.net-item__signal[data-level='1'] i:nth-child(-n + 1),
+.net-item__signal[data-level='2'] i:nth-child(-n + 2),
+.net-item__signal[data-level='3'] i:nth-child(-n + 3),
+.net-item__signal[data-level='4'] i:nth-child(-n + 4) {
+  opacity: 1;
+}
+
+.pw-meter {
+  display: flex;
+  gap: 4px;
+  margin-top: var(--space-2);
+  width: 132px;
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-in);
+}
+
+.pw-meter[data-level='1'],
+.pw-meter[data-level='2'],
+.pw-meter[data-level='3'] {
+  opacity: 1;
+}
+
+.pw-meter i {
+  flex: 1;
+  height: calc(4px * var(--ui-scale));
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  transition: background-color var(--dur-base) var(--ease-in);
+}
+
+.pw-meter[data-level='1'] i:nth-child(1) {
+  background: var(--danger);
+}
+
+.pw-meter[data-level='2'] i:nth-child(-n + 2) {
+  background: var(--warning);
+}
+
+.pw-meter[data-level='3'] i {
+  background: var(--success);
+}
+
+/* 键位预览：主键区示意图（Issue #65 用它替掉了原来的试打框）。
+ *
+ * **纯 DOM + CSS 画的，不引图片资源**：252 份映射各配一张位图既不可能维护，
+ * 而画一张「通用键盘图」又和所选映射无关 —— 那正是「界面在描述它没做的事」。
+ * 每个键帽上的字都来自 --print-keymap 解析出的那份映射。
+ *
+ * 键帽宽度用 `--key-w`（flex 份数，keymap-rows.js 给）：1 = 普通键，
+ * 空格 6、Shift 2.2、Backspace 1.8 —— 不按比例画的话，整排会看起来像错位。 */
+.keyblock-wrap {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-radius: var(--r-field);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  overflow: hidden;
+}
+
+.keyblock {
+  display: grid;
+  gap: calc(var(--space-1) * var(--ui-scale));
+}
+
+.keyblock__row {
+  display: flex;
+  gap: calc(var(--space-1) * var(--ui-scale));
+}
+
+.keycap {
+  flex: var(--key-w, 1) 1 0;
+  min-width: 0;
+  height: var(--control-lg);
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  padding: 0 calc(var(--space-1) * var(--ui-scale));
+  border-radius: var(--r-field);
+  background: var(--surface-3);
+  border: 1px solid var(--hairline);
+  color: var(--text);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  line-height: var(--lh-tight);
+}
+
+.keycap__label,
+.keycap__shift {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Shift 层画在左上角（键帽的通行画法），默认层居中 —— 两层的**位置**本身
+ * 就说明了哪个是哪个，不必再加一行说明文字。 */
+.keycap__shift {
+  justify-self: start;
+  color: var(--text-faint);
+  font-size: calc(var(--t-caption) * var(--ui-scale) * 0.85);
+}
+
+.tz-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.tz-row__offset {
+  font-family: var(--font-mono);
+  font-size: calc(var(--t-caption) * var(--ui-scale));
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}

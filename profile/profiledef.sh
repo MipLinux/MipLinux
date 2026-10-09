@@ -22,6 +22,7 @@ bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--lon
 # 安装器入口踩过这个坑（Issue #51）：仓库里是 755、装配副本也是 755，
 # 只有 ISO 里是 644。新增可执行文件时，这里必须同步加一行。
 file_permissions=(
+  ["/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch"]="0:0:755"
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
   ["/root/.automated_script.sh"]="0:0:755"
@@ -29,6 +30,7 @@ file_permissions=(
   ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/usr/local/bin/Installation_guide"]="0:0:755"
   ["/usr/local/bin/livecd-sound"]="0:0:755"
+  ["/usr/local/bin/mipl-mirror-switch"]="0:0:755"
   ["/usr/local/lib/mipl-installer/frontend/mipl-installer"]="0:0:755"
   ["/usr/local/lib/mipl-installer/frontend/mipl-kiosk"]="0:0:755"
 )

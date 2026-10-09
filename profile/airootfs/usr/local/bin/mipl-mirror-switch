@@ -26,6 +26,8 @@ HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类�
     mipl-mirror-switch --force            # 忽略 Live 判断、连通性与最小间隔（调试用）
 
 退出码：0 = 换成功、或有意跳过（非 Live / 网络没通 / 刚换过 / 已有一次在跑）；1 = 出错了。
+某半边失败时退出码仍是 0（NM 的 dispatcher 没人在看），但日志写明、且**不写 stamp** ——
+stamp 记的是「上次成功换源」，只在成功时才写，失败的下一次触发可以立刻重试。
 日志同时写 stdout 与 <run-dir>/mipl-mirror-switch.log（NM dispatcher 的 stdout 不好捞，
 落一份文件，QEMU 里直接 `cat` 就有证据）。
 """
@@ -69,7 +71,8 @@ REFLECTOR_TIMEOUT = 150  # 秒。超时就算这半失败，保留原文件
 PROBE_BYTES = 64 * 1024  # 每个 archlinuxcn 镜像最多下这么多字节来量速率
 PROBE_TIMEOUT = 5.0  # 单个镜像的上限（秒）
 PROBE_BUDGET = 45.0  # 探完全部镜像的总预算（秒）；超了剩下的按原顺序留在后面
-DEFAULT_MIN_INTERVAL = 60  # 秒。刚换过就不再换，免得网络抖动时反复重排
+DEFAULT_MIN_INTERVAL = 60  # 秒。**成功**换过就不再换，免得网络抖动时反复重排；
+# 失败不写 stamp（见 main），下一次触发就能立刻再试
 
 ARCH = platform.machine() or "x86_64"
 
@@ -171,12 +174,16 @@ def format_archlinuxcn_mirrorlist(measured: list[tuple[float, str]]) -> str:
     return "\n".join(header + body)
 
 
-def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool:
-    """探速并重排 archlinuxcn 的 mirrorlist。返回是否真的改了顺序。"""
+def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool | None:
+    """探速并重排 archlinuxcn 的 mirrorlist。
+
+    返回 True = 顺序真的变了、False = 顺序没变（现有第一个就是最快的）、
+    None = 这半没干成（文件不在 / 里面没有 Server 行）—— 见 main 里对 stamp 的处理。
+    """
     servers = read_server_lines(cn_path)
     if not servers:
-        log(f"{cn_path} 里没有 Server 行，archlinuxcn 这半跳过")
-        return False
+        log(f"{cn_path} 里没有 Server 行，archlinuxcn 这半失败（保留原文件）")
+        return None
 
     log(f"开始探 {len(servers)} 个 archlinuxcn 镜像（每个最多 {PROBE_BYTES // 1024} KiB）")
     deadline = time.monotonic() + PROBE_BUDGET
@@ -204,8 +211,12 @@ def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool:
     return True
 
 
-def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Logger) -> bool:
-    """用 reflector 重写官方 mirrorlist。任何一步不满意就保留原文件。"""
+def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Logger) -> bool | None:
+    """用 reflector 重写官方 mirrorlist。任何一步不满意就保留原文件。
+
+    返回 True = 换了、False = 没变（现在就是最快的那批）、None = 这半失败了
+    （reflector 不在 / 超时 / 退出码非 0 / 输出不可信）—— 见 main 里对 stamp 的处理。
+    """
     target = work_dir / "mirrorlist.new"
     cmd = [
         REFLECTOR,
@@ -232,32 +243,40 @@ def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Log
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=REFLECTOR_TIMEOUT, env=env)
     except FileNotFoundError:
-        log(f"{REFLECTOR} 不存在，官方那半跳过（保留原 mirrorlist）")
-        return False
+        log(f"{REFLECTOR} 不存在，官方这半失败（保留原 mirrorlist）")
+        return None
     except subprocess.TimeoutExpired:
-        log(f"reflector 超过 {REFLECTOR_TIMEOUT}s 没回来，官方那半跳过")
-        return False
+        log(f"reflector 超过 {REFLECTOR_TIMEOUT}s 没回来，官方这半失败（保留原 mirrorlist）")
+        return None
     if proc.returncode != 0:
-        log(f"reflector 退出码 {proc.returncode}，官方那半跳过；stderr：{proc.stderr.strip()[:400]}")
-        return False
+        log(f"reflector 退出码 {proc.returncode}，官方这半失败（保留原 mirrorlist）；"
+            f"stderr：{proc.stderr.strip()[:400]}")
+        return None
 
     servers = read_server_lines(target)
     if not servers:
         log("reflector 写出来的文件里没有 Server 行，拒绝替换（保留原 mirrorlist）")
-        return False
+        return None
     if not target.read_text(encoding="utf-8").strip():
         log("reflector 写出来的文件是空的，拒绝替换（保留原 mirrorlist）")
-        return False
+        return None
 
+    new_text = target.read_text(encoding="utf-8")
     old = read_server_lines(official_path)
     changed = old != servers
     if dry_run:
         log(f"官方：[dry-run] 会换成 {len(servers)} 个，第一个是 {servers[0]}"
             + ("" if changed else "（与现在相同）"))
-    else:
-        log(f"官方：{old[0] if old else '(空)'} → {servers[0]}（共 {len(servers)} 个）")
-    atomic_write(official_path, target.read_text(encoding="utf-8"), dry_run, log)
-    return changed and not dry_run
+        atomic_write(official_path, new_text, dry_run, log)
+        return False
+    if not changed:
+        # Server 列表一样 = 「现在这份就是最快的」，不落盘，省一次 mtime 变动。
+        # 比的是真正生效的 Server 行：reflector 的表头注释带生成时间，逐字节比必然不等。
+        log("官方：Server 列表与现在相同，不落盘")
+        return False
+    log(f"官方：{old[0] if old else '(空)'} → {servers[0]}（共 {len(servers)} 个）")
+    atomic_write(official_path, new_text, dry_run, log)
+    return True
 
 
 def nm_connectivity() -> str:
@@ -316,6 +335,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def state_text(changed: bool | None) -> str:
+    """日志里那半边的结果：True/False/None 各说各的，别把「失败」写成「没变」。"""
+    if changed is None:
+        return "失败"
+    return "变了" if changed else "没变"
+
+
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     run_dir = Path(args.run_dir)
@@ -357,13 +383,20 @@ def main(argv: list[str]) -> int:
             mirrorlist_dir / OFFICIAL_MIRRORLIST.name, work_dir, args.dry_run, log)
         cn_changed = switch_archlinuxcn(
             mirrorlist_dir / CN_MIRRORLIST.name, args.dry_run, log)
+        failed = [name for name, state in (("官方", official_changed), ("archlinuxcn", cn_changed))
+                  if state is None]
 
         if args.dry_run:
             log("dry-run 结束：没有写任何文件")
             return 0
+        if failed:
+            # stamp 是「上次**成功**换源的时间」。失败也写，就等于失败也得等满 min-interval
+            # 才准重试 —— 而网络刚起来的那几秒正是最该重试的时候。所以失败不写。
+            log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试")
+            return 0
         stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
-        log("换源结束（官方：" + ("变了" if official_changed else "没变")
-            + "；archlinuxcn：" + ("变了" if cn_changed else "没变") + "）")
+        log("换源结束（官方：" + state_text(official_changed)
+            + "；archlinuxcn：" + state_text(cn_changed) + "）")
         return 0
     except Exception as exc:  # dispatcher 里绝不能让异常留下半个文件
         log(f"换源失败：{exc.__class__.__name__}: {exc}")

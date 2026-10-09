@@ -72,7 +72,7 @@ PROBE_BYTES = 64 * 1024  # 每个 archlinuxcn 镜像最多下这么多字节来�
 PROBE_TIMEOUT = 5.0  # 单个镜像的上限（秒）
 PROBE_BUDGET = 45.0  # 探完全部镜像的总预算（秒）；超了剩下的按原顺序留在后面
 DEFAULT_MIN_INTERVAL = 60  # 秒。**成功**换过就不再换，免得网络抖动时反复重排；
-# 失败不写 stamp（见 main），下一次触发就能立刻再试
+# 失败不写 stamp（见 main()），下一次触发就能立刻再试
 
 ARCH = platform.machine() or "x86_64"
 
@@ -178,7 +178,7 @@ def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool | None
     """探速并重排 archlinuxcn 的 mirrorlist。
 
     返回 True = 顺序真的变了、False = 顺序没变（现有第一个就是最快的）、
-    None = 这半没干成（文件不在 / 里面没有 Server 行）—— 见 main 里对 stamp 的处理。
+    None = 这半没干成（文件不在 / 里面没有 Server 行）—— 见 main() 里对 stamp 的处理。
     """
     servers = read_server_lines(cn_path)
     if not servers:
@@ -215,7 +215,7 @@ def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Log
     """用 reflector 重写官方 mirrorlist。任何一步不满意就保留原文件。
 
     返回 True = 换了、False = 没变（现在就是最快的那批）、None = 这半失败了
-    （reflector 不在 / 超时 / 退出码非 0 / 输出不可信）—— 见 main 里对 stamp 的处理。
+    （reflector 不在 / 超时 / 退出码非 0 / 输出不可信）—— 见 main() 里对 stamp 的处理。
     """
     target = work_dir / "mirrorlist.new"
     cmd = [

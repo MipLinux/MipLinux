@@ -36,6 +36,11 @@
 #      和真正的原因隔了三层。所以状态判断一律落在「能不能用」上，
 #      并且 doctor / shell / build 三个入口用的是同一段判断（scripts/mipl-lib.sh）。
 #
+#   6. out/ 与产物归调用者，不归 root —— Issue #93。
+#      脚本全程以 root 运行，而 out/ 是发起命令的普通用户的工作区。创建 out/、
+#      容器产物落盘、命令收尾（EXIT 兜底扫描）都把属主还回去；每次归还只动
+#      本次涉及的 inode，不递归、不碰已有用户数据的权限。
+#
 # ─────────────────────────────────────────────────────────────────────
 # 用法：  sudo ./scripts/mipl.sh <命令> [参数]
 #         sudo ./scripts/mipl.sh --help
@@ -311,7 +316,14 @@ detect_ovmf() {
 }
 
 # ── 产物 ──────────────────────────────────────────────────────────────
-ensure_out_dir() { run mkdir -p "$OUT_DIR"; }
+# out/ 是调用者的工作区：目录本身（只此一个 inode，不递归）若是 root / nobody
+# 建的，还给调用者 —— 别的用户或调用者自己的属主都不动（Issue #93）。
+# 「没有父目录」的路径（如 MIPL_OUT_DIR=/ 这种指错）不是产物目录，不碰。
+ensure_out_dir() {
+  run mkdir -p "$OUT_DIR"
+  [[ "$(dirname -- "$OUT_DIR")" == "$OUT_DIR" ]] \
+    || mipl_restore_root_owned "$OUT_DIR"
+}
 
 # 最新 ISO 的路径；没有则返回 1
 latest_iso() {
@@ -596,12 +608,15 @@ ensure_vars() {
   local dst="$1" how="$2"
   if [[ "$how" == keep && -f "$dst" ]]; then
     note "变量文件：${dst}（保留 —— NVRAM 里的引导项还在，从盘启动靠的就是它）"
-    return 0
+  else
+    run cp -f "$OVMF_VARS" "$dst"
+    if [[ $DRY_RUN -eq 0 ]]; then
+      ok "变量文件：${dst}（新拷一份，NVRAM 是干净的）"
+    fi
   fi
-  run cp -f "$OVMF_VARS" "$dst"
-  if [[ $DRY_RUN -eq 0 ]]; then
-    ok "变量文件：${dst}（新拷一份，NVRAM 是干净的）"
-  fi
+  # 变量文件由 root 拷出来、之后交给 root 的 QEMU 写 —— 属主还给调用者。
+  # 保留的那份可能是旧 bug 留下的 root / nobody 属主，同样顺手归还（Issue #93）。
+  mipl_restore_owner "$dst"
   return 0
 }
 
@@ -844,6 +859,8 @@ cmd_target() {
 
   info "建目标盘：$(basename -- "$path")  虚拟大小 ${size}"
   run qemu-img create -f qcow2 -- "$path" "$size"
+  # 盘是 root 建的，属主还给调用者（Issue #93）。
+  mipl_restore_owner "$path"
 
   if [[ $DRY_RUN -eq 1 ]]; then
     return 0
@@ -897,6 +914,8 @@ cmd_target() {
       info "目标盘不存在，新建：$(basename -- "$path")  虚拟大小 ${size}"
       run qemu-img create -f qcow2 -- "$path" "$size"
       [[ $DRY_RUN -eq 1 || -f "$path" ]] || die "qemu-img 没有产出 ${path}，看上面的报错"
+      # 盘是 root 建的，属主还给调用者（Issue #93）。
+      mipl_restore_owner "$path"
     else
       note "目标盘已存在，直接复用：${path}（重造请走 ${MIPL_CMD} target --force）"
     fi
@@ -1086,6 +1105,14 @@ cmd_build() {
   [[ -n "${MIPL_PROFILE_RW:-}" ]] && env_args+=("MIPL_PROFILE_RW=${MIPL_PROFILE_RW}")
 
   run_root env "${env_args[@]}" "$script" "${passthrough[@]}"
+  # 容器里 mkarchiso -o /out 把 ISO 直接落到宿主机 OUT_DIR，属主是容器 root
+  # （宿主侧按用户命名空间映射，可能显示成 root 或 nobody）—— 两种都还给调用者。
+  # 只动顶层 *.iso：不递归、不碰 out/ 里其它条目（Issue #93）。
+  local -a built_isos=()
+  shopt -s nullglob
+  built_isos=("${OUT_DIR}"/*.iso)
+  shopt -u nullglob
+  [[ ${#built_isos[@]} -eq 0 ]] || mipl_restore_root_owned "${built_isos[@]}"
 }
 
 # ── 命令：iso ─────────────────────────────────────────────────────────
@@ -1398,6 +1425,12 @@ main() {
     fi
   done
   set -- ${args[@]+"${args[@]}"}
+
+  # 命令收尾兜底（Issue #93）：无论哪条子命令、无论成败（die 提前退出也在内），
+  # 退出前把 out/ 顶层 root / nobody 属主的产物还给调用者 —— 容器与 QEMU 落盘
+  # 的文件在这里收口。连 doctor / --help 也会走到收尾：顺手修掉已有的属主污染
+  # 正是 Issue #93 要的。只扫白名单名字、不递归（见共用库）。
+  trap mipl_restore_out_dir EXIT
 
   while [[ $# -gt 0 ]]; do
     case "$1" in

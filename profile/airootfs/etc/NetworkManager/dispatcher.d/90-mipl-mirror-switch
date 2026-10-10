@@ -23,7 +23,17 @@ case "$action" in
     *) exit 0 ;;
 esac
 
-setsid /usr/local/bin/mipl-mirror-switch --trigger "$action" --interface "$interface" \
-    >/dev/null 2>&1 </dev/null &
+# 输出进 journal（`journalctl -t mipl-mirror-switch -f` 能实时看）。
+# 脚本自己那份 <run-dir>/mipl-mirror-switch.log 照旧写 —— 两条路并存，不是替换。
+# systemd-cat 来自 systemd，Live 里本来就有，不引新依赖（评审建议的 `logger -t` 同理可用，
+# 但 `logger` 要额外开一个 syslog socket，多一处失败点，这里用 systemd-cat 更短）。
+# **没有 systemd-cat 就退回旧行为**（丢弃输出），不能因为日志通道缺了就漏掉换源本身。
+if [[ -x /usr/bin/systemd-cat ]]; then
+    setsid /usr/local/bin/mipl-mirror-switch --trigger "$action" --interface "$interface" 2>&1 \
+        | systemd-cat -t mipl-mirror-switch >/dev/null 2>&1 </dev/null &
+else
+    setsid /usr/local/bin/mipl-mirror-switch --trigger "$action" --interface "$interface" \
+        >/dev/null 2>&1 </dev/null &
+fi
 
 exit 0

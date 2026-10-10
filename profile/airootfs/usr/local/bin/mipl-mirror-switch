@@ -39,6 +39,7 @@ import fcntl
 import http.client
 import os
 import platform
+import shutil
 import socket
 import ssl
 import subprocess
@@ -82,9 +83,27 @@ class LockBusy(Exception):
 
 
 class Logger:
+    """一条消息写三处：stdout（前台跑时看）、文件（<run-dir> 下那份）、journal（评审建议）。
+
+    为什么要有 journal 这条：真机上排查时 `tail -f /run/...log` 只能看到文件，
+    看不到「开机自动跑的那一次」与 NM 的触发上下文 —— journal 带时间戳、能被
+    `journalctl -t mipl-mirror-switch -f` 实时跟随，两处互补。
+    journald 已经加时间戳，所以进 journal 的那份把前缀去掉，避免同一行两个时间。
+    写 journal 走 /dev/log（systemd-journald 的 syslog socket），**不引新依赖**；
+    没有它（例如本机非 systemd）就静默跳过，绝不让日志拖垮换源。
+    """
+
     def __init__(self, run_dir: Path, quiet: bool) -> None:
         self.quiet = quiet
         self.path = run_dir / "mipl-mirror-switch.log"
+        self._syslog: socket.socket | None = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.settimeout(1.0)
+            sock.connect("/dev/log")
+            self._syslog = sock
+        except OSError:
+            self._syslog = None
 
     def __call__(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} mipl-mirror-switch: {msg}"
@@ -95,6 +114,12 @@ class Logger:
                 fh.write(line + "\n")
         except OSError:
             pass  # 日志写不了不该让换源失败
+        if self._syslog is not None:
+            try:
+                # syslog 格式：<优先级>标签: 消息。13 = user.info
+                self._syslog.send(f"<13>mipl-mirror-switch: {msg}".encode("utf-8", "replace"))
+            except OSError:
+                self._syslog = None  # 只丢一次，之后不再试
 
 
 def read_server_lines(path: Path) -> list[str]:
@@ -378,26 +403,35 @@ def main(argv: list[str]) -> int:
         log(f"NetworkManager 连通性：{connectivity}")
 
         work_dir = Path(tempfile.mkdtemp(prefix="mirror-switch.", dir=str(run_dir)))
-        mirrorlist_dir = Path(args.mirrorlist_dir)
-        official_changed = switch_official(
-            mirrorlist_dir / OFFICIAL_MIRRORLIST.name, work_dir, args.dry_run, log)
-        cn_changed = switch_archlinuxcn(
-            mirrorlist_dir / CN_MIRRORLIST.name, args.dry_run, log)
-        failed = [name for name, state in (("官方", official_changed), ("archlinuxcn", cn_changed))
-                  if state is None]
+        try:
+            mirrorlist_dir = Path(args.mirrorlist_dir)
+            official_changed = switch_official(
+                mirrorlist_dir / OFFICIAL_MIRRORLIST.name, work_dir, args.dry_run, log)
+            cn_changed = switch_archlinuxcn(
+                mirrorlist_dir / CN_MIRRORLIST.name, args.dry_run, log)
+            failed = [name for name, state in (("官方", official_changed), ("archlinuxcn", cn_changed))
+                      if state is None]
 
-        if args.dry_run:
-            log("dry-run 结束：没有写任何文件")
+            if args.dry_run:
+                log("dry-run 结束：没有写任何文件")
+                return 0
+            if failed:
+                # stamp 是「上次**成功**换源的时间」。失败也写，就等于失败也得等满 min-interval
+                # 才准重试 —— 而网络刚起来的那几秒正是最该重试的时候。所以失败不写。
+                log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试")
+                return 0
+            stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
+            log("换源结束（官方：" + state_text(official_changed)
+                + "；archlinuxcn：" + state_text(cn_changed) + "）")
             return 0
-        if failed:
-            # stamp 是「上次**成功**换源的时间」。失败也写，就等于失败也得等满 min-interval
-            # 才准重试 —— 而网络刚起来的那几秒正是最该重试的时候。所以失败不写。
-            log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试")
-            return 0
-        stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
-        log("换源结束（官方：" + state_text(official_changed)
-            + "；archlinuxcn：" + state_text(cn_changed) + "）")
-        return 0
+        finally:
+            # 临时目录里是 reflector 的输出与缓存（几 MB）。它建在 run_dir（/run，tmpfs）下，
+            # 不删就一直占内存 —— 而 `--force` 手动跑会留下它（重启才没）。
+            # 清理失败不影响结果，所以吞掉异常；这个 finally 在 return 之前执行。
+            try:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            except OSError:
+                pass
     except Exception as exc:  # dispatcher 里绝不能让异常留下半个文件
         log(f"换源失败：{exc.__class__.__name__}: {exc}")
         return 1

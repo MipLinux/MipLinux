@@ -28,6 +28,16 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 
+// 显式开启才记分段耗时；窗口事件不等于显示器已经呈现首帧。
+const startupTraceEnabled = process.env.MIPL_STARTUP_TRACE === '1';
+const startupStart = process.hrtime.bigint();
+function traceStartup(stage) {
+  if (!startupTraceEnabled) return;
+  const elapsed = Number(process.hrtime.bigint() - startupStart) / 1e6;
+  console.log(`[mipl-startup] main ${stage} +${elapsed.toFixed(1)}ms uptime=${os.uptime().toFixed(3)}s`);
+}
+traceStartup('entry');
+
 // 协议根目录 = 应用目录：这样 `../../vendor/...` 这种相对路径在浏览器与 Node 里语义一致
 const ROOT_DIR = __dirname;
 const SCHEME = 'mipl';
@@ -387,6 +397,7 @@ function cancelInstall() {
 // ---------------------------------------------------------------- 窗口
 
 function createWindow(launch) {
+  traceStartup('window-create-start');
   const theme = resolveTheme(launch.theme);
   const probing = Boolean(process.env.MIPL_PROBE);
   const win = new BrowserWindow({
@@ -418,6 +429,16 @@ function createWindow(launch) {
     },
   });
 
+  traceStartup('window-created');
+  if (startupTraceEnabled) {
+    for (const event of ['dom-ready', 'did-finish-load']) {
+      win.webContents.once(event, () => traceStartup(event));
+    }
+    win.once('show', () => traceStartup('window-show'));
+    win.webContents.on('did-fail-load', (_event, code) => traceStartup(`load-failed:${code}`));
+    win.webContents.on('render-process-gone', (_event, details) => traceStartup(`renderer-gone:${details.reason}`));
+  }
+
   // kiosk 纪律：不许导航出去、不许开新窗口
   win.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(`${SCHEME}://${HOST}/`)) event.preventDefault();
@@ -425,11 +446,13 @@ function createWindow(launch) {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   win.once('ready-to-show', () => {
+    traceStartup('ready-to-show');
     // 部分合成器要等窗口 show 之后才认 fullscreen —— kiosk 不能先闪一帧带边框的窗口
     if (!probing) win.setFullScreen(true);
     win.show();
   });
 
+  traceStartup('load-url');
   win.loadURL(INDEX_URL);
   return win;
 }
@@ -446,8 +469,10 @@ function createWindow(launch) {
  *   - `mipl-installer: 渲染：硬件加速 / SwiftShader 软件渲染`（启动器的判定）
  */
 async function logGpuStatus() {
+  traceStartup('gpu-query-start');
   try {
     const basic = await app.getGPUInfo('basic');
+    traceStartup('gpu-info-returned');
     await new Promise((resolve) => setTimeout(resolve, 700));
     const status = app.getGPUFeatureStatus();
     const gpu = (basic.gpuDevice || []).map((device) => `${device.vendorId || '?'}:${device.deviceId || '?'}`);
@@ -457,10 +482,13 @@ async function logGpuStatus() {
     );
   } catch (error) {
     console.log(`[mipl-installer] GPU 状态读取失败：${error.message}`);
+  } finally {
+    traceStartup('gpu-log-finished');
   }
 }
 
 app.whenReady().then(async () => {
+  traceStartup('app-ready');
   protocol.handle(SCHEME, serveRenderer);
 
   const launch = parseLaunchArgs(process.argv);

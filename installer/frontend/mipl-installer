@@ -37,9 +37,20 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 LOG = logging.getLogger("mipl-installer")
+
+STARTUP_START = time.monotonic()
+
+
+def trace_startup(stage: str) -> None:
+    """与 journal 的单调时间对照；不把准备好的命令误记成已 exec。"""
+    if os.environ.get("MIPL_STARTUP_TRACE") == "1":
+        now = time.monotonic()
+        LOG.info("[mipl-startup] launcher %s +%.1fms uptime=%.3fs",
+                 stage, (now - STARTUP_START) * 1000, now)
 
 THEME_CHOICES = ("auto", "light", "dark")
 #: 默认跟随时间（白天亮、入夜暗）——「亮色为主」指的是设计基线，不是锁死亮色
@@ -274,6 +285,7 @@ def main(argv=None) -> int:
     argv = list(argv) if argv is not None else list(sys.argv)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(levelname)s %(name)s: %(message)s")
+    trace_startup("entry")
     args = build_parser().parse_args(argv[1:])
 
     here = frontend_dir()
@@ -333,16 +345,19 @@ def main(argv=None) -> int:
         "--force-device-scale-factor=1",    # 缩放统一由界面层承担，见上
         *renderer_switches(args.renderer, gpu),
     ]
-    LOG.info("exec：%s", " ".join(command))
+    LOG.info("启动命令：%s", " ".join(command))
     if args.print_plan:
         print(" ".join(command))
         return 0
 
     # ---- ④ 多显示器镜像（必须在 cage 会话里跑；--print-plan 不动环境，已先返回）----
+    trace_startup("mirror-start")
     mirror_outputs(display_layout)
+    trace_startup("mirror-finished")
 
     # ---- ⑤ exec：本进程被 Electron 取代（信号直落 Electron，stop/kill 语义才干净）----
     try:
+        trace_startup("electron-exec")
         os.execv(electron, command)
     except OSError as exc:
         LOG.error("启动 Electron 失败：%s", exc)

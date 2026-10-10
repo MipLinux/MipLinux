@@ -29,7 +29,15 @@ HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类�
 某半边失败时退出码仍是 0（NM 的 dispatcher 没人在看），但日志写明、且**不写 stamp** ——
 stamp 记的是「上次成功换源」，只在成功时才写，失败的下一次触发可以立刻重试。
 日志同时写 stdout 与 <run-dir>/mipl-mirror-switch.log（NM dispatcher 的 stdout 不好捞，
-落一份文件，QEMU 里直接 `cat` 就有证据）。
+落一份文件，QEMU 里直接 `cat` 就有证据），并带上每轮耗时（两半各自 + 总计）——
+Live 里 `grep 换源结束` 就能算均值与极差。
+
+写盘的两条边界（评审问到的，细则见 atomic_write 的 docstring）：
+  · **权限**：沿用目标文件原来的模式，显式 chmod、不受 umask 影响；**不**替管理员改权限。
+    目录不可写 / 文件系统只读 → 那半记失败、保留原文件（源照旧能用），不写 stamp。
+  · **外部编辑**：读旧内容时抓 inode + mtime，落盘前复核；期间被人改过就让位 ——
+    这次不换、下次触发再来，绝不覆盖别人刚写进去的东西。rename 是原子的，
+    读方（pacman）永远看不到半个文件；我们自己的并发由 /run 下那把 flock 折叠。
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ import platform
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -108,7 +117,14 @@ class Logger:
     def __call__(self, msg: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} mipl-mirror-switch: {msg}"
         if not self.quiet:
-            print(line, flush=True)
+            try:
+                print(line, flush=True)
+            except OSError:
+                # stdout 那头断了（真机实测：dispatcher 里 `setsid A | systemd-cat &`
+                # 那条管道活不过钩子退出，systemd-cat 一死，往管道写就是 BrokenPipeError）。
+                # 日志丢一行可以，**换源不能因此半路死掉** —— 那正是「一声不响、一个字节
+                # 都不写」的成因。文件与 journal 两条路照旧。
+                pass
         try:
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
@@ -123,11 +139,17 @@ class Logger:
 
 
 def read_server_lines(path: Path) -> list[str]:
-    """取出一份 mirrorlist 里所有 `Server = ` 行的 URL（注释与空行不管）。"""
-    if not path.is_file():
+    """取出一份 mirrorlist 里所有 `Server = ` 行的 URL（注释与空行不管）。
+
+    文件不在、或根本读不出来（权限不对 / 只读挂载）都返回空表 —— 调用方把「没有 Server 行」
+    当成那半失败、**保留原文件**，不会去覆盖一份它自己都没读懂的文件。
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return []
     servers = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         stripped = line.strip()
         if not stripped.startswith("Server"):
             continue
@@ -146,17 +168,76 @@ def resolve_pacman_vars(url: str) -> str:
     return url.replace("$arch", ARCH).replace("$repo", "archlinuxcn")
 
 
-def atomic_write(path: Path, text: str, dry_run: bool, log: Logger) -> None:
-    """同目录写临时文件再 rename —— pacman 读到的要么是旧的、要么是新的，不会是半个。"""
+class ExternalEdit(Exception):
+    """目标文件在我们测速的那几十秒里被别的进程改过（写前复核 inode/mtime 发现的）。"""
+
+
+def file_token(path: Path) -> tuple[int, int, int] | None:
+    """目标文件的「身份」：inode + mtime(ns) + 大小。文件不在就是 None。
+
+    用来回答「写的时候文件正在被别人编辑怎么办」：读旧内容时抓一次，落盘前再抓一次，
+    对不上就说明中间有人动过 —— 这次让位。用它而不是内容哈希，是因为读整份文件在
+    `/etc` 上没必要，而 inode/mtime 正是编辑器「就地写」时会变的东西。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def atomic_write(path: Path, text: str, dry_run: bool, log: Logger,
+                 expected: tuple[int, int, int] | None = None) -> None:
+    """同目录写临时文件再 rename —— pacman 读到的要么是旧的、要么是新的，不会是半个。
+
+    **权限（评审问题）**：换源不该顺手改权限。所以这里不硬写 0644，而是沿用目标文件
+    原来的模式（文件不在才用 0644），属主/属组也尽力照抄；模式不是 0644 时记一行日志，
+    免得「换完源之后权限悄悄变了」没人知道。chmod 是显式的，不受 umask 影响。
+    文件本身只读**不挡** rename（POSIX：能不能换由**目录**的写权限决定），所以 0444 的
+    mirrorlist 照样能换、换完还是 0444 —— pacman 只读它，没有任何影响。
+    目录不可写 / 文件系统只读 → OSError 冒给调用方：那半记「失败」、保留原文件，不写 stamp。
+
+    **外部编辑（评审问题）**：`expected` 是读旧内容时抓的 `file_token`，落盘前复核一次，
+    对不上就抛 ExternalEdit —— 宁可这次不换（下次触发再来），也不覆盖别人刚写进去的东西。
+    """
     if dry_run:
         log(f"[dry-run] 本该写入 {path}：")
         for line in text.splitlines():
             log(f"[dry-run]   {line}")
         return
+
+    mode = 0o644
+    owner: tuple[int, int] | None = None
+    try:
+        st = path.stat()
+    except OSError:
+        pass  # 文件不在（第一次写）→ 用 0644 / 随当前用户
+    else:
+        mode = stat.S_IMODE(st.st_mode)
+        owner = (st.st_uid, st.st_gid)
+        if mode != 0o644:
+            log(f"{path} 原来的模式是 {mode:04o}，按原样写回（不替管理员改权限）")
+
     tmp = path.with_name(f".{path.name}.mipl-tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.chmod(tmp, mode)
+        if owner is not None:
+            try:
+                os.chown(tmp, *owner)
+            except OSError:
+                pass  # 改不了属主就随它去：pacman 只关心内容与可读性
+        if expected is not None and file_token(path) != expected:
+            raise ExternalEdit(f"{path} 在我们测速期间被别的进程改过（inode/mtime 变了）")
+        os.replace(tmp, path)
+    except BaseException:
+        # 失败别把临时文件留在 /etc/pacman.d 里 —— pacman 不会读它，但下一个人会以为
+        # 「有半个 mirrorlist」。清理失败不该盖住真正的异常，所以吞掉它。
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def probe_archlinuxcn(url: str, deadline: float) -> float:
@@ -203,11 +284,13 @@ def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool | None
     """探速并重排 archlinuxcn 的 mirrorlist。
 
     返回 True = 顺序真的变了、False = 顺序没变（现有第一个就是最快的）、
-    None = 这半没干成（文件不在 / 里面没有 Server 行）—— 见 main() 里对 stamp 的处理。
+    None = 这半没干成（文件不在 / 读不出来 / 里面没有 Server 行 / 写不进去 / 被人改过）
+    —— 见 main() 里对 stamp 的处理。
     """
     servers = read_server_lines(cn_path)
+    token = file_token(cn_path)  # 读内容时就抓身份，落盘前复核（评审问题 ⑤）
     if not servers:
-        log(f"{cn_path} 里没有 Server 行，archlinuxcn 这半失败（保留原文件）")
+        log(f"{cn_path} 里没有 Server 行（或读不出来），archlinuxcn 这半失败（保留原文件）")
         return None
 
     log(f"开始探 {len(servers)} 个 archlinuxcn 镜像（每个最多 {PROBE_BYTES // 1024} KiB）")
@@ -228,7 +311,16 @@ def switch_archlinuxcn(cn_path: Path, dry_run: bool, log: Logger) -> bool | None
         log("archlinuxcn 的顺序没变（现有的第一个就是最快的）")
         return False
 
-    atomic_write(cn_path, format_archlinuxcn_mirrorlist(ordered), dry_run, log)
+    try:
+        atomic_write(cn_path, format_archlinuxcn_mirrorlist(ordered), dry_run, log,
+                     expected=token)
+    except ExternalEdit as exc:
+        log(f"archlinuxcn：{exc}；这次让位、不覆盖，保留对方那份（下次触发再来）")
+        return None
+    except OSError as exc:
+        log(f"archlinuxcn：写 {cn_path} 失败（{exc.__class__.__name__}: {exc}），"
+            "保留原文件；这半记失败、不写 stamp")
+        return None
     if dry_run:
         log(f"archlinuxcn：[dry-run] 最快的是 {ordered[0][1]}")
         return False
@@ -240,7 +332,8 @@ def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Log
     """用 reflector 重写官方 mirrorlist。任何一步不满意就保留原文件。
 
     返回 True = 换了、False = 没变（现在就是最快的那批）、None = 这半失败了
-    （reflector 不在 / 超时 / 退出码非 0 / 输出不可信）—— 见 main() 里对 stamp 的处理。
+    （reflector 不在 / 超时 / 退出码非 0 / 输出不可信 / 写不进去 / 被人改过）
+    —— 见 main() 里对 stamp 的处理。
     """
     target = work_dir / "mirrorlist.new"
     cmd = [
@@ -282,12 +375,18 @@ def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Log
     if not servers:
         log("reflector 写出来的文件里没有 Server 行，拒绝替换（保留原 mirrorlist）")
         return None
-    if not target.read_text(encoding="utf-8").strip():
+    try:
+        new_text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        log(f"读不出 reflector 写出来的文件（{exc.__class__.__name__}: {exc}），"
+            "官方这半失败（保留原 mirrorlist）")
+        return None
+    if not new_text.strip():
         log("reflector 写出来的文件是空的，拒绝替换（保留原 mirrorlist）")
         return None
 
-    new_text = target.read_text(encoding="utf-8")
     old = read_server_lines(official_path)
+    token = file_token(official_path)  # 落盘前复核（评审问题 ⑤）
     changed = old != servers
     if dry_run:
         log(f"官方：[dry-run] 会换成 {len(servers)} 个，第一个是 {servers[0]}"
@@ -299,8 +398,16 @@ def switch_official(official_path: Path, work_dir: Path, dry_run: bool, log: Log
         # 比的是真正生效的 Server 行：reflector 的表头注释带生成时间，逐字节比必然不等。
         log("官方：Server 列表与现在相同，不落盘")
         return False
+    try:
+        atomic_write(official_path, new_text, dry_run, log, expected=token)
+    except ExternalEdit as exc:
+        log(f"官方：{exc}；这次让位、不覆盖，保留对方那份（下次触发再来）")
+        return None
+    except OSError as exc:
+        log(f"官方：写 {official_path} 失败（{exc.__class__.__name__}: {exc}），"
+            "保留原 mirrorlist；这半记失败、不写 stamp")
+        return None
     log(f"官方：{old[0] if old else '(空)'} → {servers[0]}（共 {len(servers)} 个）")
-    atomic_write(official_path, new_text, dry_run, log)
     return True
 
 
@@ -405,24 +512,34 @@ def main(argv: list[str]) -> int:
         work_dir = Path(tempfile.mkdtemp(prefix="mirror-switch.", dir=str(run_dir)))
         try:
             mirrorlist_dir = Path(args.mirrorlist_dir)
+            started = time.monotonic()
+            official_started = time.monotonic()
             official_changed = switch_official(
                 mirrorlist_dir / OFFICIAL_MIRRORLIST.name, work_dir, args.dry_run, log)
+            official_secs = time.monotonic() - official_started
+            cn_started = time.monotonic()
             cn_changed = switch_archlinuxcn(
                 mirrorlist_dir / CN_MIRRORLIST.name, args.dry_run, log)
+            cn_secs = time.monotonic() - cn_started
             failed = [name for name, state in (("官方", official_changed), ("archlinuxcn", cn_changed))
                       if state is None]
+            # 每轮耗时写进日志：换 Wi-Fi 的体感就是「要等多久」，而这只能在 Live 里量
+            # （本机的网络与 Live 不是一回事）。两半各自 + 总计，一行 grep 出来算均值与极差。
+            cost = (f"官方 {official_secs:.1f}s、archlinuxcn {cn_secs:.1f}s、"
+                    f"共 {time.monotonic() - started:.1f}s")
 
             if args.dry_run:
-                log("dry-run 结束：没有写任何文件")
+                log(f"dry-run 结束：没有写任何文件（{cost}）")
                 return 0
             if failed:
                 # stamp 是「上次**成功**换源的时间」。失败也写，就等于失败也得等满 min-interval
                 # 才准重试 —— 而网络刚起来的那几秒正是最该重试的时候。所以失败不写。
-                log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试")
+                log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试"
+                    f"（{cost}）")
                 return 0
             stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
             log("换源结束（官方：" + state_text(official_changed)
-                + "；archlinuxcn：" + state_text(cn_changed) + "）")
+                + "；archlinuxcn：" + state_text(cn_changed) + f"；{cost}）")
             return 0
         finally:
             # 临时目录里是 reflector 的输出与缓存（几 MB）。它建在 run_dir（/run，tmpfs）下，

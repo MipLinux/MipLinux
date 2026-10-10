@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/mipl-logo.png" width="128" alt="MipLinux">
+
 **MipLinux**
 
 基于 Arch Linux 的滚动发行版 · 中文开箱即用 · NVIDIA 驱动预装

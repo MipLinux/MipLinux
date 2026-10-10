@@ -11,7 +11,7 @@
     python3 app/tools/gen-tokens.py --write   # 重生成 palette.css
     python3 app/tools/gen-tokens.py --check   # 比对（默认）
 
-守卫：`check-tokens.py` 还会把 CSS 与 `docs/work/tech/08` 附录 A.2 的表比一遍，
+守卫：`check-tokens.py` 还会把 CSS 与 `docs/work/tech/10` 附录 A.1 的表比一遍，
 所以「JSON → CSS → 文档」三方都锁住。只依赖标准库。
 """
 
@@ -26,7 +26,7 @@ HEADER = """/* 品牌色板 · 由 app/tools/gen-tokens.py 从 design/color.json
  *
  * 35 个 MD3 角色 × 亮/暗，种子 {seed}（取自 logo，官方算法离线生成）。
  * 换色板 = 改 design/color.json（或它的生成脚本）→ 跑 `python3 app/tools/gen-tokens.py --write`
- * → 跑 `python3 app/tools/check-tokens.py` 确认与 docs/work/tech/08 附录 A.2 仍然一致。
+ * → 跑 `python3 app/tools/check-tokens.py` 确认与 docs/work/tech/10 附录 A.1 仍然一致。
  */
 
 """

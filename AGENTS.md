@@ -6,7 +6,7 @@ MipLinux 是基于 Arch Linux 的滚动发行版：**NVIDIA 显卡开箱可用**
 本文是 AI 在本仓库的行为契约，只放**全项目通用**的规则。目录专属的规矩在下级文件里（见「仓库布局」），
 按 AGENTS.md 规范的**累积**语义，下级文件继承本文而不重复它。
 技术结论以 `docs/` 为准，两者冲突时先问人，不自行裁决。
-动手前按顺序读：[01-概念模型](docs/knowledge/01-概念模型.md) → [05-测试方法](docs/knowledge/05-测试方法.md) → [README 的 D 表](README.md) → 手上那条工作的 issue。
+动手前按顺序读：[01-概念模型](docs/knowledge/01-概念模型.md) → [05-测试方法](docs/knowledge/05-测试方法.md) → 决策编号的出处 [06 的状态总表](docs/knowledge/06-待定事项.md) → 手上那条工作的 issue。
 
 ## 仓库布局
 
@@ -17,6 +17,7 @@ profile/     构建源：由 releng 改名的 archiso profile
 installer/   安装器源码
 scripts/     项目操作台：mipl.sh 及其调用的构建脚本
 docs/
+  README.md  文档总入口：各层是什么、从哪读起
   knowledge/ 已确定的结论，给新手读
   work/      工作 issue 的规范与草案骨架、ROADMAP、tech/
   archive/   已归档的问题记录：症状、根因、修法、排错方法
@@ -36,7 +37,6 @@ out/         构建产物与测试资产（已 gitignore，不提交）
 | `sudo ./scripts/mipl.sh qemu [--disk target.qcow2] [--boot c]` | 起 QEMU：测 Live / 装系统 / 装完从盘启动 |
 | `sudo ./scripts/mipl.sh shell` \| `stop` | 进入 / 关闭构建容器（用完别忘了 `stop`） |
 | `sudo ./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
-| `./scripts/check-identity.sh` | 品牌一致性断言（**不需要 root**）；`--iso` 扫产物 |
 
 完整说明见 `sudo ./scripts/mipl.sh --help` 与 [work/README](docs/work/README.md)。
 

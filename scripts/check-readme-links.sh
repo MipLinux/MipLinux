@@ -9,7 +9,7 @@
 #   2. 指向另一个仓库的绝对链接（github.com/MipLinux/...）在**本地另一份检出**里存在
 #      —— 两份仓库都在这台机器上，没有理由放过
 #   3. `#锚点` 在本文件里能对应到一个标题（GitHub 的 slug 规则：小写、空格换 `-`、去标点）
-#   4. 进度表标记成对出现，且表头是 `| 阶段 | 状态 |`
+#   4. 进度表标记成对出现，且表里有以「阶段」开头的表头行（列宽随意）
 #
 # **不需要 root**，只读，不联网（外部链接只做格式检查，不抓取）。
 # 用法：./scripts/check-readme-links.sh
@@ -26,7 +26,9 @@ fail() { printf '❌ %s\n' "$1"; problems=$((problems + 1)); }
 
 # GitHub 的标题 slug：去 markdown 修饰与标点，空格换 `-`，转小写；中文原样保留。
 slugify() {
-  printf '%s' "$1" | sed -E \
+  # 必须带换行：调用方是 `while read` 逐行喂标题，少了换行会把所有标题拼成一行，
+  # 于是每个锚点都匹配不上 —— 真实存在的锚点会被判成死锚点（误报）。
+  printf '%s\n' "$1" | sed -E \
     -e 's/\[([^]]*)\]\([^)]*\)/\1/g' \
     -e 's/[`*_]//g' \
     -e 's/[[:punct:]]//g' \
@@ -46,8 +48,13 @@ check_file() { # $1=README 路径 $2=它所属仓库根
   if [ "$begin" != "$end" ]; then
     fail "$rel 进度表标记不成对（BEGIN $begin 个 / END $end 个）"
   fi
-  if grep -q 'BEGIN:progress-table' "$readme" && ! grep -q '^| 阶段 | 状态 |' "$readme"; then
-    fail "$rel 有进度表标记，但表头不是「| 阶段 | 状态 |」，同步脚本会认不出来"
+  # 表头判据必须与同步库 extract_progress_table 的 awk 正则同源（它用
+  # `^\|[[:space:]]*阶段[[:space:]]*\|`）—— 只认「阶段」这一列的名字，列宽随意：
+  # 对齐用的空格、以及「状态」列之后还有没有别的列，都不影响同步脚本抽取。
+  # 早先这里写成字面量 `^| 阶段 | 状态 |`，表格一对齐就被误判成「认不出来」。
+  if grep -q 'BEGIN:progress-table' "$readme" \
+     && ! grep -qE '^\|[[:space:]]*阶段[[:space:]]*\|' "$readme"; then
+    fail "$rel 有进度表标记，但找不到以「阶段」开头的表头行，同步脚本会认不出来"
   fi
 
   # 3. 锚点

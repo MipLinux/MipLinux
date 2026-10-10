@@ -5,7 +5,7 @@
 为什么生成而不是手抄
 --------------------
 35 个 MD3 角色 × 亮/暗 = 70 个值。手抄一次就会漂，而这份色板是**品牌资产**
-（种子色取自 logo，由官方算法离线生成）。JSON 是快照，CSS 是它在界面里的落地 —— 方向固定：
+（种子色由官方算法离线生成）。JSON 是快照，CSS 是它在界面里的落地 —— 方向固定：
 **JSON → CSS**，绝不反向。改动只改 JSON（或重生成 JSON），再跑本脚本。
 
     python3 app/tools/gen-tokens.py --write   # 重生成 palette.css
@@ -24,7 +24,7 @@ from pathlib import Path
 
 HEADER = """/* 品牌色板 · 由 app/tools/gen-tokens.py 从 design/color.json 生成 —— 不要手改。
  *
- * 35 个 MD3 角色 × 亮/暗，种子 {seed}（取自 logo，官方算法离线生成）。
+ * 35 个 MD3 角色 × 亮/暗，种子 {seed}（官方算法离线生成）。
  * 换色板 = 改 design/color.json（或它的生成脚本）→ 跑 `python3 app/tools/gen-tokens.py --write`
  * → 跑 `python3 app/tools/check-tokens.py` 确认与 docs/work/tech/08 附录 A.2 仍然一致。
  */

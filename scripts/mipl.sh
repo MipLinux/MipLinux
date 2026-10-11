@@ -98,6 +98,12 @@ PROFILE_INNER="/profile"
 # 目标文件用固定名。源文件名各发行版不同（OVMF_VARS.4m.fd / OVMF_VARS_4M.fd），
 # 固定名意味着 QEMU 参数永远不需要跟着变——Issue #8 的第二个错误就出在这里。
 VARS_DST="${OUT_DIR}/OVMF_VARS.fd"
+# QMP 通道（回归驱动入口，scripts/mipl-qmp.sh 走这里）：默认 out/qemu-qmp.sock，
+# 客户端认同一个路径，两边只说一个名字就对齐。为什么是 unix socket 固定路径
+# + 事后 chmod 0666、而不是 tcp 端口：QEMU 11 的 -qmp / -chardev socket 都不收
+# mode=（实测 Invalid parameter 'mode'），unix socket 默认 0755、非属主连不上；
+# 选型理由完整写在 scripts/mipl-qmp.sh 头部注释。
+QMP_SOCK="${MIPL_QMP_SOCK:-${OUT_DIR}/qemu-qmp.sock}"
 # 目标盘（A5 的 mipl target）：给线 B 装系统用。默认建在 out/ 里 —— 整个 out/
 # 都被 .gitignore 忽略，盘和它的派生文件都不会误进 git。
 # 40G 是 qcow2 的**虚拟**大小，实际占用随写入增长（刚建好只有约 200 KiB）。
@@ -644,7 +650,7 @@ cmd_vars() {
 cmd_qemu() {
   have qemu-system-x86_64 || die "找不到 qemu-system-x86_64。先跑： ${MIPL_CMD} deps"
 
-  local iso="" disk="" boot="d" want_fresh=0 want_keep=0 serial="" vga=""
+  local iso="" disk="" boot="d" want_fresh=0 want_keep=0 serial="" vga="" want_qmp=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --disk)
@@ -661,6 +667,7 @@ cmd_qemu() {
       --vga)
           [[ -n "${2:-}" ]] || die "--vga 后面要跟 virtio 或 std"
           vga="$2"; shift 2 ;;
+      --qmp) want_qmp=1; shift ;;
       -*) die "未知选项：$1（用 --help 看用法）" ;;
       *)
         [[ -z "$iso" ]] || die "ISO 参数只能给一个，多出来的是：$1"
@@ -730,6 +737,13 @@ cmd_qemu() {
   if [[ "$serial" == console ]]; then
     note "串口交互：socat -,raw,echo=0,escape=0x0f UNIX-CONNECT:${OUT_DIR}/installer-serial.sock"
   fi
+  if [[ $want_qmp -eq 1 ]]; then
+    info "QMP 通道：${QMP_SOCK}"
+    note "  VM 起来后，普通用户一条命令一个动作驱动它： ./scripts/mipl-qmp.sh status"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      note "  真跑时：QEMU 起来后脚本会把 socket chmod 0666（QEMU 11 不收 mode=，默认 0755 普通用户连不上）"
+    fi
+  fi
   # 参数逐条放进数组：file= 永远和它所属的 -drive 在同一个元素里，
   # 换行/缩进都不可能把它们拆开 —— Issue #8 就是这么来的。
   local -a q=(
@@ -768,6 +782,15 @@ cmd_qemu() {
     fi
   fi
 
+  # ── QMP 通道（回归驱动入口：scripts/mipl-qmp.sh 走这里）──
+  # 选 unix socket 固定路径、不选 tcp:127.0.0.1 的理由见 mipl-qmp.sh 头部注释；
+  # 这里只记 QEMU 侧的事实：QEMU 11 的 -qmp 与 -chardev socket 都不收 mode=
+  # （实测 Invalid parameter 'mode'），root 起的 QEMU 出 socket 默认 0755 ——
+  # 所以通道参数这里开，权限放开交给启动前挂的盯梢（见下方 chmod 0666）。
+  if [[ $want_qmp -eq 1 ]]; then
+    q+=(-qmp "unix:${QMP_SOCK},server=on,wait=off")
+  fi
+
   # ── 显卡 ──
   if [[ -n "$vga" ]]; then
       q+=(-vga "$vga")
@@ -784,6 +807,34 @@ cmd_qemu() {
   if [[ $DRY_RUN -eq 1 ]]; then
     run "${q[@]}"
     return 0
+  fi
+
+  # QMP socket 由 root 的 QEMU 创建，默认 0755 —— 普通用户连不上，而 QEMU 11
+  # 不收 mode= 参数（-qmp 与 -chardev socket 两条路都报 Invalid parameter
+  # 'mode'，实测）。所以把 QEMU 放到后台：等 socket 一出现（bind 完成）就
+  # chmod 0666，再 wait 回前台 —— 权限在 connect() 时按文件当前 mode 判，对已
+  # 绑定的 socket 立即生效，不需要等 QEMU 重启。
+  # 为什么 chmod 要在主流程里做、而不是挂一个独立的后台盯梢进程：盯梢和 QEMU
+  # 同进程组，用户 Ctrl+Z 拿回终端时整个组一起停 —— 盯梢若还没跑到 chmod 就被
+  # 冻住，socket 会一直是 0755（Issue #125 实测过这种死法）。主流程里的
+  # 循环要么在用户能操作之前就 chmod 完，要么继续时接着做，时序是结构上确定的。
+  # 选这条路而不是 tcp 端口的理由写在 scripts/mipl-qmp.sh 头部注释。
+  if [[ $want_qmp -eq 1 ]]; then
+    run "${q[@]}" &
+    local qemu_pid=$! i
+    for i in $(seq 1 300); do
+      if [[ -S "$QMP_SOCK" ]]; then
+        chmod 0666 "$QMP_SOCK" || warn "QMP socket chmod 0666 失败：$QMP_SOCK"
+        ok "QMP socket 已放宽：${QMP_SOCK}（0666，普通用户可连）"
+        break
+      fi
+      kill -0 "$qemu_pid" 2>/dev/null || break   # QEMU 已经死了就别空等 30 秒
+      sleep 0.1
+    done
+    [[ -S "$QMP_SOCK" ]] || warn "QMP socket 没出现：$QMP_SOCK（QEMU 启动失败了吗？）"
+    local qemu_rc=0
+    wait "$qemu_pid" || qemu_rc=$?
+    return "$qemu_rc"
   fi
 
   # 现在是以 root 跑的，而图形会话属于调用 sudo 的那个用户。sudo 默认会保留
@@ -881,7 +932,7 @@ cmd_target() {
 # ── 命令：installer ────────────────────────────────────────────────────
   # M0：装系统测试一条龙 —— 目标盘（缺了才建）+ Live 启动 + 串口日志/控制台。
     cmd_installer() {
-    local disk="$TARGET_DISK_NAME" size="$TARGET_DISK_SIZE" boot="d" serial="file"
+    local disk="$TARGET_DISK_NAME" size="$TARGET_DISK_SIZE" boot="d" serial="file" want_qmp=0
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --disk)
@@ -896,6 +947,7 @@ cmd_target() {
         --serial)
           [[ -n "${2:-}" ]] || die "--serial 后面要跟 file  console"
           serial="$2"; shift 2 ;;
+        --qmp) want_qmp=1; shift ;;
         -*) die "未知选项：$1（用 --help 看用法）" ;;
         *)  die "installer 不接受位置参数：$1" ;;
       esac
@@ -923,9 +975,11 @@ cmd_target() {
     # 试运行里盘还不存在（真跑会先建盘），cmd_qemu 会因「目标盘不存在」拒掉 ——
     # 按不挂盘演示 qemu 参数，并把真跑的差别说清楚。
     local -a qemu_args=(--disk "$disk" --boot "$boot" --serial "$serial" --vga virtio)
+    [[ $want_qmp -eq 1 ]] && qemu_args+=(--qmp)
     if [[ $DRY_RUN -eq 1 && ! -e "$path" ]]; then
       note "（试运行：盘不存在，真跑会先 qemu-img create 再挂上；下面按不挂盘演示）"
       qemu_args=(--boot "$boot" --serial "$serial" --vga virtio)
+      [[ $want_qmp -eq 1 ]] && qemu_args+=(--qmp)
     fi
     cmd_qemu "${qemu_args[@]}"
   }
@@ -1327,15 +1381,20 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                         （要引导项里的 console=ttyS0，M0 已加）。
       --vga virtio|std  显卡。virtio 提供 KMS，kiosk（cage）测试用它；
                         不给 = qemu 默认（std），老行为不变
+      --qmp            开 QMP 通道：out/qemu-qmp.sock（脚本会把 socket 放宽到
+                        0666，普通用户可连）。VM 起来后驱动它：
+                          ./scripts/mipl-qmp.sh status
+                        （key/type/shot/wait-for 等动作见该脚本 --help）
   target [--name F] [--size 40G] [--force]
                       建一块空的目标盘（默认 out/target.qcow2）给安装器用。
                       已存在就拒绝：它上面可能装着一个系统。
                       --force 覆盖，并连同它的 NVRAM 一起换新。
-  installer [--boot d|c] [--serial file|console] [--disk FILE] [--size 40G]
+  installer [--boot d|c] [--serial file|console] [--qmp] [--disk FILE] [--size 40G]
                       装系统测试一条龙：目标盘缺了才建（已有就复用），
                       然后以 -vga virtio 启动 Live（cage  KMS，std VGA 起不来）。
      --serial file     串口日志落 out/installer-serial.log（默认）
      --serial console  串口换成可交互 socket（socat 连上即root shell）
+     --qmp             开 QMP 通道（同 qemu --qmp：普通用户可连 out/qemu-qmp.sock）
      --boot c          从盘启动验安装结果（同 qemu 语义）
 
   vars                只复制 OVMF 变量文件（out/OVMF_VARS.fd），不启动 QEMU。
@@ -1395,6 +1454,8 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                    默认：抄宿主机 /etc/resolv.conf；抄不到时用内置兜底
                    （bootstrap 自带的 resolv.conf 是纯注释，DNS 全废）
   MIPL_QEMU_EXTRA 追加给 qemu 的参数（按空格切分），如 "-display none"
+  MIPL_QMP_SOCK   QMP socket 路径   默认：\$MIPL_ROOT/out/qemu-qmp.sock
+                  （qemu/installer --qmp 与 scripts/mipl-qmp.sh 都认它）
   NO_COLOR        设了就不输出颜色
 
 为什么要有这个脚本：

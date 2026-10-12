@@ -346,6 +346,15 @@ cmd_shot() {
   dir="$(cd "$(dirname -- "$target")" && pwd)"
   abs="${dir}/$(basename -- "$target")"
 
+  # 上一次截图留下的同名文件会骗过后面每个「在不在 / 空不空」的检查：
+  # 本次 PNG 路失败、PPM 回退成功时，残留的 .png 会被当成本次产物报出去
+  # （评审指出过）。开拍前把候选都清掉，让所有检查只反映本次运行。
+  # || true：target 若被指成目录，rm 报错退出会炸掉 set -e，吞掉它照常走。
+  rm -f -- "$abs" || true
+  if [[ "$fmt" == png ]]; then
+    rm -f -- "${abs%.png}.ppm" || true
+  fi
+
   shot_one "$abs" "$fmt" || rc=$?
   if [[ $rc -eq 6 || $rc -eq 7 ]] && [[ "$fmt" == png ]]; then
     # PNG 优先、失败回 PPM：QEMU 没编 PNG 支持时 screendump 回 error，

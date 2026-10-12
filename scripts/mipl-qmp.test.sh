@@ -3,8 +3,9 @@
 #
 # 为什么有它：QMP 客户端是「替人敲键、替人看屏」的东西，一次静默的握手顺序错、
 # 键名映射错，都要到真 VM 上才现形。所以把 QMP 线协议在本地先验一遍：
-# 握手、命令 JSON、键名映射、type 逐键、shot 的 PNG/PPM 两条路、
-# wait-for 的命中与超时退出码、连接失败的两句人话、异步事件夹塞。
+# 握手、命令 JSON、键名映射、type 逐键、shot 的 PNG/PPM 两条路（残留文件
+# 不冒名、报成功但落空也回落）、wait-for 的命中与超时退出码、连接失败的
+# 两句人话、异步事件夹塞。
 #
 # **不需要 root / QEMU / ISO**。用法：./scripts/mipl-qmp.test.sh
 # 退出码：0 = 全过；1 = 有失败项。
@@ -31,6 +32,7 @@ mkdir -p "$OUT" "$T/empty"
 # 场景（$1）：echo=万事回 return:{}；status=query-status 回 running；
 # shot=按 screendump 的 filename/format 落一个假文件再回 return:{}；
 # nopng=png 回 error、ppm 落假文件；quit=收到 quit 就关连接不回包；
+# emptypng=png 报成功但文件不落盘、ppm 落假文件（QMP「说成功但落空」的路）；
 # events=握手与命令的响应之前各夹一条异步事件（真 QEMU 的 RESUME/SHUTDOWN 这
 # 类行会夹在响应之间，客户端必须跳过它们，不能把 event 行当成命令返回值）。
 # 每个收到的请求原样追加进 $REQ（一行一条 JSON）。
@@ -93,6 +95,9 @@ while True:
                 if scenario == "nopng" and fmt == "png":
                     send(conn, {"error": {"class": "GenericError",
                                           "desc": "Image format 'png' is not supported"}})
+                    continue
+                if scenario == "emptypng" and fmt == "png":
+                    send(conn, {"return": {}})   # 报成功，但文件没落盘
                     continue
                 with open(args["filename"], "wb") as fh:
                     if fmt == "ppm":
@@ -212,12 +217,26 @@ expect_rc "shot 默认落 out/qmp-shot.png" 0 "qmp-shot.png" \
 stop_fake_qmp
 
 start_fake_qmp nopng
-expect_rc "PNG 不可用回 PPM，退出码 0 并打印 PPM" 0 "PPM" \
+# 上一次截图留下的同名 .png：本次 PNG 路失败、PPM 回退成功时，残留文件会骗过
+# 「在不在 / 空不空」的检查，被当成本次产物报出去。先种一个残留再拍。
+printf '上次截图留下的旧文件\n' > "$OUT/qmp-fallback.png"
+expect_rc "PNG 不可用回 PPM，残留 .png 不冒名" 0 "截图已保存：$OUT/qmp-fallback.ppm" \
   env MIPL_QMP_SOCK="$SOCK" MIPL_OUT_DIR="$OUT" "$CLIENT" shot "$OUT/qmp-fallback.png"
 if [[ -s "$OUT/qmp-fallback.ppm" && ! -e "$OUT/qmp-fallback.png" ]]; then
-  pass "回落产物是 .ppm 且没有冒名的 .png"
+  pass "回落产物是 .ppm，残留 .png 已清掉不冒名"
 else
-  bad "回落产物是 .ppm 且没有冒名的 .png"
+  bad "回落产物是 .ppm，残留 .png 已清掉不冒名"
+fi
+stop_fake_qmp
+
+start_fake_qmp emptypng
+printf '上次截图留下的旧文件\n' > "$OUT/qmp-empty.png"
+expect_rc "报成功但落空：残留 .png 不骗过空文件检查" 0 "截图已保存：$OUT/qmp-empty.ppm" \
+  env MIPL_QMP_SOCK="$SOCK" MIPL_OUT_DIR="$OUT" "$CLIENT" shot "$OUT/qmp-empty.png"
+if [[ -s "$OUT/qmp-empty.ppm" && ! -e "$OUT/qmp-empty.png" ]]; then
+  pass "报成功但落空也回 PPM，残留 .png 已清掉"
+else
+  bad "报成功但落空也回 PPM，残留 .png 已清掉"
 fi
 stop_fake_qmp
 

@@ -81,7 +81,8 @@ QEMU。不挂独立的后台盯梢进程 —— 盯梢和 QEMU 同进程组，�
 
 假 QMP server（python3 标准库），**不需要 root / QEMU / ISO**。覆盖：握手顺序、
 命令 JSON、键名映射、`type` 逐键、`shot` 的 PNG/PPM 两条路、`wait-for` 的命中与
-超时退出码、`serial-tail`、连接失败的两句人话。退出码 0 = 全过。
+超时退出码、`serial-tail`、连接失败的两句人话、异步事件夹塞（响应前的 event 行
+要跳过，不能当成命令返回值）。退出码 0 = 全过。
 
 ## 6. 相关
 

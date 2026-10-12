@@ -4,7 +4,7 @@
 # 为什么有它：QMP 客户端是「替人敲键、替人看屏」的东西，一次静默的握手顺序错、
 # 键名映射错，都要到真 VM 上才现形。所以把 QMP 线协议在本地先验一遍：
 # 握手、命令 JSON、键名映射、type 逐键、shot 的 PNG/PPM 两条路、
-# wait-for 的命中与超时退出码、连接失败的两句人话。
+# wait-for 的命中与超时退出码、连接失败的两句人话、异步事件夹塞。
 #
 # **不需要 root / QEMU / ISO**。用法：./scripts/mipl-qmp.test.sh
 # 退出码：0 = 全过；1 = 有失败项。
@@ -30,7 +30,9 @@ mkdir -p "$OUT" "$T/empty"
 # ── 假 QMP server ──────────────────────────────────────────────────────
 # 场景（$1）：echo=万事回 return:{}；status=query-status 回 running；
 # shot=按 screendump 的 filename/format 落一个假文件再回 return:{}；
-# nopng=png 回 error、ppm 落假文件；quit=收到 quit 就关连接不回包。
+# nopng=png 回 error、ppm 落假文件；quit=收到 quit 就关连接不回包；
+# events=握手与命令的响应之前各夹一条异步事件（真 QEMU 的 RESUME/SHUTDOWN 这
+# 类行会夹在响应之间，客户端必须跳过它们，不能把 event 行当成命令返回值）。
 # 每个收到的请求原样追加进 $REQ（一行一条 JSON）。
 start_fake_qmp() {
   python3 - "$SOCK" "$REQ" "$1" <<'PY' &
@@ -69,12 +71,19 @@ while True:
                 continue
             exe = req.get("execute")
             if exe == "qmp_capabilities":
+                if scenario == "events":
+                    send(conn, {"event": "RESUME", "data": {}})
                 send(conn, {"return": {}})
                 continue
             if scenario == "quit" and exe == "quit":
                 f.close()      # makefile 拿着 fd 的 dup，不关它客户端等不到 EOF
                 break          # 真 QEMU 的 quit 不回包，直接关连接
             if scenario == "status" and exe == "query-status":
+                send(conn, {"return": {"status": "running", "singlestep": False,
+                                       "running": True}})
+                continue
+            if scenario == "events" and exe == "query-status":
+                send(conn, {"event": "SHUTDOWN", "data": {"guest": False}})
                 send(conn, {"return": {"status": "running", "singlestep": False,
                                        "running": True}})
                 continue
@@ -234,6 +243,10 @@ expect_rc "serial-tail 没有日志时报错" 1 "串口日志不存在" \
 # ── 7. status / quit ──────────────────────────────────────────────────
 start_fake_qmp status
 expect_rc "status 打印 running" 0 "running" \
+  env MIPL_QMP_SOCK="$SOCK" "$CLIENT" status
+stop_fake_qmp
+start_fake_qmp events
+expect_rc "事件夹塞：握手与命令响应前的 event 行被跳过" 0 "running" \
   env MIPL_QMP_SOCK="$SOCK" "$CLIENT" status
 stop_fake_qmp
 start_fake_qmp quit

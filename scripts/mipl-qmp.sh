@@ -90,6 +90,10 @@ have python3 || die "需要 python3（仓库本来就用它跑测试，不算新
 
 # ── QMP 一次事务 ──────────────────────────────────────────────────────
 # 连 socket → 收 greeting → qmp_capabilities → 发 $1 → 打印响应。
+# QMP 是异步协议：事件行（{"event":...}）会夹在命令响应之间 —— 读响应必须
+# 跳过它们，否则会把事件当成这次命令的返回值（评审指出过）。事件行里不会
+# 出现 "return": / "error": 键（字符串值里的引号在 JSON 里是转义的），
+# 以此判据读到第一个响应行为止。
 # 退出码约定（bash 按它翻译成人话）：
 #   0  成功，响应打在 stdout 上（--allow-eof 时 QEMU 不回包也当成功）
 #   2  socket 文件不存在        → 「通道没开」
@@ -132,11 +136,20 @@ try:
     greeting = f.readline()
     if not greeting:
         out(4, "通道没开：%s 没有 QMP greeting（QEMU 已退出？）" % sock_path)
+    # 读到响应行（return/error）为止：中间的 event 行是 QEMU 推的异步事件
+    # （RESUME/SHUTDOWN 这类），不是这次命令的返回值，跳过。
+    def read_response():
+        while True:
+            line = f.readline()
+            if not line:
+                return b""
+            if b'"return":' in line or b'"error":' in line:
+                return line
     s.sendall(b'{"execute":"qmp_capabilities"}\r\n')
-    if not f.readline():
+    if not read_response():
         out(4, "通道没开：握手没回包（QEMU 已退出？）" % sock_path)
     s.sendall(request.encode() + b"\r\n")
-    resp = f.readline()
+    resp = read_response()
 except socket.timeout:
     out(5, "通道没响应：%s（QEMU 卡住了？）" % sock_path)
 finally:
@@ -148,7 +161,7 @@ if not resp:
     out(4, "通道没开：命令没回包（QEMU 已退出？）" % sock_path)
 
 sys.stdout.write(resp.decode())
-sys.exit(6 if b'"error"' in resp else 0)
+sys.exit(6 if b'"error":' in resp else 0)
 PY
 }
 

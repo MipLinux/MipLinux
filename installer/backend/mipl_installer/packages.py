@@ -19,9 +19,8 @@ keyring。前者在 Live 里恰好是对的、在别的机器上就是静默引�
 所以**跑安装器的地方必须是 MipLinux Live 自己**：它的 `/etc/pacman.d/mirrorlist`
 就是我们写的国内源。在别的发行版上直接跑，会悄悄用宿主机的源。
 
-包清单唯一来源（D6 / installer/AGENTS.md）：这里不写死任何包名，只读文件；
-`profile/packages.x86_64` 是 **Live** 的清单，不许拿它当装后系统的清单（P10 未定，
-M1 先读包内 `data/target-packages.x86_64`）。
+包名来自受版本控制的清单（D6 / installer/AGENTS.md）：这里不写死任何包名，只读文件；
+`profile/packages.x86_64` 描述 **Live**，包内 `data/target-packages.x86_64` 描述装后系统。
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ from .util import (
     ensure_dir,
 )
 
-#: M1 的临时目标清单。P10 定案后改指向唯一来源，这个文件届时删掉。
+#: 装后系统的包清单，随安装器一同打包。
 #: 放在**包内**的 data/ 里：它跟着包走 —— 线 E 把 installer/ 拷进 airootfs 时不会漏掉它。
 PACKAGES_FILE_NAME = "target-packages.x86_64"
 PACKAGES_FILE_DIR = "data"
@@ -79,7 +78,7 @@ def read_package_list(path: str) -> list[str]:
         raise InstallerError(
             f"这是 Live 的包清单，不是装后系统的：{path}",
             EXIT_USAGE,
-            hint="两份清单的关系见 P10（docs/knowledge/06-待定事项.md）；M1 用 mipl_installer/data/target-packages.x86_64",
+            hint="Live 与装后系统分别维护清单，规则见 docs/knowledge/04-架构决策.md §3.1；默认读取 mipl_installer/data/target-packages.x86_64",
         )
 
     packages = parse_package_list(resolved.read_text(encoding="utf-8"))

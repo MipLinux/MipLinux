@@ -30,7 +30,7 @@ class TestParsePackageList(unittest.TestCase):
 
 
 class TestReadPackageList(unittest.TestCase):
-    def test_default_file_is_the_m1_list(self):
+    def test_default_file_is_the_installed_system_list(self):
         path = packages.default_packages_file()
         self.assertTrue(path.endswith("mipl_installer/data/target-packages.x86_64"), path)
         listed = packages.read_package_list(path)
@@ -52,7 +52,7 @@ class TestReadPackageList(unittest.TestCase):
             self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
 
     def test_refuses_the_live_list(self):
-        # D6：Live 的清单不是装后系统的清单（两份清单的关系见 P10）
+        # D6：Live 与装后系统分别维护清单，安装器拒绝把 Live 清单当装后清单。
         with self.assertRaises(InstallerError) as ctx:
             packages.read_package_list(str(REPO_ROOT / "profile/packages.x86_64"))
         self.assertIn("Live", str(ctx.exception))

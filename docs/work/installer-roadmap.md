@@ -50,7 +50,7 @@ installer/
 │   ├── events.py            进度事件流（前端只订阅它）
 │   ├── util.py              外部命令与写文件的唯一出口（Runner，可注入替身）
 │   ├── cli.py / __main__.py 无界面入口：`python3 -m mipl_installer`
-│   └── data/                M1 的临时目标包清单（P10 定案后删）
+│   └── data/                装后系统包清单
 ├── frontend/                Electron 前端：只画界面，不实现逻辑
 │   ├── mipl-installer       Python 启动器：算首帧主题与设备缩放 → `exec electron`（由 cage 拉起）
 │   ├── mipl-kiosk           kiosk 启动脚本（过 seatd-launch 起 cage）
@@ -89,7 +89,7 @@ installer/
 | **M0** | 骨架与可测环境 | QEMU 里开机直进安装器界面（还没有真功能） | 界面能起来；安装器崩了能落回 TTY | 无 |
 | **M1** | 逻辑闭环（无界面） | core 单独跑通「空盘 → 能启动的系统」 | 检查点 4 + 检查点 6 | 无 |
 | **M2** | Electron 前端最小可用 | 12 个页面（普通 8 步 / 高级 12 步）把 M1 的流程包起来 | QEMU 里全程图形化装完一次 | M1 |
-| **M3** | 装后系统完整 | 中文、输入法、N 卡、国内源、桌面 | 检查点 5 + 真机 NVIDIA（两次） | P10、P5 |
+| **M3** | 装后系统完整 | 中文、输入法、N 卡、国内源、桌面 | 检查点 5 + 真机 NVIDIA（两次） | P5 |
 | **M4** | 联网与镜像 | 安装器里选网、测速、写源 | QEMU 用户网络 + 真机 Wi-Fi | M2、P11 |
 | **M5** | 发布准备 | 签名、校验和、Release、中文文档 | 一条命令产出可发布产物 | D10、D13 |
 
@@ -110,7 +110,7 @@ installer/
 最高风险的一段，且**与界面无关** —— 先做完它，界面才是「套壳」而不是「猜」。
 
 - `disk.py`：`wipefs` 擦盘 → GPT → ESP 512 MiB + root 剩余（**盘尾留 1 MiB 给 GPT 备份表头**，压上去内核会丢分区）
-- `packages.py`：`pacstrap` 到 `/mnt`；清单先读 `backend/mipl_installer/data/target-packages.x86_64`（临时，P10 落定后改指向唯一来源）
+- `packages.py`：`pacstrap` 到 `/mnt`；清单读 `backend/mipl_installer/data/target-packages.x86_64`
 - `configure.py`：`fstab`（按 UUID）、locale、时区、用户 + sudo、`pacman-key --init/--populate`、mirrorlist 写死国内源、chroot 内 `mkinitcpio -P`
 - `boot.py`：`bootctl install` + loader entry（只写需要显式覆盖的内核参数）+ `efibootmgr`
 
@@ -139,7 +139,7 @@ V3 的 `cage` 12 页实机测试由维护者于 2026-10-08 报告已完成，记
 
 ### M3 · 装后系统完整
 
-目标包清单落位（P10）、`fcitx5` + CJK 字体、`nvidia-open` / `nvidia-utils`、国内源继承、桌面（P5 定案后）。
+装后系统包清单、`fcitx5` + CJK 字体、`nvidia-open` / `nvidia-utils`、国内源继承、桌面（P5 定案后）。
 
 **验收：** 检查点 5，**真机 NVIDIA 验两次**（Live 能亮 / 装完能用）—— 09-19 就写下的纪律，别把第一次通过当成目标达成。
 **产出：** `docs/work/tech/05-装后系统验证.md`
@@ -206,7 +206,6 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 
 | 问题 | 影响 | 何时必须落 |
 |---|---|---|
-| [P10](../knowledge/06-待定事项.md) 目标包清单放哪 | M3 的装包输入 | M3 前 |
 | [P5](../knowledge/06-待定事项.md) niri / Hyprland | M3 的桌面 | M3 前 |
 | [P11](../knowledge/06-待定事项.md) `archlinuxcn` 政策 | 装后系统的 `pacman.conf` | M4 前 |
 | Live 是否裁 `fcitx5*` / `archinstall` | ISO 体积 | M0 |

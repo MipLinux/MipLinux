@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keymap", default="us",
                         help="装后系统的控制台键盘映射，写进 /etc/vconsole.conf（例如 us、be-latin1）")
     parser.add_argument("--packages-file", default=packages.default_packages_file(),
-                        help="装后系统的包清单（默认 installer/target-packages.x86_64）")
+                        help="装后系统的包清单（默认 installer/backend/mipl_installer/data/target-packages.x86_64）")
     parser.add_argument("--pacman-conf", default="/etc/pacman.conf",
                         help="pacman 配置来源（默认运行系统的；Live 里就是出厂设置）")
     parser.add_argument("--mirrorlist", default="/etc/pacman.d/mirrorlist",

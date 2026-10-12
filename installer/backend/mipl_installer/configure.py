@@ -242,8 +242,7 @@ def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
     """把运行系统（Live）的字体 fallback 配置复制进目标。
 
     与 pacman.conf / mirrorlist 同一个哲学：出厂设置在 Live（airootfs），安装器
-    不复制第二份字符串 —— 中文 fallback 只该有一份真相。字体**包**是清单的事
-    （P10 未定），这份配置先就位：等包进来，fallback 立即生效。
+    不复制第二份字符串 —— 中文 fallback 只该有一份真相。字体包由装后系统清单提供。
     """
     source = Path(cfg.fonts_conf)
     if not source.is_file():

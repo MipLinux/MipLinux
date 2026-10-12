@@ -1,0 +1,16 @@
+# remove from airootfs
+# 字体扫描应在构建期完成，避免 Electron 在 Live 首次启动时扫描压缩字体（#53）。
+# 排在 fontconfig 配置钩子之后、zzzz99 清理钩子之前；不留给 Live 中的 pacstrap。
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = fontconfig
+
+[Action]
+Description = Preparing system font caches for the Live image...
+When = PostTransaction
+Depends = fontconfig
+Depends = coreutils
+Depends = findutils
+Exec = /bin/sh /usr/local/lib/mipl-build-font-cache.sh

@@ -31,7 +31,7 @@ from pathlib import Path
 KAPPA = 24389.0 / 27.0
 EPSILON = 216.0 / 24389.0  # (6/29)^3
 
-DOC_REL = "docs/work/tech/08-界面设计方向.md"
+DOC_REL = "docs/work/tech/10-安装器界面视觉方向.md"
 
 # 文档勘误登记（不就地改别人范围内的文档，脚本里显式登记 + 输出提示）：
 # 08 A.3 表第 11 行写的是 `on-inverse-surface` / `inverse-surface`，但 MD3 的 35 角色与
@@ -133,8 +133,8 @@ def strip_code(cell: str) -> str:
 
 
 def parse_a3_pairs(doc_text: str) -> list[tuple[str, str, float, float, float]]:
-    """A.3 表 -> [(fg, bg, 最低要求, dark 文档值, light 文档值)]。"""
-    rows = table_rows(section_lines(doc_text, "### A.3 "))
+    """A.2 表 -> [(fg, bg, 最低要求, dark 文档值, light 文档值)]。"""
+    rows = table_rows(section_lines(doc_text, "### A.2 "))
     pairs = []
     for cells in rows:
         if len(cells) < 4:  # 组合 | 最低要求 | dark | light
@@ -215,7 +215,7 @@ def check_design_tokens(path, ratio_fn):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="V2：对比度断言（08 附录 A.3 的 14 组 × 亮/暗 + tech/10 的设计 token 组）")
+    parser = argparse.ArgumentParser(description="V2：对比度断言（tech/10 附录 A.2 的 14 组 × 亮/暗 + 设计 token 组）")
     here = Path(__file__).resolve()
     app_dir = here.parents[1]  # tools -> app
     parser.add_argument("--color-json", type=Path, default=app_dir / "design" / "color.json",
@@ -236,12 +236,12 @@ def main() -> int:
         return 2
 
     if not pairs:
-        print("❌ 没从 %s 的 A.3 表里解析出任何组合" % doc_path)
+        print("❌ 没从 %s 的 A.2 表里解析出任何组合" % doc_path)
         return 2
 
     dark, light = colors["dark"], colors["light"]
     print("色板   : %s（seed=%s, %d 角色）" % (args.color_json, colors["meta"]["seed"], len(dark)))
-    print("文档   : %s（A.3 表 %d 组）" % (doc_path, len(pairs)))
+    print("文档   : %s（A.2 表 %d 组）" % (doc_path, len(pairs)))
     print()
     print("%-46s %-9s %-22s %-22s" % ("前景 / 背景", "要求", "dark 文档/重算/差", "light 文档/重算/差"))
 
@@ -251,7 +251,7 @@ def main() -> int:
     for fg_doc, bg_doc, minimum, dark_doc, light_doc in pairs:
         fg, bg = DOC_ERRATA.get((fg_doc, bg_doc), (fg_doc, bg_doc))
         if (fg, bg) != (fg_doc, bg_doc):
-            print("ℹ 文档勘误: A.3 写的 `%s` / `%s` 在色板里不存在，按 `%s` / `%s` 计算"
+            print("ℹ 文档勘误: A.2 写的 `%s` / `%s` 在色板里不存在，按 `%s` / `%s` 计算"
                   % (fg_doc, bg_doc, fg, bg))
         row = []
         for mode, palette, documented in (("dark", dark, dark_doc), ("light", light, light_doc)):
@@ -277,8 +277,8 @@ def main() -> int:
     checked += design_checked
 
     print()
-    print("重算组数: %d（08 A.3 的 28 组 + tech/10 设计 token 的 %d 组）" % (checked, design_checked))
-    print("与 A.3 文档值的最大差异: %.3f（仅提示：口径差异照实打印，不判失败）" % max_delta)
+    print("重算组数: %d（文档 A.2 表的 28 组 + 设计 token 的 %d 组）" % (checked, design_checked))
+    print("与文档 A.2 值的最大差异: %.3f（仅提示：口径差异照实打印，不判失败）" % max_delta)
     if failures:
         print("❌ 不合格 %d 组：" % len(failures))
         for item in failures:

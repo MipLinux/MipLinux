@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────
 # mipl-lib · mipl.sh 与 baseline-build.sh 共用的东西
 #
-# 这里只放「两个入口必须给出同一个答案」的东西。目前是两件：
+# 这里只放「两个入口必须给出同一个答案」的东西。目前是三件：
 #
 #   1. 容器健康检查 —— Issue #32。
 #      bootstrap tarball 的条目顺序决定了：`etc/os-release` 在第 630 条，
@@ -14,6 +14,11 @@
 #      健康检查要能自己说出这句话。
 #
 #   2. 输出颜色约定 —— 两个脚本本来各写了一份一样的判断。
+#
+#   3. 调用者身份与属主归还 —— Issue #93。
+#      脚本全程以 root 运行，而 out/ 是发起命令的普通用户的工作区：创建 out/、
+#      容器产物落盘、命令收尾都要把属主还给调用者，sudo 与 pkexec 两种入口
+#      留下的身份线索都要认。身份拿不到时不猜属主，只告警。
 #
 # 由调用方提供（source 之前设好）：
 #   MIPL_LIB_DIR     本文件所在目录
@@ -89,6 +94,123 @@ if [[ -z "${MIPL_CMD:-}" ]]; then
     MIPL_CMD="sudo ${MIPL_LIB_DIR}/mipl.sh"
   fi
 fi
+
+# ── 调用者身份与属主归还（Issue #93）────────────────────────────────
+# mipl.sh / baseline-build.sh 全程以 root 运行，但 out/ 是发起命令的普通用户
+# 的工作区：一次 root 命令之后不该留下「只有 root 能写」的产物。所以脚本创建
+# 的 out/ 与产物，在创建点和命令收尾都要把属主还给调用者。
+#
+# 身份线索按入口不同：
+#   sudo    SUDO_UID / SUDO_GID（另有名字 SUDO_USER，只当文案不当依据）
+#   pkexec  PKEXEC_UID（只有 uid 一个数字；主组要查系统的 passwd）
+#   都没有  真 root 会话（本地 root 登录等）—— 没有「调用者」可归还。
+# uid 与 gid 两个数字都拿到才算有身份：只有一半（比如 PKEXEC_UID 在 passwd 里
+# 查不到）绝不用半个身份去 chown —— 把工作区给错人比不给更糟，所以缺身份时
+# 只告警一次、一个属主都不改。
+
+# 解析结果缓存在进程级全局里（一个进程解析一次，两个入口用同一份答案）：
+MIPL_CALLER_UID="" MIPL_CALLER_GID=""
+MIPL_CALLER_RESOLVED=""    # yes = 解析出身份；no = 查过了，没有
+MIPL_OWNER_WARNED=0        # 身份缺失的告警只打一次，别每条命令刷屏
+
+mipl_caller_identity() {
+  case "${MIPL_CALLER_RESOLVED:-}" in
+    yes) return 0 ;;
+    no)  return 1 ;;
+  esac
+  local uid="" gid="" pw=""
+  if [[ "${SUDO_UID:-}" =~ ^[0-9]+$ && "${SUDO_GID:-}" =~ ^[0-9]+$ ]]; then
+    # sudo 直接给全了：优先用它，不靠 SUDO_USER 那个名字。
+    uid="$SUDO_UID"; gid="$SUDO_GID"
+  elif [[ "${PKEXEC_UID:-}" =~ ^[0-9]+$ ]]; then
+    # pkexec 清空环境、只留 PKEXEC_UID 一个数字：主组查系统的用户数据库。
+    uid="$PKEXEC_UID"
+    pw="$(getent passwd "$uid" 2>/dev/null | head -1 || true)"
+    gid="$(printf '%s\n' "$pw" | cut -d: -f4)"
+  fi
+  if [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]]; then
+    MIPL_CALLER_UID="$uid"; MIPL_CALLER_GID="$gid"
+    MIPL_CALLER_RESOLVED=yes
+    return 0
+  fi
+  MIPL_CALLER_RESOLVED=no
+  return 1
+}
+
+# mipl_restore_owner <路径>… —— 把参数里每个路径（文件或目录本身）的属主还给
+# 调用者。只 chown 给出的 inode，**绝不递归**：已有用户数据的权限一律不碰。
+# 身份缺失时不猜、不改，打一次告警；chown 失败也只告警 —— 归还发生在命令收尾，
+# 不该把一次成功的构建 / 启动反手改成失败退出码（调用点因此不需要 `|| true`）。
+# 试运行（调用方设 DRY_RUN=1）只打印将执行的 chown，不动文件系统。
+mipl_restore_owner() {
+  [[ $# -gt 0 ]] || return 0
+  if ! mipl_caller_identity; then
+    if [[ "${MIPL_OWNER_WARNED:-0}" != 1 ]]; then
+      MIPL_OWNER_WARNED=1
+      warn "拿不到发起命令的用户身份（SUDO_UID / PKEXEC_UID 都没有）——"
+      note "不猜测属主：out/ 里新建的产物保持当前属主，需要时自己 chown 回去。"
+    fi
+    return 0
+  fi
+  local p
+  for p in "$@"; do
+    if [[ ${DRY_RUN:-0} -eq 1 ]]; then
+      # 试运行里文件可能还没被创建（前面的 mkdir / cp 只打印了没执行），照样
+      # 打印 —— 真跑时这条 chown 就是会在创建之后执行。
+      printf '[试运行] chown %s:%s %s\n' "$MIPL_CALLER_UID" "$MIPL_CALLER_GID" "$p"
+      continue
+    fi
+    [[ -e "$p" || -L "$p" ]] || continue
+    # -h：软链只改软链本身 —— 跟着链接走过去会改到 out/ 外面的文件。
+    chown -h -- "$MIPL_CALLER_UID:$MIPL_CALLER_GID" "$p" \
+      || warn "归还属主失败：$p（chown $MIPL_CALLER_UID:$MIPL_CALLER_GID）"
+  done
+  return 0
+}
+
+# mipl_restore_root_owned <路径>… —— 只把「当前属主是 root 或 nobody」的路径还给
+# 调用者。容器（systemd-nspawn -u root）与 QEMU 都以 root 落盘；不同机器上容器
+# 的用户命名空间映射不同，落进 out/ 的文件可能归 root、也可能显示成 nobody ——
+# 两种都是「不是调用者的」。调用者自己的、或其他用户的条目一律不碰。
+mipl_restore_root_owned() {
+  local f uid
+  local -a hits=()
+  for f in "$@"; do
+    if [[ ${DRY_RUN:-0} -eq 1 && ! -e "$f" && ! -L "$f" ]]; then
+      # 试运行：路径还不存在时，真跑会先被创建成 root 再被归还 —— 照打。
+      hits+=("$f")
+      continue
+    fi
+    [[ -e "$f" || -L "$f" ]] || continue
+    uid="$(stat -c %u -- "$f" 2>/dev/null || true)"
+    if [[ "$uid" == 0 || "$uid" == 65534 ]]; then
+      hits+=("$f")
+    fi
+  done
+  [[ ${#hits[@]} -eq 0 ]] || mipl_restore_owner "${hits[@]}"
+}
+
+# mipl_restore_out_dir —— 命令收尾兜底：把 $OUT_DIR 顶层里 root / nobody 属主的
+# **本项目的产物**还给调用者。只认这些名字（与 mipl clean 同一套白名单思路，
+# 拒绝清理脚本对陌生路径的直觉）：ISO、OVMF/目标盘 NVRAM、qcow2 盘、串口日志与
+# socket、构建生成的镜像列表与 resolv.conf。白名单外的条目（含用户在 out/ 里
+# 自己放的东西）一个不碰，也绝不递归进子目录 —— 已有用户数据的权限不变。
+# 目录本身不在这里扫：out/ 这个 inode 由 ensure_out_dir 在创建点归还。
+mipl_restore_out_dir() {
+  [[ ${DRY_RUN:-0} -eq 1 ]] && return 0
+  [[ -d "${OUT_DIR:-}" ]] || return 0
+  local g f
+  local -a hits=()
+  shopt -s nullglob
+  for g in '*.iso' 'OVMF_VARS*.fd' '*.vars.fd' '*.qcow2' \
+           'installer-serial.*' 'mirrorlist' 'resolv.conf'; do
+    for f in "${OUT_DIR}"/$g; do
+      hits+=("$f")
+    done
+  done
+  shopt -u nullglob
+  [[ ${#hits[@]} -eq 0 ]] || mipl_restore_root_owned "${hits[@]}"
+}
 
 # ── bootstrap 缓存的完整性 ────────────────────────────────────────────
 # 这几条是 Issue #32 的另一半：原来「文件在不在」就等于「下好了」，

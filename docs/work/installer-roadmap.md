@@ -1,6 +1,6 @@
 # MipLinux 安装器 · ROADMAP
 
-> 最后更新：2026-10-04（界面层改定 Electron）· 技术栈定案见 [README](../../README.md) 决策表 **D14**
+> 最后更新：2026-10-04 · 技术栈的成篇展开见 [04-架构决策](../../docs/knowledge/04-架构决策.md) 与 [02-环境与工具链](../../docs/knowledge/02-环境与工具链.md)
 >
 > 本文是**计划**：写「接下来做什么、怎么算做完」。已定案的结论在 `docs/knowledge/`，这里不重复推导。
 
@@ -28,13 +28,13 @@
 | 层 | 选型 | 一句话理由 |
 |---|---|---|
 | 语言 | Python 3 | Live 里本来就有（`reflector` 依赖它，与 `archinstall` 无关）；测试与迭代最省事 |
-| 界面 | **Electron（HTML/CSS/JS）+ 官方仓库 `electron44`** | **2026-10-04 维护者改定，覆盖原「Qt Quick(QML) + PySide6」**：QML 书写成本过高；应用本体只有 HTML/CSS/JS，运行时用系统包、不打包、不引 npm 依赖。体积账见 [knowledge/06 P6](../knowledge/06-待定事项.md)（净 ≈ +100 MiB） |
+| 界面 | **Electron（HTML/CSS/JS）+ 官方仓库 `electron44`** | 应用本体只有 HTML/CSS/JS，运行时用系统包、不打包、不引 npm 依赖；iso 体积账见 [tech/11](tech/11-安装器前端实测.md) |
 | kiosk 合成器 | `cage` | 单窗口全屏的 Wayland 合成器，专为这种场景而生；与 P5 的用户桌面（niri / Hyprland）不冲突 |
 | 分区 | `python-pyparted` | 官方 Python 绑定（`archinstall` 同栈）；后续做双系统沿用同一条路 |
 | 联网 | NetworkManager + `nmcli` | Issue #30；安装器直接调命令行，不用自己写 D-Bus |
 | 引导（装后系统） | systemd-boot | UEFI-only 下与 ISO 自身的 `uefi.systemd-boot` 一致，少维护一套 |
 
-**明确排除：** C++/Qt6 + kpmcore（要编译、迭代慢，而它的强项「缩小已有分区」v0.1 用不上）、Rust / Go（静态二进制要自建仓库分发，撞 D5 与 P2 的成本）、纯 TUI（放弃图形体验）、**Qt Quick/QML 前端**（书写成本高，2026-10-04 改用 Electron，理由与实测见 [knowledge/06 P6](../knowledge/06-待定事项.md)）、**GTK4 + WebKitGTK**（同样能写 HTML/CSS/JS，但依赖包数是 Electron 的三倍多，只省约 20 MiB）。
+**明确排除：** C++/Qt6 + kpmcore、Rust / Go、纯 TUI、Qt Quick/QML 前端、GTK4 + WebKitGTK —— 否决理由见 [06 的排除表](../knowledge/06-待定事项.md)（附 B）。
 
 ---
 
@@ -146,7 +146,7 @@ V3 的 `cage` 12 页实机测试由维护者于 2026-10-08 报告已完成，记
 
 ### M4 · 联网与镜像
 
-`nmcli` 选网（有线自动、无线选择）、镜像测速与写入、`reflector` 策略（#18 / #23：**装后系统的 mirrorlist 不能被 reflector 覆盖**）、`archlinuxcn` 政策落定（P11）。
+`nmcli` 选网（有线自动、无线选择）、镜像测速与写入、`reflector` 策略（**装后系统的 mirrorlist 不能被 reflector 覆盖**，防线见 [tech/05](tech/05-装后系统验证.md) §3.1）、`archlinuxcn` 政策落定（P11）。
 
 **验收：** QEMU 用户网络 + 真机 Wi-Fi；装后系统 `pacman -Syu` 仍走国内源。
 
@@ -184,7 +184,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | NVRAM 写不进（主板满 / 只读） | 复制到 `\EFI\BOOT\BOOTX64.EFI`（可移除介质路径），并在界面上说明 |
 | 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续）　✅ 2026-10-04 QEMU 实测（[tech/04 §7.2](tech/04-安装逻辑与实测.md)） |
 | `pacman-key` 没初始化 | 检查点 6 会暴露 —— M1 的 `configure.py` 必须做 `--init` / `--populate` |
-| `reflector` 覆盖 mirrorlist | 装后系统不启用它的 timer（#23 已经踩过） |
+| `reflector` 覆盖 mirrorlist | 装后系统不启用它的 timer（防线见 [tech/05](tech/05-装后系统验证.md) §3.1） |
 | 安装器崩溃 | `OnFailure=` 拉起 `mipl-installer-tty.service`，把 tty1 交回 `getty`（**不自动重启**安装器）；日志看 `journalctl -u mipl-installer` 与 `journalctl -u mipl-installer-tty` |
 | QEMU 无 GPU，Electron 起不来 | `WLR_RENDERER=pixman` + Chromium 自带的 SwiftShader 软渲染（M2 先验） |
 | Electron 以 root 身份起不来 | Chromium 沙箱在 root 下拒绝启动 → 启动器固定加 `--no-sandbox`（整个 Live 就是可信 kiosk 场景，风险写入 D14 条目） |
@@ -220,8 +220,8 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 
 | 文档 | 关系 |
 |---|---|
-| [README 决策表](../../README.md) | D14 是本文的技术栈来源 |
-| [knowledge/06-待定事项.md](../knowledge/06-待定事项.md) | P6 的推导过程与排除项 |
+| [knowledge/02-环境与工具链.md](../knowledge/02-环境与工具链.md) | 技术栈（D14）的成篇展开 |
+| [knowledge/06-待定事项.md](../knowledge/06-待定事项.md) | 附录 A「已定案索引」给结论与去处，附录 B 是已否决的方案 |
 | [knowledge/05-测试方法.md](../knowledge/05-测试方法.md) | 六个检查点与安装器端到端验证 |
 | [knowledge/03-项目结构.md](../knowledge/03-项目结构.md) | `installer/` 在仓库里的位置 |
 | [knowledge/04-架构决策.md](../knowledge/04-架构决策.md) | NVIDIA 与中文两部分的实现依据 |

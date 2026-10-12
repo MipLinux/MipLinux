@@ -119,7 +119,9 @@ if ! grep -q 'BEGIN:progress-table' "$TMP/org-new.md"; then
   ' "$TMP/org-backup.md" >"$TMP/org-new.md"
 fi
 
-if ! grep -q '^| 阶段 | 状态 |' "$TMP/org-new.md"; then
+# 表头判据与同步库 extract_progress_table 同源：只认「阶段」这一列的名字，列宽随意
+# （对齐用的空格不该让写回失败 —— 这里原来写成字面量 `^| 阶段 | 状态 |`）。
+if ! grep -qE '^\|[[:space:]]*阶段[[:space:]]*\|' "$TMP/org-new.md"; then
   echo "错误：替换后的文件里找不到进度表，放弃写入（未改动原文件）。" >&2
   exit 1
 fi

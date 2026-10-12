@@ -1,5 +1,5 @@
 ---
-description: MipLinux 安装器约定：backend 与 frontend 的职责切分、无界面优先的推进顺序、包清单唯一来源、测试怎么跑。
+description: MipLinux 安装器约定：backend 与 frontend 的职责切分、无界面优先的推进顺序、按环境维护包清单、测试怎么跑。
 tags: [installer, python, electron, partitioning, uefi]
 ---
 
@@ -26,7 +26,7 @@ installer/
 │       ├── keymap_view.py 键位映射的解析与 include 展开（键盘页那张图的数据源）
 │       ├── disk.py       分区、候选盘枚举、动手前的守卫
 │       ├── network.py    Live 的网络状态与连网（`nmcli`）
-│       └── data/         随包走的数据（M1 的临时目标包清单）
+│       └── data/         随包走的数据（装后系统包清单）
 ├── frontend/             Electron 前端：只画界面，不实现逻辑
 │   ├── mipl-installer    Live 侧入口（Python 启动器），由 cage 拉起
 │   ├── mipl-kiosk        kiosk 启动脚本（见 #79）
@@ -52,8 +52,9 @@ installer/
   前端只订阅 `events.py` 的事件流、不实现逻辑。**新的前后端耦合层已随 #97 落地**（旧 `frontend/bridge/` 已随 #74 移出）：
   后端一侧是 `--print-*` 只读出口 + `events.JsonReporter` 的 JSON 行，前端一侧是 `main.js` 的 `child_process` 通道与
   `renderer/js/backend.js` 的数据适配；界面侧的接口准据是 [frontend/app/README.md](frontend/app/README.md) §7。
-- **包清单唯一来源。** 不得在代码里另写一份「装什么包」的列表（D6）—— 两边各写各的，就会出现
-  「Live 里中文能打字、装完不能」这类难以定位的问题。装后系统的清单放哪见 [P10](../docs/knowledge/06-待定事项.md)。
+- **包清单按环境分别维护。** `profile/packages.x86_64` 描述 Live，
+  `backend/mipl_installer/data/target-packages.x86_64` 描述装后系统；安装器读取后者，代码里不另写包名（D6）。
+  两份清单分别列出各自环境所需的包。
 - **源码与镜像内容分开放。** 构建脚本把 `installer/` 拷进 `airootfs`，`profile/` 里只放 systemd unit 与入口 ——
   改界面不需要动 `profile/`。
 

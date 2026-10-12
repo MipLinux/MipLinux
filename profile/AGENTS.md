@@ -22,7 +22,7 @@ tags: [profile, archiso, build, branding, pacman]
 
 ## 不要动的两处
 
-- **`packages.x86_64` 里 `# ==> 基础 · 从 releng 继承，勿动 <==` 标记的那一段**别动 —— 极简 Live 要裁哪些包先看 [P4](../docs/knowledge/06-待定事项.md) 里的裁剪清单。
+- **`packages.x86_64` 里 `# ==> 基础 · 从 releng 继承，勿动 <==` 标记的那一段**别动；Live 的完整清单与专属包见 [`packages.x86_64`](packages.x86_64) 的其余分段。
 - **`PROFILE.md`** 记录 releng 的出处与 `archiso` 包元数据，是历史事实，不能改。
 
 ## pacman.conf 的两条既有决策
@@ -42,4 +42,4 @@ tags: [profile, archiso, build, branding, pacman]
 ## 连带影响
 
 这里的改动同时影响 **Live 环境**与**装后系统**（`airootfs/` 会被继承）。
-包清单要不要分成两份见 [P10](../docs/knowledge/06-待定事项.md) —— 它会牵动 D6，改之前先问。
+Live 与装后系统各自维护受版本控制的包清单，规则见 [D6](../docs/knowledge/04-架构决策.md)；修改哪份清单由对应 task issue 划定。

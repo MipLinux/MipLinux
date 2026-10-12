@@ -15,8 +15,8 @@ HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类�
 
 在哪跑：**只有 Live 会真的写**。`airootfs/` 会被装后系统继承，所以装后系统里也有这个
 脚本 —— 但装后系统的换源策略是 Issue #23 / P11 的事，这里用 Live 标记
-（`/run/archiso/bootmnt`）挡住：装后系统上它一声不响地退出（退出码 0，不写任何东西）。
-#23 定案后改的是这个判断，不是另写一份脚本。
+（`/run/archiso/` 下 archiso 留下的挂载点，见 LIVE_MARKERS）挡住：装后系统上它一声不响地
+退出（退出码 0，不写任何东西）。#23 定案后改的是这个判断，不是另写一份脚本。
 
 谁调用：`etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch`（网络变化触发）；也可手动跑。
 
@@ -64,7 +64,11 @@ from pathlib import Path
 OFFICIAL_MIRRORLIST = Path("/etc/pacman.d/mirrorlist")
 CN_MIRRORLIST = Path("/etc/pacman.d/mirrorlist-archlinuxcn")
 DEFAULT_MIRRORLIST_DIR = Path("/etc/pacman.d")
-LIVE_MARKER = Path("/run/archiso/bootmnt")
+# Live 的判据：archiso 在 /run/archiso 下建的东西。**不能只看 bootmnt** —— copytoram 启动
+# （ISO 整个拷进内存）会在拷完后卸载 ISO，`bootmnt` 随之消失；那时守卫会把 Live 误判成装后
+# 系统、一声不响什么都不干（2026-10-12 真机实测：/run/archiso 下只剩 airootfs 与 copytoram）。
+# `airootfs` 是 squashfs 的挂载点，两种启动方式都在，拿它当主判据、bootmnt 只作兼容。
+LIVE_MARKERS = (Path("/run/archiso/airootfs"), Path("/run/archiso/bootmnt"))
 DEFAULT_RUN_DIR = Path("/run")
 
 REFLECTOR = "/usr/bin/reflector"
@@ -437,11 +441,11 @@ def acquire_lock(run_dir: Path) -> int:
 
 
 def is_live() -> bool:
-    """Live 的判据：archiso 把 ISO 挂在这里（见 installer/tests/live-rehearsal.sh）。
+    """Live 的判据：archiso 在 /run/archiso 下留下的东西（见上面的 LIVE_MARKERS）。
 
-    装后系统里没有它 —— 于是这个脚本在装后系统上什么都不做（那是 Issue #23 的范围）。
+    装后系统里没有它们 —— 于是这个脚本在装后系统上什么都不做（那是 Issue #23 的范围）。
     """
-    return LIVE_MARKER.exists()
+    return any(path.exists() for path in LIVE_MARKERS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -482,7 +486,8 @@ def main(argv: list[str]) -> int:
         + ("[dry-run]" if args.dry_run else ""))
 
     if not args.dry_run and not args.force and not is_live():
-        log(f"不是 Live（{LIVE_MARKER} 不存在），什么都不做 —— 装后系统的换源策略见 Issue #23")
+        log("不是 Live（" + "、".join(str(p) for p in LIVE_MARKERS)
+            + " 都不存在），什么都不做 —— 装后系统的换源策略见 Issue #23")
         return 0
 
     try:

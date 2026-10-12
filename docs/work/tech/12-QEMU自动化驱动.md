@@ -29,7 +29,7 @@ sudo env MIPL_QEMU_EXTRA="-display none" ./scripts/mipl.sh qemu --qmp --serial f
 
 | 动作 | 作用 | 退出码 |
 |---|---|---|
-| `status` | `query-status`：VM 是否在跑 | 0 在跑；连不上非 0 |
+| `status` | `query-status`：VM 是否在跑 | 0 在跑；连不上或解析不出状态非 0 |
 | `key <组合>` | `send-key` 组合键（`ctrl-alt-f2`、`ret`、`down`、`shift-f5` …） | 0 发出 |
 | `type <ASCII>` | 逐键敲入文本，大写与常用标点自动带 shift（US 布局） | 0 敲完 |
 | `shot [文件]` | `screendump`。PNG 优先，QEMU 没编 PNG 时自动回落 PPM 并**打印实际格式**；默认 `out/qmp-shot.png` | 0 落盘 |
@@ -72,6 +72,7 @@ QEMU。不挂独立的后台盯梢进程 —— 盯梢和 QEMU 同进程组，�
 | `wait-for` 超时 | 非 0 退出并打印日志尾部：先看串口走到哪一步。日志不存在 = 没带 `--serial file` |
 | 截图纯黑 | **别当失败**：cage 用 KMS 接手显示后 `screendump` 就是纯黑（[tech/04](04-安装逻辑与实测.md) §4.4 实测）。截图判据只用文本控制台（引导消息、登录提示），不要用黑屏当「窗口没出来」的证据 |
 | QMP 报错 `<JSON>` | 命令被 QEMU 拒了（比如键名拼错会先被客户端拦住），看 `desc` 字段 |
+| `状态解析失败` | QMP 响应里没有 status 字段（如空 `return:{}`）—— 不当成功，退出码非 0；看报错里带的响应 JSON |
 
 ## 5. 离线回归
 
@@ -82,8 +83,8 @@ QEMU。不挂独立的后台盯梢进程 —— 盯梢和 QEMU 同进程组，�
 假 QMP server（python3 标准库），**不需要 root / QEMU / ISO**。覆盖：握手顺序、
 命令 JSON、键名映射、`type` 逐键、`shot` 的 PNG/PPM 两条路（残留文件不冒名、
 报成功但落空也回落）、`wait-for` 的命中与超时退出码、`serial-tail`、连接失败的
-两句人话、异步事件夹塞（响应前的 event 行要跳过，不能当成命令返回值）。退出码
-0 = 全过。
+两句人话、异步事件夹塞（响应前的 event 行要跳过，不能当成命令返回值）、空
+`return:{}` 不算成功（解析不出状态非 0）。退出码 0 = 全过。
 
 ## 6. 相关
 

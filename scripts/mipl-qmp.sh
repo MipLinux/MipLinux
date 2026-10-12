@@ -383,7 +383,11 @@ cmd_status() {
   run_qmp '{"execute":"query-status"}' || fail_qmp
   local st human
   st="$(printf '%s' "$QMP_LAST_RESP" | sed -n 's/.*"status": *"\([a-z-]*\)".*/\1/p')"
-  case "${st:-}" in
+  # 没有 status 字段 = QMP 回了没料到的东西（如空 return:{}）。状态是这条
+  # 命令的主要判据，解析不出来必须非 0 —— 「解析失败」还以 0 收场，回归
+  # 驱动会拿它当「VM 在跑」过（评审指出过）。
+  [[ -n "$st" ]] || die "状态解析失败：QMP 响应里没有 status 字段：${QMP_LAST_RESP}"
+  case "$st" in
     running)   human="运行中" ;;
     paused)    human="已暂停" ;;
     prelaunch) human="还没启动" ;;
@@ -391,7 +395,7 @@ cmd_status() {
     *)         human="未知状态" ;;
   esac
   info "QMP 通道：${QMP_SOCK}"
-  ok "状态：${st:-解析失败}（${human}）"
+  ok "状态：${st}（${human}）"
 }
 
 cmd_quit() {

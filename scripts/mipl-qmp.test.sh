@@ -5,7 +5,7 @@
 # 键名映射错，都要到真 VM 上才现形。所以把 QMP 线协议在本地先验一遍：
 # 握手、命令 JSON、键名映射、type 逐键、shot 的 PNG/PPM 两条路（残留文件
 # 不冒名、报成功但落空也回落）、wait-for 的命中与超时退出码、连接失败的
-# 两句人话、异步事件夹塞。
+# 两句人话、异步事件夹塞、空 return:{} 不算成功。
 #
 # **不需要 root / QEMU / ISO**。用法：./scripts/mipl-qmp.test.sh
 # 退出码：0 = 全过；1 = 有失败项。
@@ -156,11 +156,18 @@ expect_rc() { # $1=用例名 $2=期望退出码 $3=输出必须包含的片段�
 }
 
 # ── 1. 握手与命令 JSON ────────────────────────────────────────────────
-start_fake_qmp echo
+start_fake_qmp status
 expect_rc "status：握手先于动作" 0 "QMP 通道" \
   env MIPL_QMP_SOCK="$SOCK" "$CLIENT" status
 assert_request "第 1 行是 qmp_capabilities" 1 '{"execute":"qmp_capabilities"}'
 assert_request "第 2 行是 query-status" 2 '{"execute":"query-status"}'
+stop_fake_qmp
+
+# QMP 回了空 return:{}（没有 status 字段）时，客户端不能「解析失败」还以 0
+# 收场：状态是主要判据，解析不出来必须非 0（评审指出过）。
+start_fake_qmp echo
+expect_rc "空 return:{} 不算成功：解析失败退出码非 0" 1 "没有 status 字段" \
+  env MIPL_QMP_SOCK="$SOCK" "$CLIENT" status
 stop_fake_qmp
 
 # ── 2. 键名映射 ───────────────────────────────────────────────────────

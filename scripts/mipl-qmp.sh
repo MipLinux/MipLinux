@@ -17,25 +17,28 @@
 #       MIPL_QMP_SOCK 可顶掉。
 #
 # **普通用户连得上，是这条工作的硬要求** —— 用它的大头是 AI Agent，
-# 提权那条路它们走不了。因此：
+# 提权那条路它们走不了。但「连得上」的边界是**启动者一人**：QMP 是高权限
+# 管理接口（能操作宿主机文件、触发外部进程），权限近似等于 QEMU 进程权限，
+# 所以授权只能是「谁起的 VM 谁连」，不是「谁都连」。因此：
 #
 #   1. 本脚本自己不提权。连不上就打印「通道没开」或「这条要用 sudo」，
 #      退出码非 0 —— 拒绝 sudo 是行为，不是提示语。
 #
-#   2. socket 权限为什么走「mipl.sh 在 socket 出现后 chmod 0666」，
+#   2. socket 权限为什么走「mipl.sh 在 socket 出现后 chown 给启动者」，
 #      而不走 tcp:127.0.0.1:<port>（两条候选的选型记录）：
 #      实测 QEMU 11 的 -qmp 与 -chardev socket 都不收 mode=（报
 #      Invalid parameter 'mode'），而 root 起的 QEMU 出的 unix socket
 #      默认 0755、非属主连不上 —— 所以两条路都需要「绕」。
-#      选 chmod 0666：通道地址是 out/ 里的**固定路径**，客户端与 mipl.sh
-#      只说一个名字就对齐；tcp 要另约端口 —— 固定端口两台 VM 会撞车，
-#      动态端口又得多一份「端口写在哪」的协议。安全性两条等价：都是
-#      本机可达（tcp 绑 127.0.0.1、socket 落在 out/），暴露面都是
-#      「这台机器上的任何用户都能操作这台测试 VM」，而这正是工具要的。
-#      chmod 由 mipl.sh 在**主流程**里做：QEMU 放后台、等 socket 一出现
-#      （bind 完成）就 chmod 0666、再 wait 回前台，不挂独立的后台盯梢进程 ——
-#      盯梢和 QEMU 同进程组，用户 Ctrl+Z 拿回终端时整个组一起停，盯梢会被
-#      冻在 chmod 之前（Issue #125 实测过这种死法：socket 一直是 0755）。
+#      选 unix socket + chown 给启动者：通道地址是 out/ 里的**固定路径**，
+#      客户端与 mipl.sh 只说一个名字就对齐；tcp 要另约端口 —— 固定端口
+#      两台 VM 会撞车，动态端口又得多一份「端口写在哪」的协议。安全性
+#      这条路更强：tcp 绑 127.0.0.1 时任何本地用户都能连，chown 后只有
+#      启动者（+ root）能连。
+#      chown 由 mipl.sh 在**主流程**里做：QEMU 放后台、等 socket 一出现
+#      （bind 完成）就 chown 给启动者、再 wait 回前台，不挂独立的后台
+#      盯梢进程 —— 盯梢和 QEMU 同进程组，用户 Ctrl+Z 拿回终端时整个组
+#      一起停，盯梢会被冻在 chown 之前（Issue #125 实测过这种死法：
+#      socket 一直是 0755）。
 #
 #   3. 只用 python3 标准库做 socket I/O —— 宿主机依赖不新增：socat 不在
 #      mipl.sh deps 清单里，不能拿来当硬依赖（Issue #125 的约束）。
@@ -57,7 +60,16 @@ mipl_qmp_self_dir() {
 }
 
 SCRIPT_DIR="$(mipl_qmp_self_dir)"
-REPO_ROOT="${MIPL_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+# 仓库根目录推导失败 = 当前用户进不去仓库（家目录 700 时别的用户跑本脚本
+# 就死在这里）。后面一切路径（socket、日志）都从它推，无意义 —— 别让
+# set -e 甩一行裸 cd 报错，用和下面 mipl-lib.sh 同款的人话收场。
+REPO_ROOT="${MIPL_ROOT:-}"
+if [[ -z "$REPO_ROOT" ]]; then
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)" || {
+    printf '[错误] 进不去仓库目录：%s —— 当前用户没有访问权限（QMP socket 只授权给了启动者）\n' "${SCRIPT_DIR}" >&2
+    exit 1
+  }
+fi
 # 与 mipl.sh 同一套产物目录约定：MIPL_OUT_DIR 顶掉后，串口日志、默认截图、
 # 默认 socket 都跟着走，两边才不会各说各的路径。
 OUT_DIR="${MIPL_OUT_DIR:-${REPO_ROOT}/out}"

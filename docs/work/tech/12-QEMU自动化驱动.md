@@ -45,19 +45,22 @@ sudo env MIPL_QEMU_EXTRA="-display none" ./scripts/mipl.sh qemu --qmp --serial f
 实测 QEMU 11：`-qmp` 与 `-chardev socket` **都不收 `mode=`**（报
 `Invalid parameter 'mode'`），unix socket 默认 0755 —— root 起的 QEMU 出的
 socket 非属主连不上。两条候选里选了 **unix socket + mipl.sh 在 socket 出现后
-chmod 0666**，不选 `tcp:127.0.0.1:<port>`：
+chown 给启动者**，不选 `tcp:127.0.0.1:<port>`：
 
 - 通道地址是 out/ 里的**固定路径**，客户端与 mipl.sh 只说一个名字就对齐；
   tcp 要另约端口 —— 固定端口两台 VM 会撞车，动态端口又得多一份「端口写在哪」的协议。
-- 暴露面两条路等价：都是本机可达（tcp 绑回环、socket 落在 out/），
-  都是「这台机器上的任何用户都能操作这台测试 VM」—— 这正是这个工具要的。
+- 暴露面更小：tcp 绑回环时任何本地用户都能连；chown 后只有启动者（+ root）能连。
+  QMP 是高权限接口（可操作宿主机文件、触发外部进程），权限近似等于 QEMU 进程
+  权限，0666 等于把 root 的 QMP 开放给机器上的所有本地用户，所以只授权启动者。
 
 `mipl.sh` 把 QEMU 放到后台、等 socket 一出现（bind 完成）就在**主流程**里
-`chmod 0666`，再 `wait` 回前台：权限在 `connect()` 时按文件当前 mode 判，对已绑定的
-socket 立即生效，不需要重启 QEMU。不挂独立的后台盯梢进程 —— 盯梢和 QEMU 同进程组，
-用户 Ctrl+Z 拿回终端时整个组一起停，盯梢会被冻在 chmod 之前（#125 实测过这种死法）。
-完整选型记录在 `scripts/mipl-qmp.sh` 头部注释。客户端自己**不提权**：连不上就打印
-「通道没开」或「这条要用 sudo」，退出码非 0。
+`chown` 给启动者（sudo 的 `SUDO_USER` / pkexec 的 `PKEXEC_UID`；直接以 root
+起的 VM 两者皆空，socket 保持 0755、只有 root 能连）、再 `wait` 回前台：权限在
+`connect()` 时按文件当前 owner/mode 判，对已绑定的 socket 立即生效，不需要重启
+QEMU。不挂独立的后台盯梢进程 —— 盯梢和 QEMU 同进程组，用户 Ctrl+Z 拿回终端时
+整个组一起停，盯梢会被冻在 chown 之前（#125 实测过这种死法）。完整选型记录在
+`scripts/mipl-qmp.sh` 头部注释。客户端自己**不提权**：连不上就打印「通道没开」
+或「这条要用 sudo」，退出码非 0。
 
 ## 4. 失败时看哪里
 

@@ -100,9 +100,9 @@ PROFILE_INNER="/profile"
 VARS_DST="${OUT_DIR}/OVMF_VARS.fd"
 # QMP 通道（回归驱动入口，scripts/mipl-qmp.sh 走这里）：默认 out/qemu-qmp.sock，
 # 客户端认同一个路径，两边只说一个名字就对齐。为什么是 unix socket 固定路径
-# + 事后 chmod 0666、而不是 tcp 端口：QEMU 11 的 -qmp / -chardev socket 都不收
-# mode=（实测 Invalid parameter 'mode'），unix socket 默认 0755、非属主连不上；
-# 选型理由完整写在 scripts/mipl-qmp.sh 头部注释。
+# + 事后 chown 给启动者、而不是 tcp 端口：QEMU 11 的 -qmp / -chardev socket
+# 都不收 mode=（实测 Invalid parameter 'mode'），unix socket 默认 0755、非属主
+# 连不上；选型理由完整写在 scripts/mipl-qmp.sh 头部注释。
 QMP_SOCK="${MIPL_QMP_SOCK:-${OUT_DIR}/qemu-qmp.sock}"
 # 目标盘（A5 的 mipl target）：给线 B 装系统用。默认建在 out/ 里 —— 整个 out/
 # 都被 .gitignore 忽略，盘和它的派生文件都不会误进 git。
@@ -739,9 +739,9 @@ cmd_qemu() {
   fi
   if [[ $want_qmp -eq 1 ]]; then
     info "QMP 通道：${QMP_SOCK}"
-    note "  VM 起来后，普通用户一条命令一个动作驱动它： ./scripts/mipl-qmp.sh status"
+    note "  VM 起来后，启动者一条命令一个动作驱动它： ./scripts/mipl-qmp.sh status"
     if [[ $DRY_RUN -eq 1 ]]; then
-      note "  真跑时：QEMU 起来后脚本会把 socket chmod 0666（QEMU 11 不收 mode=，默认 0755 普通用户连不上）"
+      note "  真跑时：QEMU 起来后脚本会把 socket 只授权给启动者（QEMU 11 不收 mode=，默认 0755 其余用户连不上）"
     fi
   fi
   # 参数逐条放进数组：file= 永远和它所属的 -drive 在同一个元素里，
@@ -786,7 +786,7 @@ cmd_qemu() {
   # 选 unix socket 固定路径、不选 tcp:127.0.0.1 的理由见 mipl-qmp.sh 头部注释；
   # 这里只记 QEMU 侧的事实：QEMU 11 的 -qmp 与 -chardev socket 都不收 mode=
   # （实测 Invalid parameter 'mode'），root 起的 QEMU 出 socket 默认 0755 ——
-  # 所以通道参数这里开，权限放开交给启动前挂的盯梢（见下方 chmod 0666）。
+  # 所以通道参数这里开，放权给谁交给启动后的循环（见下方 chown 给启动者）。
   if [[ $want_qmp -eq 1 ]]; then
     q+=(-qmp "unix:${QMP_SOCK},server=on,wait=off")
   fi
@@ -809,23 +809,42 @@ cmd_qemu() {
     return 0
   fi
 
-  # QMP socket 由 root 的 QEMU 创建，默认 0755 —— 普通用户连不上，而 QEMU 11
-  # 不收 mode= 参数（-qmp 与 -chardev socket 两条路都报 Invalid parameter
-  # 'mode'，实测）。所以把 QEMU 放到后台：等 socket 一出现（bind 完成）就
-  # chmod 0666，再 wait 回前台 —— 权限在 connect() 时按文件当前 mode 判，对已
-  # 绑定的 socket 立即生效，不需要等 QEMU 重启。
-  # 为什么 chmod 要在主流程里做、而不是挂一个独立的后台盯梢进程：盯梢和 QEMU
-  # 同进程组，用户 Ctrl+Z 拿回终端时整个组一起停 —— 盯梢若还没跑到 chmod 就被
+  # QMP socket 由 root 的 QEMU 创建，默认 0755 —— 启动者（普通用户）连不上，而
+  # QEMU 11 不收 mode= 参数（-qmp 与 -chardev socket 两条路都报 Invalid parameter
+  # 'mode'，实测）。所以把 QEMU 放到后台：等 socket 一出现（bind 完成）就把它
+  # 只授权给启动者，再 wait 回前台 —— 权限在 connect() 时按文件当前属主与
+  # mode 判，对已绑定的 socket 立即生效，不需要等 QEMU 重启。
+  # 为什么是 chown 给启动者、而不是 chmod 0666：QMP 是高权限管理接口（可操作
+  # 宿主机文件、触发外部进程），权限近似等于 QEMU 进程权限；0666 等于把 root
+  # 的 QMP 接口开放给这台机器上的所有本地用户。启动者 = sudo 的 SUDO_USER、
+  # pkexec 的 PKEXEC_UID；直接以 root 起 VM 时两者皆空，socket 保持 0755 ——
+  # 没有普通用户启动者，就没有放权对象。
+  # 为什么 chown 要在主流程里做、而不是挂一个独立的后台盯梢进程：盯梢和 QEMU
+  # 同进程组，用户 Ctrl+Z 拿回终端时整个组一起停 —— 盯梢若还没跑到 chown 就被
   # 冻住，socket 会一直是 0755（Issue #125 实测过这种死法）。主流程里的
-  # 循环要么在用户能操作之前就 chmod 完，要么继续时接着做，时序是结构上确定的。
+  # 循环要么在用户能操作之前就 chown 完，要么继续时接着做，时序是结构上确定的。
   # 选这条路而不是 tcp 端口的理由写在 scripts/mipl-qmp.sh 头部注释。
   if [[ $want_qmp -eq 1 ]]; then
+    # 启动者是谁：sudo 保留 SUDO_USER；pkexec 清环境但设 PKEXEC_UID（数字）。
+    local qmp_uid=""
+    if [[ -n "${SUDO_USER:-}" ]]; then
+      qmp_uid="$(id -u -- "$SUDO_USER" 2>/dev/null || true)"
+    elif [[ -n "${PKEXEC_UID:-}" ]]; then
+      qmp_uid="$PKEXEC_UID"
+    fi
     run "${q[@]}" &
     local qemu_pid=$! i
     for i in $(seq 1 300); do
       if [[ -S "$QMP_SOCK" ]]; then
-        chmod 0666 "$QMP_SOCK" || warn "QMP socket chmod 0666 失败：$QMP_SOCK"
-        ok "QMP socket 已放宽：${QMP_SOCK}（0666，普通用户可连）"
+        if [[ -n "$qmp_uid" ]]; then
+          if chown "$qmp_uid" "$QMP_SOCK" && chmod 0700 "$QMP_SOCK"; then
+            ok "QMP socket 已只授权启动者：${QMP_SOCK}（uid ${qmp_uid}）"
+          else
+            warn "QMP socket 授权给启动者失败，保持 0755（只有 root 能连）：$QMP_SOCK"
+          fi
+        else
+          note "QMP socket 保持 0755：没有普通用户启动者（SUDO_USER / PKEXEC_UID 皆空），只有 root 能连"
+        fi
         break
       fi
       kill -0 "$qemu_pid" 2>/dev/null || break   # QEMU 已经死了就别空等 30 秒
@@ -1381,8 +1400,8 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                         （要引导项里的 console=ttyS0，M0 已加）。
       --vga virtio|std  显卡。virtio 提供 KMS，kiosk（cage）测试用它；
                         不给 = qemu 默认（std），老行为不变
-      --qmp            开 QMP 通道：out/qemu-qmp.sock（脚本会把 socket 放宽到
-                        0666，普通用户可连）。VM 起来后驱动它：
+      --qmp            开 QMP 通道：out/qemu-qmp.sock（脚本把 socket 只授权
+                        给启动者）。VM 起来后驱动它：
                           ./scripts/mipl-qmp.sh status
                         （key/type/shot/wait-for 等动作见该脚本 --help）
   target [--name F] [--size 40G] [--force]
@@ -1394,7 +1413,7 @@ mipl ${MIPL_VERSION} · MipLinux 项目操作台
                       然后以 -vga virtio 启动 Live（cage  KMS，std VGA 起不来）。
      --serial file     串口日志落 out/installer-serial.log（默认）
      --serial console  串口换成可交互 socket（socat 连上即root shell）
-     --qmp             开 QMP 通道（同 qemu --qmp：普通用户可连 out/qemu-qmp.sock）
+     --qmp             开 QMP 通道（同 qemu --qmp：只授权启动者）
      --boot c          从盘启动验安装结果（同 qemu 语义）
 
   vars                只复制 OVMF 变量文件（out/OVMF_VARS.fd），不启动 QEMU。

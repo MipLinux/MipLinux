@@ -31,14 +31,13 @@ sudo ./scripts/mipl.sh shell
 > 注意 `--bind` 的左边**不要写死成自己的家目录** —— 两个人的仓库路径不一样
 > （Issue #7 里的文档就写死了 `~/Code/Projects/MipLinux`）。
 
-进入容器后构建（**原版 releng**，也就是「基线」）：
+构建一律走脚本（**别在容器里手敲 `mkarchiso`** —— 工作目录、profile 挂载、清空时机都由脚本定）：
 
 ```bash
-mkarchiso -v -w /var/tmp/mipl-work -o /out /usr/share/archiso/configs/releng
+sudo ./scripts/mipl.sh build --baseline    # 原版 releng，也就是「基线」
 ```
 
-> 也可以不进容器，直接让脚本一条龙跑完（下载 bootstrap → 解压 → 构建）。
-> **不给参数时用的是仓库里的 `profile/`**：
+> 一条龙跑完（下载 bootstrap → 解压 → 构建）；**不给 `--baseline` 时用的是仓库里的 `profile/`**：
 >
 > ```bash
 > sudo ./scripts/mipl.sh build                              # profile = 仓库 profile/
@@ -96,16 +95,9 @@ mkarchiso -v -w /var/tmp/mipl-work -o /out /usr/share/archiso/configs/releng
 
 > **不要加 `-b`。** 原因见 [01-容器环境搭建.md](01-容器环境搭建.md) 步骤 3 —— bootstrap 的 root 账户没有密码，加 `-b` 会停在登录提示符且无法登录。
 
-**参数说明：**
-
-| 参数 | 作用 |
-|---|---|
-| `-v` | 详细输出。**基线构建务必加上**，否则出错时看不到细节 |
-| `-w <dir>` | 工作目录。用 `/var/tmp/mipl-work`（**别用 `/tmp`，容器里是内存盘**）。**手工重建前先删掉它**（脚本一条龙时会自动清） |
-| `-o <dir>` | 输出目录。这里指向绑定的 `/out` |
-| 最后一个参数 | profile 路径。容器里就是 `/profile`（仓库那份）或 `/usr/share/archiso/configs/releng`（基线） |
-
-**预期耗时：** 几分钟（取决于网络速度）。这一步会实际下载 releng 的 129 个包。
+要看脚本拼了什么，用 `sudo ./scripts/mipl.sh -n build`。三个容易踩的点它都处理了：
+工作目录用容器内的 `/var/tmp/mipl-work`（**别用 `/tmp`** —— 容器里那是内存盘），
+profile 从仓库只读挂进 `/profile`，输出落宿主机的 `out/`。
 
 **预期输出（末尾）：**
 
@@ -249,79 +241,20 @@ sudo ./scripts/mipl.sh vars
 
 ### C.1 启动命令（UEFI）
 
-```bash
-sudo ./scripts/mipl.sh qemu
-```
-
-不给参数就用 `out/` 里**最新的**那个 ISO；也可以指定：
+测试一律走脚本：
 
 ```bash
-sudo ./scripts/mipl.sh qemu out/miplinux-*.iso
-sudo ./scripts/mipl.sh -n qemu        # 只看它准备执行什么，不真的启动
+sudo ./scripts/mipl.sh qemu [ISO] [--disk FILE] [--boot d|c]
 ```
 
-脚本实际拼出来的命令长这样 —— **读一遍，出问题时才知道去哪查**：
+KVM、内存、vCPU、两块 pflash、`-cdrom`、引导顺序、用户模式网络全部由脚本按本机探测结果拼装；
+要看它到底拼了什么、或临时加参数（`MIPL_MEM` / `MIPL_SMP` / `MIPL_QEMU_EXTRA`），见本节 C.3 与 C.4。
 
-```bash
-qemu-system-x86_64 -name 'MipLinux 测试' -m 4096 -smp 4 -enable-kvm \
-  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
-  -drive if=pflash,format=raw,file=<仓库>/out/OVMF_VARS.fd \
-  -cdrom <仓库>/out/miplinux-<日期>-x86_64.iso \
-  -boot order=d \
-  -netdev user,id=n0 -device virtio-net,netdev=n0
-```
+### C.2 不要用 `run_archiso`
 
-> ### ⚠️ `file=` 必须和它所属的 `-drive` 在同一行
->
-> 下面这种写法是**错的**，而且错得很隐蔽（看着像正常的续行）：
->
-> ```bash
-> -drive if=pflash,format=raw,readonly=on \
->   -file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \      # ← 错误示范
-> ```
->
-> 行尾反斜杠只是把两行接成一条命令，QEMU 收到的是**两个独立参数**：
-> `-drive if=pflash,...` 和 `-file=...`。而 QEMU 根本没有 `-file` 这个选项，
-> 于是直接报：
->
-> ```
-> qemu-system-x86_64: -file=/usr/share/edk2/x64/OVMF_CODE.4m.fd: invalid option
-> ```
->
-> 这是 Issue #8 记录的实际故障。`mipl` 用数组逐条拼参数，从结构上不可能拆开。
+`archiso` 自带一个 `run_archiso` 辅助脚本，它**封装不了本项目要测的东西**：不挂目标盘、不区分 NVRAM、
+没有 `--boot c`，测不了装后系统。用它等于给自己开一条没人维护的路径 —— 测试一律走 `mipl.sh qemu` / `installer`。
 
-**参数说明：**
-
-| 参数 | 作用 |
-|---|---|
-| `-enable-kvm` | 硬件加速（本机 `/dev/kvm` 可用）。没有 kvm 时脚本会去掉它并提醒 |
-| `-m 4096` | 4 GB 内存，Live 环境足够（可用 `MIPL_MEM` 改） |
-| `-smp 4` | 4 个 vCPU。Live 引导 1 个也够，但进系统后敲命令、以后挂盘装系统（A5）时多点省时间（可用 `MIPL_SMP` 改） |
-| 第一个 `if=pflash` | UEFI 固件本体，**只读** |
-| 第二个 `if=pflash` | UEFI 变量存储，**可写** ← 就是 `OVMF_VARS.fd` |
-| `-cdrom` | 待测 ISO |
-| `-boot order=d` | 优先从光驱启动 |
-| `-netdev user` | 用户模式网络，Live 环境可上网 |
-
-### C.2 更省事的替代方案
-
-`archiso` 自带 `run_archiso` 脚本，封装了常用参数：
-
-```bash
-sudo pacman -S archiso      # 宿主机安装，仅为拿这个脚本
-run_archiso -u -i out/miplinux-*.iso
-```
-
-`-u` 表示 UEFI。
-
-**但推荐用 `mipl qemu`：**
-
-| | `run_archiso` | `mipl qemu` |
-|---|---|---|
-| 宿主机要不要装 archiso | 要 | **不要** |
-| Fedora 上能不能用 | 不能（没有这个包） | 能 |
-| 会不会自动刷新 `OVMF_VARS` | 不会 | **会**（这正是最容易忘的一步） |
-| 固件路径 | 自己找 | 探测 |
 
 ### C.3 无显示器时怎么验证（可选）
 

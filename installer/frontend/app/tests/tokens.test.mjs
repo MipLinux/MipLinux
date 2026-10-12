@@ -1,7 +1,7 @@
 /**
  * 设计 token：品牌色板（palette.css ↔ color.json）与设计 token（tokens.css）的静态检查。
  *
- * 三方里的第三方（tech/08 附录 A.2 的文档表）由 `tools/check-tokens.py` 比，
+ * 三方里的第三方（tech/10 附录 A.1 的文档表）由 `tools/check-tokens.py` 比，
  * 这里只保证「生成物没被手改」与「设计 token 该有的都有」。
  */
 

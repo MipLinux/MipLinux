@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """V1 · token 三方比对（Electron 版）
 
-    color.json（品牌色板快照） ↔ palette.css（生成物） ↔ docs/work/tech/08 附录 A.2（文档表）
+    color.json（品牌色板快照） ↔ palette.css（生成物） ↔ docs/work/tech/10 附录 A.1（文档表）
 
 外加两条设计 token 的结构断言（tech/10 §4 / §5）：
   - 圆角只用规定的五档、`--ui-scale` 有默认值、动效时长四档齐全、有 reduced-motion 降级；
@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-DOC_REL = "docs/work/tech/08-界面设计方向.md"
+DOC_REL = "docs/work/tech/10-安装器界面视觉方向.md"
 TOKEN_COUNT = 35
 
 #: tech/10 §4 锁死的圆角档位（多一档少一档都算漂）
@@ -78,11 +78,11 @@ class Checker:
 # ---------------------------------------------------------------- 解析
 
 def doc_palette(doc: str) -> dict[str, tuple[str, str]]:
-    """08 附录 A.2 的色板表 → {角色: (dark, light)}。"""
-    start = doc.find("### A.2")
-    end = doc.find("### A.3", start if start >= 0 else 0)
+    """tech/10 附录 A.1 的色板表 → {角色: (dark, light)}。"""
+    start = doc.find("### A.1")
+    end = doc.find("### A.2", start if start >= 0 else 0)
     if start < 0 or end < 0:
-        raise ValueError("08 文档里找不到 A.2 / A.3 小节")
+        raise ValueError("tech/10 里找不到 A.1 / A.2 小节")
     table: dict[str, tuple[str, str]] = {}
     for line in doc[start:end].splitlines():
         match = re.match(
@@ -146,16 +146,16 @@ def main() -> int:
     print(f"color.json : {args.color_json}")
     print(f"palette.css: {args.palette_css}")
     print(f"tokens.css : {args.tokens_css}")
-    print(f"08 文档    : {doc_path}")
+    print(f"tech/10    : {doc_path}")
     print()
 
-    # ---- 1. 色板三方：color.json ↔ palette.css ↔ 08 A.2
-    print("== 品牌色板：color.json ↔ palette.css ↔ 08 附录 A.2 ==")
+    # ---- 1. 色板三方：color.json ↔ palette.css ↔ tech/10 A.1
+    print("== 品牌色板：color.json ↔ palette.css ↔ tech/10 附录 A.1 ==")
     documented = doc_palette(doc)
     dark, light = snapshot.get("dark", {}), snapshot.get("light", {})
     c.ok(f"color.json 是 {TOKEN_COUNT} 个角色（实际 {len(dark)}）", len(dark) == TOKEN_COUNT)
     c.eq("亮/暗角色集一致", sorted(dark), sorted(light))
-    c.ok(f"08 A.2 表是 {TOKEN_COUNT} 行（实际 {len(documented)}）", len(documented) == TOKEN_COUNT)
+    c.ok(f"tech/10 A.1 表是 {TOKEN_COUNT} 行（实际 {len(documented)}）", len(documented) == TOKEN_COUNT)
 
     css_dark = css_theme_vars(palette_css, "dark")
     css_light = css_theme_vars(palette_css, "light")
@@ -171,10 +171,10 @@ def main() -> int:
             if dark[role] != documented[role][0] or light[role] != documented[role][1]:
                 mismatches += 1
         else:
-            c.ok(f"08 A.2 缺角色 {role}", False)
+            c.ok(f"tech/10 A.1 缺角色 {role}", False)
     c.ok(f"35 角色 × 2 模式 × 2 来源全部一致（不一致 {mismatches} 处）", mismatches == 0)
     missing_in_json = [role for role in documented if role not in dark]
-    c.ok("color.json 覆盖 08 A.2 的全部角色", not missing_in_json, f"缺 {missing_in_json}")
+    c.ok("color.json 覆盖 tech/10 A.1 的全部角色", not missing_in_json, f"缺 {missing_in_json}")
 
     c.ok("palette.css 顶部写明由 gen-tokens.py 生成", "gen-tokens.py" in palette_css.split("\n")[0])
 

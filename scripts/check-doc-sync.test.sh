@@ -29,7 +29,10 @@ bad()  { printf '❌ %s\n' "$1"; FAIL=1; }
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/repo" "$T/.github"
-(cd "$PROJECT_ROOT" && tar -c --exclude=.git .) | tar -x -C "$T/repo"
+# 夹具只拷「守卫会读的东西」—— 必须排除 out/（构建产物，几十 GB）。
+  # 早先只排除 .git，于是把整个仓库拷进 /tmp（16 GB tmpfs）→ ENOSPC，
+  # 测试根本跑不完，而报错看起来像夹具缺内容（Issue #121 的排查记录）。
+  (cd "$PROJECT_ROOT" && tar -c --exclude=.git --exclude=out --exclude=tmp --exclude=.idea .) | tar -x -C "$T/repo"
 (cd "$ORG_SOURCE" && tar -c --exclude=.git .)     | tar -x -C "$T/.github"
 
 CHECK="$T/repo/scripts/check-doc-sync.sh"
@@ -123,9 +126,12 @@ reset_all
 blank_org_table
 if "$SYNC" >"$T/t7.log" 2>&1 && "$CHECK" >"$T/t7b.log" 2>&1; then
   # 判据用「七个阶段名在表区里都在」而不是数行数：状态格里的 `|`（转义）会骗过行数统计。
+  # 匹配要容忍单元格的内边距（表格可以对齐排版）—— 原来写成 `| $stage |`，一对齐就误报缺阶段。
   missing=""
   while IFS= read -r stage; do
-    grep -qF "| $stage |" "$ORG_README" || missing="$missing $stage"
+    pat=${stage//\/\\}; pat=${pat//./\.}; pat=${pat//+/\+}
+    pat=${pat//(/\(}; pat=${pat//)/\)}; pat=${pat//[/\[}; pat=${pat//]/\]}
+    grep -qE "^\|[[:space:]]*${pat}[[:space:]]*\|" "$ORG_README" || missing="$missing $stage"
   done < <(extract_progress_table "$T/repo/README.md" | cut -f1)
   if [ -z "$missing" ]; then
     pass "T7 占位表被填成七个阶段，且守卫随后通过"

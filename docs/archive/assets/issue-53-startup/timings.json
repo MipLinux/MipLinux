@@ -1,0 +1,26 @@
+[
+  {
+    "case": "control-1",
+    "cursor_to_welcome_seconds": 18.23022099500008,
+    "vm_start_to_welcome_seconds": 68.43910096600007,
+    "theme": "light"
+  },
+  {
+    "case": "control-2",
+    "cursor_to_welcome_seconds": 18.325588703999983,
+    "vm_start_to_welcome_seconds": 68.77494534100015,
+    "theme": "dark"
+  },
+  {
+    "case": "fixed-2",
+    "cursor_to_welcome_seconds": 3.3843495779999557,
+    "vm_start_to_welcome_seconds": 40.594975285000146,
+    "theme": "dark"
+  },
+  {
+    "case": "fixed-3",
+    "cursor_to_welcome_seconds": 3.168355116000157,
+    "vm_start_to_welcome_seconds": 40.46863366499997,
+    "theme": "dark"
+  }
+]

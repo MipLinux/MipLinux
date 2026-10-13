@@ -9,8 +9,8 @@
 #   ./scripts/check-identity.sh                   # 扫 profile/（默认）
 #   ./scripts/check-identity.sh --iso out/x.iso   # 扫产物
 #
-# 它只读，不改任何东西，**也不需要 root**：产物的卷标 / 发布者 / 应用名直接
-# 从 ISO9660 的 PVD 里读，不经过 loop 设备。所以两台机器、任何人随时能复现。
+# profile 检查不需要 root；ISO 的品牌字段仍直接从 PVD 读取，权限检查
+# 则要只读挂载 ISO 和其中的 squashfs，因此 --iso 需要 root。
 #
 # 两张清单，各有各的用途：
 #
@@ -83,12 +83,12 @@ usage() {
   ./scripts/check-identity.sh [选项]
 
 选项：
-  --iso <文件>   检查构建出来的 ISO（PVD 卷标/发布者/应用名 + 未压缩区里的残留）
+  --iso <文件>   检查 ISO 品牌字段、残留文本及 airootfs 实际权限（需要 root）
   -h, --help     显示本帮助。
 
-不带参数就检查仓库里的 profile/。两种模式都不需要 root。
+不带参数就检查仓库里的 profile/，无需 root；--iso 要只读挂载产物。
 
-退出码：0 = 干净；1 = 有残留或有字段不对。
+退出码：0 = 检查通过；1 = 品牌或权限检查失败。
 EOF
 }
 
@@ -245,6 +245,149 @@ check_profile_residue() {
   show_allow
 }
 
+# profiledef.sh 由 mkarchiso source；这里沿用同一方式，避免用文本解析器
+# 猜 Bash 关联数组的语法。NUL 分隔保留路径中的空格。
+read_permissions() (
+  declare -A file_permissions=()
+  # shellcheck source=/dev/null
+  source "${PROFILE_DIR}/profiledef.sh"
+  local path
+  for path in "${!file_permissions[@]}"; do
+    printf '%s\0%s\0' "$path" "${file_permissions[$path]}"
+  done
+)
+
+declare -A PERMISSIONS=()
+load_permissions() {
+  local path spec
+  while IFS= read -r -d '' path && IFS= read -r -d '' spec; do
+    PERMISSIONS["$path"]="$spec"
+  done < <(read_permissions)
+}
+
+is_package_path() {
+  case "$1" in
+    /usr/bin/*|/usr/lib/*|/bin/*|/sbin/*|/usr/sbin/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+check_executables() {
+  local root="$1" file path count=0 prior_fails=$FAILS
+  if [[ ! -d "$root" ]]; then
+    fail "airootfs 目录不存在：${root}"
+    return
+  fi
+  while IFS= read -r -d '' file; do
+    path="/${file#"$root"/}"
+    is_package_path "$path" && continue
+    count=$((count + 1))
+    if [[ -z "${PERMISSIONS[$path]+present}" ]]; then
+      fail "未申报的 airootfs 可执行文件：${path}"
+    fi
+  done < <(find "$root" -type f -perm /111 -print0)
+  if [[ $FAILS -eq $prior_fails ]]; then
+    ok "airootfs 可执行文件全部已申报（${count} 个）"
+  fi
+}
+
+check_iso_executables() {
+  local root="$1" file path count=0 prior_fails=$FAILS
+  local -A packaged=()
+  local db="$root/var/lib/pacman/local"
+  if [[ ! -d "$db" ]]; then
+    fail "ISO 内缺少 pacman 包文件清单，无法区分包文件与 airootfs 文件"
+    return
+  fi
+  # 包也会在 /etc、/usr/share 等目录安装可执行文件。以产物内的包清单
+  # 判断所有权，才能把构建生成的新文件和包文件区分开。
+  while IFS= read -r -d '' path; do
+    packaged["$path"]=1
+  done < <(find "$db" -type f -name files -exec awk '
+    /^%FILES%$/ { in_files=1; next }
+    /^%/ { in_files=0 }
+    in_files && NF { printf "/%s%c", $0, 0 }
+  ' {} +)
+  while IFS= read -r -d '' file; do
+    path="/${file#"$root"/}"
+    is_package_path "$path" && continue
+    # 仓库覆盖的文件即使与包路径同名，也仍由 profile 负责权限。
+    if [[ -n "${packaged[$path]+present}" && ! -f "$PROFILE_DIR/airootfs$path" ]]; then
+      continue
+    fi
+    count=$((count + 1))
+    if [[ -z "${PERMISSIONS[$path]+present}" ]]; then
+      fail "ISO 内未申报的 airootfs 可执行文件：${path}"
+    fi
+  done < <(find "$root" -type f -perm /111 -print0)
+  if [[ $FAILS -eq $prior_fails ]]; then
+    ok "ISO 内非包可执行文件全部已申报（${count} 个）"
+  fi
+}
+
+ISO_TMP=""
+ISO_MOUNTED=0
+ISO_SFS_MOUNTED=0
+cleanup_iso_mounts() {
+  if (( ISO_SFS_MOUNTED )); then
+    if umount "$ISO_TMP/root"; then ISO_SFS_MOUNTED=0
+    else fail "无法卸载 ISO 内的 airootfs.sfs：$ISO_TMP/root"; fi
+  fi
+  if (( ISO_MOUNTED )); then
+    if umount "$ISO_TMP/iso"; then ISO_MOUNTED=0
+    else fail "无法卸载 ISO：$ISO_TMP/iso"; fi
+  fi
+  if (( ! ISO_MOUNTED && ! ISO_SFS_MOUNTED )) && [[ -n "$ISO_TMP" ]]; then
+    rmdir "$ISO_TMP/root" "$ISO_TMP/iso" "$ISO_TMP"
+    ISO_TMP=""
+  fi
+}
+
+check_iso_permissions() {
+  local iso="$1" root path spec actual display expected_mode expected_uid expected_gid
+  if (( EUID != 0 )); then
+    fail "ISO 权限检查需要 root；请用 pkexec --keep-cwd 运行本脚本"
+    return
+  fi
+  ISO_TMP="$(mktemp -d)"
+  trap cleanup_iso_mounts EXIT
+  mkdir -p "$ISO_TMP/iso" "$ISO_TMP/root"
+  if ! mount -o ro,loop "$iso" "$ISO_TMP/iso"; then
+    fail "无法只读挂载 ISO：${iso}"
+    cleanup_iso_mounts
+    trap - EXIT
+    return
+  fi
+  ISO_MOUNTED=1
+  if ! mount -t squashfs -o ro,loop "$ISO_TMP/iso/arch/x86_64/airootfs.sfs" "$ISO_TMP/root"; then
+    fail "无法只读挂载 ISO 内的 airootfs.sfs"
+    cleanup_iso_mounts
+    trap - EXIT
+    return
+  fi
+  ISO_SFS_MOUNTED=1
+  root="$ISO_TMP/root"
+  info "核对 ISO 内 file_permissions 的真实权限"
+  for path in "${!PERMISSIONS[@]}"; do
+    spec="${PERMISSIONS[$path]}"
+    IFS=: read -r expected_uid expected_gid expected_mode <<< "$spec"
+    if [[ ! -e "$root$path" ]]; then
+      fail "ISO 缺少权限表中的路径：${path}"
+      continue
+    fi
+    display="$(stat -c '%u:%g:%a %U:%G' -- "$root$path")"
+    actual="${display%% *}"
+    if [[ "$actual" == "${expected_uid}:${expected_gid}:${expected_mode}" ]]; then
+      note "${path} = ${actual##*:} ${display#* }"
+    else
+      fail "ISO 权限不符：${path}，期望 ${spec}，实际 ${actual}"
+    fi
+  done
+  check_iso_executables "$root"
+  cleanup_iso_mounts
+  if (( ! ISO_MOUNTED && ! ISO_SFS_MOUNTED )); then trap - EXIT; fi
+}
+
 # ── 产物模式 ──────────────────────────────────────────────────────────
 pvd_field() {
   # $1 = ISO；$2 = PVD 内偏移；$3 = 长度（默认 128）
@@ -338,16 +481,21 @@ if [[ "$MODE" == "profile" ]]; then
   check_profiledef
   check_branded
   check_profile_residue
+  load_permissions
+  check_executables "${PROFILE_DIR}/airootfs"
 else
   ALLOW=("${ALLOW_ISO[@]}")
   printf '%s品牌一致性检查 · 产物%s\n' "$C_INFO" "$C_OFF"
   check_iso "$ISO_FILE"
+  load_permissions
+  check_executables "${PROFILE_DIR}/airootfs"
+  check_iso_permissions "$ISO_FILE"
 fi
 
 echo
 if [[ $FAILS -eq 0 ]]; then
-  ok "干净：没有发现旧品牌残留（$([[ $MODE == profile ]] && echo 'profile' || echo 'ISO')）"
+  ok "检查通过（$([[ $MODE == profile ]] && echo 'profile' || echo 'ISO')）"
   exit 0
 fi
-bad "发现 ${FAILS} 项问题 —— 改干净之前不要构建，否则产出的是半改名的 ISO"
+bad "发现 ${FAILS} 项问题"
 exit 1

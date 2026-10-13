@@ -118,14 +118,15 @@ archlinux-bootstrap-<日期>-x86_64.tar.zst   ← bootstrap 是 Arch 官方的�
 > `archlinux-2026.09.18-x86_64.iso` 是**改名前的对照物，别删**；想要新的对照，
 > `sudo ./scripts/mipl.sh build --baseline`（容器内原版 releng）随时能重建一份。
 >
-> 改名之后，「这份 ISO 到底是不是我们的」**不需要 root、也不用开机**就能确认：
+> 改名之后，「这份 ISO 到底是不是我们的」无需开机即可确认；`--iso` 需 root 来只读挂载产物：
 >
 > ```bash
-> ./scripts/check-identity.sh --iso out/miplinux-*.iso
+> pkexec --keep-cwd "$PWD/scripts/check-identity.sh" --iso ISO文件路径
 > ```
 >
 > 它读 ISO9660 的 PVD（卷标 / publisher / application）、核对产物名，再扫一遍 ISO
-> 未压缩区里的品牌文本。**改 profile 之前先跑不带参数的那条**（扫 profile，秒级），
+> 未压缩区里的品牌文本，并核对 squashfs 内的权限。将 `ISO文件路径` 换成实际文件。
+> **改 profile 之前先跑不带参数的那条**（扫 profile，秒级），
 > 它会把没改干净的地方列出来 —— 别让半改名的 ISO 被构建出来。
 >
 > 只有 `.iso` 是必然会生成的：`.sha256` **文件**不会自动落盘（哈希会打在终端上，见下），
@@ -355,8 +356,8 @@ archiso login: root
 > UEFI 菜单标题变成 `MipLinux install medium (x86_64, UEFI)`，仍能进
 > `[root@archiso ~]#`（主机名由 `profile/airootfs/etc/hostname` 提供，这次没动）。**BIOS 那条 bootmode 也验了**
 > —— 去掉两个 `-drive if=pflash` 参数就是 SeaBIOS，菜单标题是 `MipLinux`。
-> 产物的卷标 / publisher / application 由 `./scripts/check-identity.sh --iso`
-> 断言，不需要 root。
+> 产物的卷标 / publisher / application 由 `check-identity.sh --iso` 断言；
+> 当前还会只读挂载产物核对权限，需 root。
 >
 > **已实测通过**（2026-09-18，CachyOS 宿主机 + QEMU 11.1.1 + `archlinux-2026.09.18-x86_64.iso`，
 > 这是**改名前**的那份产物）：用 `sudo ./scripts/mipl.sh qemu` 启动，UEFI 引导进入 Live 环境，

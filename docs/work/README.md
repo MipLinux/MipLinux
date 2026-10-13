@@ -163,7 +163,7 @@ assignee 是 GitHub issue 元数据，不属于正文草案，因此本地守卫
 | `sudo ./scripts/mipl.sh stop` | 关闭容器（**用完别忘了**，见 Issue #4） |
 | `sudo ./scripts/mipl.sh -n <命令>` | 只打印将执行的命令，不做任何改动 |
 | `sudo ./scripts/mipl.sh clean` | 删 `OVMF_VARS*`；`--iso` 连 ISO 一起删；`--disk` 删目标盘及其 NVRAM；`--bootstrap` 删 bootstrap 缓存（下载的 126 MB 那个）。都不可逆，会先问一句 |
-| `./scripts/check-identity.sh` | **不需要 sudo**：扫 `profile/` 里有没有没改干净的旧品牌名；加 `--iso out/miplinux-*.iso` 扫产物（卷标 / publisher / application / 引导菜单文本） |
+| `./scripts/check-identity.sh` | 默认无需 root：检查 `profile/` 的品牌文本和 airootfs 可执行文件权限申报。检查产物用 `pkexec --keep-cwd "$PWD/scripts/check-identity.sh" --iso ISO文件路径`（替换为实际路径），需 root，以只读挂载核对 ISO 内真实权限，并检查品牌字段与残留文本 |
 
 `build` 现在会在下载前后校验 bootstrap（`sha256` + `zstd` 完整性），缓存坏了直接删掉重下；
 解压前后各查一次容器是否真的能用（能执行的 shell / 动态链接器 / `pacman`），而不是只看

@@ -25,8 +25,9 @@
 
 ## 仓库里的脚本
 
-命令一律走脚本（手抄 `mkarchiso` / `pacstrap` / `qemu` 出过事故）。需要 root 的只有 `mipl.sh` 一族，
-它自己不提权；非 root 运行只会打印该敲的命令。完整命令表见 [work/README.md](work/README.md)。
+命令一律走脚本（手抄 `mkarchiso` / `pacstrap` / `qemu` 出过事故）。`mipl.sh` 一族需要 root，
+但不自行提权；非 root 运行只打印该敲的命令。`check-identity.sh --iso` 也需要 root 来只读挂载产物。
+完整命令表见 [work/README.md](work/README.md)。
 
 | 脚本 | 作用 |
 |---|---|
@@ -34,7 +35,7 @@
 | [mipl.fish](../scripts/mipl.fish) | 同一操作台的 fish 入口，薄封装 |
 | [mipl-lib.sh](../scripts/mipl-lib.sh) | `mipl.sh` 与 `baseline-build.sh` 共用的判断库（容器健康检查等「两个入口必须给出同一个答案」的东西） |
 | [baseline-build.sh](../scripts/baseline-build.sh) | 构建本体，由 `mipl build` 调用；`--baseline` 改用原版 `releng` 做对照 |
-| [check-identity.sh](../scripts/check-identity.sh) | 品牌一致性检查（**不需要 root**）；`--iso` 扫产物 |
+| [check-identity.sh](../scripts/check-identity.sh) | 检查品牌和 airootfs 可执行文件权限申报；`--iso` 核对产物真实权限（需 root） |
 | [check-readme-links.sh](../scripts/check-readme-links.sh) | README 可点性检查：仓库内死链、跨仓库死链、死锚点、进度表标记（**不需要 root**） |
 | [check-doc-sync.sh](../scripts/check-doc-sync.sh) | 文档同步守卫：仓库 README 的进度口径与组织主页是否一致，并挡住已被推翻的旧口径（清单在 `check-doc-sync.facts`；**不需要 root、只读**） |
 | [sync-profile-progress.sh](../scripts/sync-profile-progress.sh) | 把 README 的进度表同步进组织主页，写完自跑守卫，不通过就回滚 |

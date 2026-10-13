@@ -6,7 +6,7 @@
 # 反过来收得太紧，就会像第一版那样把整片判据报成缺口（#81 五条全 ⚠️）。
 # 两边都要有夹具钉住。
 #
-# 夹具全部在临时目录里，**不联网、不碰真实仓库**。
+# 夹具全部在临时目录里，**不联网、不写真实仓库**（只读文本 + 从 git remote 推仓库地址）。
 # 不需要 root。用法：./scripts/pr-acceptance-context.test.sh
 # 退出码：0 = 全过；1 = 有失败项。
 
@@ -135,6 +135,9 @@ grep -E '^\| 1 ' "$D2/out/facts.md" | grep -q '⚠️' && pass "反例：把声�
 D3="$T/cmulti"; mk_case_multi "$D3"
 run "$D3" "$D3/out"
 grep -q 'PR #80' "$D3/out/facts.md" && pass "R7：证据在另一个 PR 里时被认到（点名 PR #80）" || bad "R7：没认到另一个 PR 里的证据"
+# rubric 第〇节：引用要给可点的链接，且 PR 的链接文本带 PR（与 issue 分清）
+grep -qE '\[PR #80\]\(https://github\.com/[^/]+/[^/]+/pull/80\)' "$D3/out/facts.md" \
+  && pass "跨 PR 引用带 markdown 链接（不是裸 PR #80）" || bad "跨 PR 引用没带链接"
 grep -E '^\| 2 ' "$D3/out/facts.md" | grep -q '➖' && pass "R7 + R3：自带「要 root」的那条仍被抑制" || bad "R3 在多 PR 夹具里失效"
 
 # ── 夹具 3：没有 Closes 关联 → 必须是「无法判定」而不是「对上了」────────────────

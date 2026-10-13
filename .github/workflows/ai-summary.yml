@@ -96,8 +96,9 @@ jobs:
           model: 'deepseek-v4-flash'
           # 判断类任务要压温度：同一份正文跑三次，四块的档位不该变（rubric 的抖动断言）
           temperature: '0.2'
-          # 默认 1000 会把四块输出截断；判断类输出长度不可控，留足余量（模型自带 max_tokens 上限保护）
-          max_tokens: '8000'
+          # 默认 1000 会把四块输出截断；判断类输出长度不可控，留足余量（模型自带 max_tokens 上限保护）。
+          # 注意「留余量」不等于鼓励写长：篇幅上限在 rubric 第七节，机器只是别在写成之前被截断。
+          max_tokens: '10000'
           # 路径必须是**容器内**的工作区挂载点：这个 action 是 Docker action，WORKDIR 是 /app，
           # 相对路径会落到 /app 下；runner 的 $GITHUB_WORKSPACE 在容器里叫 /github/workspace。
           system_prompt: 'file:///github/workspace/docs/work/ai-review-rubric.md'
@@ -122,11 +123,8 @@ jobs:
               # 确定性的那半仍然发出去：它是脚本算的，跟模型无关
               echo "⚠️ 语义判断（判据质检 / 查重 / 引用有效性）本次没有输出，上面只有脚本算出的确定性事实。"
             fi
-            # 免责落在整条评论的**末尾**（facts.md 里不写：那样会插在模型那三块前面）
-            echo
-            echo '---'
-            echo '本评论由 `scripts/ai-review-context.sh` 按 `docs/work/ai-review-rubric.md` 生成：**只对账，不裁决**，不打 label、不改状态、不代表受理生效。'
-            printf '（作者关联：%s）\n' "$(awk -F'\t' '$1=="author_association"{print $2}' .ai-review/meta.tsv)"
+            # 末尾不写免责声明（维护者 2026-10-13 定）：「不裁决 / 不代表受理生效」这类话读者读不懂，
+            # 反而分不清是机器判不了还是 issue 有问题。不裁决由 rubric 的措辞纪律管模型，不靠这句话。
             echo
             printf '<!-- mipl-review: body=%s -->\n' "$SHA"
           } >.ai-review/comment.md

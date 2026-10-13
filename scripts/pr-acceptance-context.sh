@@ -50,6 +50,25 @@ mkdir -p "$OUT_DIR"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# 评论里引用 issue / PR 一律给**可点的链接**（rubric 第〇节）：渲染出来仍是 `#N`，
+# 但任何读取端都能点开，于是不必再把标题抄进正文。取不到远端时退回裸引用。
+# 从 git remote 推导而不是 `gh repo view`：render 模式是离线的，回归夹具也不该联网。
+REPO_SLUG=$(git -C "$PROJECT_ROOT" remote get-url origin 2>/dev/null \
+  | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##' || true)
+ref() { # $1=#N（或 N）  $2=issues|pull
+  # 逐条赋值：`local n=… text="#$n"` 会先把右侧全展开再赋值，配 `set -u` 直接报 unbound（实测踩到）
+  local n kind text
+  n=${1#\#}
+  kind=${2:-issues}
+  text="#$n"
+  if [ "$kind" = pull ]; then text="PR #$n"; fi
+  if [ -n "$REPO_SLUG" ]; then
+    printf '[%s](https://github.com/%s/%s/%s)' "$text" "$REPO_SLUG" "$kind" "$n"
+  else
+    printf '%s' "$text"
+  fi
+}
+
 # ── collect ───────────────────────────────────────────────────────────────────
 collect() {
   local n=$1 dir=$2
@@ -324,7 +343,10 @@ render() {
       if [ -n "$where" ]; then
         local line; line=$(sed -n "${where}p" "$TMP/claims_all.md")
         case "$line" in
-          "[PR #"*) note="证据在 **${line%%]*}]** 的声称里：$(printf '%s' "$line" | sed 's/^\[PR #[0-9]*\] //' | cut -c1-40)" ;;
+          "[PR #"*)
+            local prn
+            prn=$(printf '%s' "$line" | sed -n 's/^\[PR #\([0-9]*\)\].*/\1/p')
+            note="证据在 $(ref "$prn" pull) 的声称里：$(printf '%s' "$line" | sed 's/^\[PR #[0-9]*\] //' | cut -c1-40)" ;;
           *)        note="命中本 PR 的声称：$(printf '%s' "$line" | cut -c1-40)" ;;
         esac
       fi
@@ -346,18 +368,20 @@ render() {
   # ── facts.md ────────────────────────────────────────────────────────────────
   {
     # 没有关联 issue 时不要把「判据来自 issue 」后面留空 —— 实测第一次真跑就出现了这个空列表
+    # 引用给链接（rubric 第〇节），不逼读者去查编号是什么
     local label
-    label=$(cut -f1 "$dir/issues.tsv" 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)
+    label=$(cut -f1 "$dir/issues.tsv" 2>/dev/null | grep -v '^$' \
+              | while read -r n; do printf '%s ' "$(ref "#$n")"; done | sed 's/ $//' || true)
     if [ -n "$label" ]; then
-      echo "## 验收对账（机器 · PR #$pr · head ${head:0:7} · 判据来自 issue $label）"
+      echo "## 验收对账（机器 · $(ref "#$pr" pull) · head ${head:0:7} · 判据来自 $label）"
     else
-      echo "## 验收对账（机器 · PR #$pr · head ${head:0:7}）"
+      echo "## 验收对账（机器 · $(ref "#$pr" pull) · head ${head:0:7}）"
     fi
     echo
     if [ "$n_total" -eq 0 ]; then
-      echo "⚠️ 无法判定：这条 PR 没有关联到带「验收」段的 issue（或 issue 里读不出判据）。"
-      echo
-      echo "（这**不等于**「对上了」—— 是没得对。正文里写 \`Closes #<编号>\` 才会被认到。）"
+      # 这种情况 workflow 不会发评论（只发不删），这行留给自己手跑时看。
+      # 「没得对，不代表对上了」那种绕话已删 —— 人读不懂的声明等于没有声明。
+      echo "⚠️ 无法判定：没有可对账的判据（PR 正文没写 \`Closes #N\`，或关联 issue 没有「验收」段）。"
     else
       echo "判据 $n_total 条（机械信号）：✅ $n_ok · ➖ $n_na · ❓ $n_q · ⚠️ $n_warn"
       echo
@@ -366,8 +390,8 @@ render() {
       while IFS=$'\t' read -r idx ctype hint note txt; do
         printf '| %s | %s | %s | %s | `%s` |\n' "$idx" "$ctype" "$hint" "$note" "$txt"
       done <"$TMP/table.tsv"
-      echo
-      echo "「建议档」只由机械信号得出（同值 / 同量纲异值 / 无信号），**R2「被更强的证据替代」这类判不出来** —— 最终档位由 rubric 的规则定。"
+      # 表后不写「建议档只是机械信号」那段说明（维护者 2026-10-13 定）：表头已写「不是判决」，
+      # 再补一段同义免责只是噪音。
     fi
   } >"$out/facts.md"
 
@@ -376,6 +400,12 @@ render() {
     echo "# 验收对账的上下文"
     echo
     echo "**本次任务：C（验收对账）** —— 按 docs/work/ai-review-rubric.md 第十节的输出契约回答。"
+    echo
+    if [ -n "$REPO_SLUG" ]; then
+      echo "- 仓库：\`$REPO_SLUG\`；引用写成 \`[#N](https://github.com/$REPO_SLUG/issues/N)\`（PR 用 \`[PR #N](https://github.com/$REPO_SLUG/pull/N)\`），不抄标题（rubric 第〇节）。"
+    else
+      echo "- 仓库：未取到远端地址；引用只写 \`#N\` / \`PR #N\`（GitHub 会自动链接），不抄标题（rubric 第〇节）。"
+    fi
     echo
     echo "## PR #$pr $title"
     echo

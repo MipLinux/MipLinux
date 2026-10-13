@@ -58,6 +58,25 @@ mkdir -p "$OUT_DIR"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# 评论里引用 issue / PR 一律给**可点的链接**（rubric 第〇节）：渲染出来仍是 `#N`，
+# 但任何读取端都能点开，于是不必再把标题抄进正文。取不到远端时退回裸 `#N`。
+# 从 git remote 推导而不是 `gh repo view`：render 模式是离线的，回归夹具也不该联网。
+REPO_SLUG=$(git -C "$PROJECT_ROOT" remote get-url origin 2>/dev/null \
+  | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##' || true)
+ref() { # $1=#N（或 N）  $2=issues|pull
+  # 逐条赋值：`local n=… text="#$n"` 会先把右侧全展开再赋值，配 `set -u` 直接报 unbound（实测踩到）
+  local n kind text
+  n=${1#\#}
+  kind=${2:-issues}
+  text="#$n"
+  if [ "$kind" = pull ]; then text="PR #$n"; fi
+  if [ -n "$REPO_SLUG" ]; then
+    printf '[%s](https://github.com/%s/%s/%s)' "$text" "$REPO_SLUG" "$kind" "$n"
+  else
+    printf '%s' "$text"
+  fi
+}
+
 # ── collect：把 GitHub 上的数据落成纯文本 ────────────────────────────────────────
 # 为什么落成文本而不是 JSON：仓库脚本到现在只用 bash + coreutils + git（没有一处 jq），
 # 引 JSON 解析就是**新增依赖**。gh 自带的 -q 足够把数据摊平成 TSV / md。
@@ -280,17 +299,16 @@ render() {
 
   # ── facts.md：确定性的那部分，直接进评论
   {
-    echo "## 受理前质检（机器 · issue #$number · 正文 $(sha256sum "$dir/body.md" | cut -c1-8)）"
+    echo "## 受理前质检（机器 · issue $(ref "#$number") · 正文 $(sha256sum "$dir/body.md" | cut -c1-8)）"
     echo
     if [ "$is_task" != 1 ]; then
       echo "**所有权雷达** ➖ 跳过：本 issue 的 label 是「${labels:-无}」，没有「实现」段（rubric §0.2 按 label 分流）。"
     else
       if [ "$n_own" -eq 0 ]; then
         # 「认领 0 个文件 · 硬撞 0」会被读成「查过了，没重叠」—— 而实际是压根没法判。
-        # 这两件事必须一眼分得开（rubric §9 的反例断言）。
+        # 这两件事必须一眼分得开（rubric §9 的反例断言）。「这不等于……」那类补充说明一律不写：
+        # 第一行已经写明「无法判定」，再加一句只是噪音（维护者 2026-10-13 定）。
         echo "**所有权雷达** ⚠️ 无法判定：「实现」段里没有解析出任何仓库文件路径。"
-        echo
-        echo "（这**不等于**「查过了、没有重叠」—— 是判不了。）"
       else
         if [ "$n_new" -gt 0 ]; then
           echo "**所有权雷达** 认领 $n_own 个文件（其中 $n_new 个是新建）· 硬撞 $n_hard · 软邻近 $n_soft"
@@ -300,16 +318,16 @@ render() {
       fi
       if [ "$n_hard" -gt 0 ]; then
         echo "🔴 **硬撞**（同一条工作线上的两条会在同一个文件上改，撞上就只能整份重建才能验证）："
-        while IFS=$'\t' read -r p who; do echo "- \`$p\` —— **$who** 的「实现」里也点了它"; done <"$TMP/hard.tsv"
+        while IFS=$'\t' read -r p who; do echo "- \`$p\` —— $(ref "$who") 的「实现」里也点了它"; done <"$TMP/hard.tsv"
         echo
       fi
       if [ "$n_soft" -gt 0 ]; then
         echo "🟡 软邻近（同一目录，未撞同一文件）："
-        while IFS=$'\t' read -r d who; do echo "- \`$d/\` —— **$who** 也在改这个目录"; done <"$TMP/soft.tsv"
+        while IFS=$'\t' read -r d who; do echo "- \`$d/\` —— $(ref "$who") 也在改这个目录"; done <"$TMP/soft.tsv"
         echo
       fi
       if [ "$n_ign" -gt 0 ]; then
-        echo "<details><summary>解析回显：另有 $n_ign 项未计入所有权（点开看机器人忽略了什么）</summary>"
+        echo "<details><summary>另有 $n_ign 项未计入所有权</summary>"
         echo
         while IFS=$'\t' read -r it why; do echo "- \`$it\` —— $why"; done <"$TMP/ign.tsv"
         echo
@@ -317,7 +335,7 @@ render() {
       fi
       if [ "$n_own" -gt 0 ]; then
         # 认领清单也要回显：机器人对「这条工作要改哪些文件」的理解必须可被纠正（rubric §3.3）
-        echo "<details><summary>我认领了这 $n_own 个文件（解析回显：精确 / 裸名解析 / 从命令里剥出）</summary>"
+        echo "<details><summary>我认领了这 $n_own 个文件（点开看解析来源）</summary>"
         echo
         while IFS=$'\t' read -r p kind; do echo "- \`$p\` —— $kind"; done <"$TMP/own.tsv"
         echo
@@ -332,8 +350,8 @@ render() {
         echo "</details>"
       fi
     fi
-    # 免责声明与作者关联**不写在这里**：facts.md 只是评论的前半段，免责要落在整条评论的末尾，
-    # 由 workflow 拼装时追加。写在这里会让它插在模型那三块前面。
+    # facts.md 只是评论的前半段：末尾既不写免责声明也不写作者关联（维护者 2026-10-13 定）——
+    # 「不裁决 / 不代表受理生效」这类话读者读不懂，反而分不清是机器判不了还是 issue 有问题。
   } >"$out/facts.md"
 
   # ── context.md：喂给模型的上下文
@@ -341,6 +359,12 @@ render() {
     echo "# 受理前质检的上下文"
     echo
     echo "**本次任务：A（受理前质检）** —— 按 docs/work/ai-review-rubric.md 第七节的输出契约回答。"
+    echo
+    if [ -n "$REPO_SLUG" ]; then
+      echo "- 仓库：\`$REPO_SLUG\`；引用写成 \`[#N](https://github.com/$REPO_SLUG/issues/N)\`（PR 用 \`[PR #N](https://github.com/$REPO_SLUG/pull/N)\`），不抄标题（rubric 第〇节）。"
+    else
+      echo "- 仓库：未取到远端地址；引用只写 \`#N\`（GitHub 会自动链接），不抄标题（rubric 第〇节）。"
+    fi
     echo
     echo "## 主体 issue #$number"
     echo "- 标题：$title"

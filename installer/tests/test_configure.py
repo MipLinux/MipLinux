@@ -163,6 +163,7 @@ class TestReflectorGuard(unittest.TestCase):
 
     def test_run_in_chroot_without_reflector_adds_no_command(self):
         with tempfile.TemporaryDirectory() as tmp:
+            TestChrootSteps.plant_keyring(tmp)
             runner = FakeRunner(outputs=dict(self.PASSWD_OK))
             configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
             self.assertTrue(all("reflector" not in cmd for cmd in runner.commands()), runner.commands())
@@ -172,22 +173,34 @@ class TestChrootSteps(unittest.TestCase):
     PASSWD_OK = {"passwd -S mipl": "mipl P 2026-09-22 0 99999 7 -1",
                  "passwd -S root": "root P 2026-09-22 0 99999 7 -1"}
 
+    @staticmethod
+    def plant_keyring(tmp: str) -> None:
+        """造出「pacstrap 已装完 archlinuxcn-keyring」的目标现场（#135）。"""
+        keyring = Path(tmp) / configure.ARCHLINUXCN_KEYRING
+        keyring.parent.mkdir(parents=True, exist_ok=True)
+        keyring.write_text("", encoding="utf-8")
+
     def test_order_and_password_on_stdin(self):
         runner = FakeRunner(outputs=dict(self.PASSWD_OK))
-        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
         commands = runner.commands()
 
         # 密码只能走 stdin，绝不能出现在 argv 里（进程列表与日志都会留档）
         self.assertTrue(all("s3cret" not in cmd for cmd in commands), commands)
 
         order = [
-            "arch-chroot /mnt useradd -m -G wheel -s /bin/bash mipl",
-            "arch-chroot /mnt chpasswd",
-            "arch-chroot /mnt passwd -S mipl",
-            "arch-chroot /mnt locale-gen",
-            "arch-chroot /mnt pacman-key --populate archlinux",
-            "arch-chroot /mnt systemctl enable NetworkManager",
-            "arch-chroot /mnt mkinitcpio -P",
+            f"arch-chroot {tmp} useradd -m -G wheel -s /bin/bash mipl",
+            f"arch-chroot {tmp} chpasswd",
+            f"arch-chroot {tmp} passwd -S mipl",
+            f"arch-chroot {tmp} locale-gen",
+            f"arch-chroot {tmp} pacman-key --populate archlinux",
+            # archlinuxcn 的 populate 排在 archlinux 之后（#135）：装后 conf 已收紧，
+            # 它依赖的 keyring 包是 pacstrap 装的，只可能在这里出现
+            f"arch-chroot {tmp} pacman-key --populate archlinuxcn",
+            f"arch-chroot {tmp} systemctl enable NetworkManager",
+            f"arch-chroot {tmp} mkinitcpio -P",
         ]
         positions = [commands.index(cmd) for cmd in order]
         self.assertEqual(positions, sorted(positions), commands)
@@ -195,19 +208,25 @@ class TestChrootSteps(unittest.TestCase):
     def test_user_password_is_verified_not_assumed(self):
         """`chpasswd` 空输入时什么都不做却退 0 —— 所以必须回头问一句「设上了吗」。"""
         runner = FakeRunner(outputs=dict(self.PASSWD_OK))
-        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
         runner.assert_ran(self, "passwd -S mipl")
 
     def test_rejects_when_the_password_did_not_stick(self):
         runner = FakeRunner(outputs={"passwd -S mipl": "mipl L 2026-09-22 0 99999 7 -1"})
-        with self.assertRaises(InstallerError) as ctx:
-            configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
-        self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
-        self.assertIn("密码没设上", str(ctx.exception))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            with self.assertRaises(InstallerError) as ctx:
+                configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
+            self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+            self.assertIn("密码没设上", str(ctx.exception))
 
     def test_root_password_when_asked(self):
         runner = FakeRunner(outputs=dict(self.PASSWD_OK))
-        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret", "rootpw")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret", "rootpw")
         commands = runner.commands()
         self.assertEqual(len([c for c in commands if c.endswith("chpasswd")]), 2)
         runner.assert_ran(self, "passwd -S root")
@@ -217,10 +236,29 @@ class TestChrootSteps(unittest.TestCase):
         """不设 root 密码可以，但**不许静默** —— 装完得让人知道 root 登不进去。"""
         reporter = RecordingReporter()
         runner = FakeRunner(outputs=dict(self.PASSWD_OK), reporter=reporter)
-        configure.run_in_chroot(runner, TargetConfig(target="/mnt"), "s3cret")
-        self.assertNotIn("arch-chroot /mnt passwd -S root", runner.commands())
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
+        self.assertNotIn("passwd -S root", "\n".join(runner.commands()))
         self.assertIn("root", reporter.text())
         self.assertIn("锁定", reporter.text())
+
+    def test_missing_archlinuxcn_keyring_is_a_hard_error(self):
+        """目标里没有 archlinuxcn-keyring 时不许静默：收紧的 conf 会让第一次
+        `pacman -Syu` 直接验签失败，问题必须在安装阶段就炸出来（#135）。"""
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(InstallerError) as ctx:
+                configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
+            self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+            self.assertIn("archlinuxcn", str(ctx.exception))
+
+    def test_dry_run_previews_populate_without_the_keyring_file(self):
+        # dry-run 的目标是「预览命令序列」，盘上自然没有 pacstrap 的产物
+        runner = FakeRunner(dry_run=True, outputs=dict(self.PASSWD_OK))
+        with tempfile.TemporaryDirectory() as tmp:
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
+        runner.assert_ran(self, "pacman-key --populate archlinuxcn")
 
 
 if __name__ == "__main__":

@@ -207,7 +207,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | 问题 | 影响 | 何时必须落 |
 |---|---|---|
 | [P5](../knowledge/06-待定事项.md) niri / Hyprland | M3 的桌面 | M3 前 |
-| [P11](../knowledge/06-待定事项.md) `archlinuxcn` 政策 | 装后系统的 `pacman.conf` | M4 前 |
+| [P11](../knowledge/06-待定事项.md) `archlinuxcn` 政策 | 构建与 Live 的 `pacman.conf` | M4 前 |
 | Live 是否裁 `fcitx5*` / `archinstall` | ISO 体积 | M0 |
 
 **协调：** 有一条正在移除 `iwd` 的分支尚未合入。等它落地后再改 `packages.x86_64` 与 `airootfs` 的网络配置，

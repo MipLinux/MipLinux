@@ -37,6 +37,8 @@ class TestReadPackageList(unittest.TestCase):
         # 检查点 4 要能启动、检查点 6 要能升级：内核与网络是最低要求
         for needed in ("base", "linux", "networkmanager", "sudo"):
             self.assertIn(needed, listed)
+        # 装后 conf 对 [archlinuxcn] 验签（#135），key 就靠这个包提供
+        self.assertIn("archlinuxcn-keyring", listed)
 
     def test_missing_file(self):
         with self.assertRaises(InstallerError) as ctx:

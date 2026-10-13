@@ -23,6 +23,12 @@ efibootmgr
 nano
 nvim
 
+# ==> 仓库信任 · archlinuxcn 签名==>
+# 装后系统的 [archlinuxcn] 验包签名（#135）：key 由安装器在 pacstrap 之后
+# populate 进目标密钥环（configure.py 的 keyring-refresh），包必须在清单里。
+archlinuxcn-keyring
+# <== 仓库信任 · archlinuxcn 签名 <==
+
 # ==> 中文支持 · 字体==>
 noto-fonts
 noto-fonts-cjk

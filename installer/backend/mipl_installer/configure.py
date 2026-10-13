@@ -88,6 +88,28 @@ def iter_includes(pacman_conf_text: str) -> list[str]:
     return [m.group(1) for line in pacman_conf_text.splitlines() if (m := INCLUDE_RE.match(line))]
 
 
+#: 仓库段里「不校验签名」的 SigLevel 行（`Optional` / `TrustAll`）。`\b` 保证
+#: 不误伤 `Required DatabaseOptional`（全局那行）与 `LocalFileSigLevel = Optional`
+#: （本地包的策略，键名不同，本来就匹配不到）。
+OPTIONAL_TRUST_RE = re.compile(r"^\s*SigLevel\s*=\s*.*\b(?:Optional|TrustAll)\b")
+
+
+def target_pacman_conf(pacman_conf_text: str) -> str:
+    """Live conf → 装后系统的 conf：**去掉 Optional Trust**（issue #135）。
+
+    Live 出厂设置里 `[archlinuxcn]` 写 `SigLevel = Optional TrustAll`（不校验签名）——
+    内部构建无所谓，装后系统不行（P11 候选 A）：这种行整行去掉，该段就继承
+    `[options]` 的全局 `SigLevel = Required DatabaseOptional`，装后系统对
+    `[archlinuxcn]` 的每次 pacman 操作都验包签名。验签所需的 key 由
+    `run_in_chroot()` 里对 `archlinuxcn` 的 populate 导入目标密钥环。
+    """
+    lines = [
+        line for line in pacman_conf_text.splitlines()
+        if not OPTIONAL_TRUST_RE.match(line)
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def fstab_lines(root_uuid: str, esp_uuid: str) -> list[str]:
     return [
         FSTAB_HEADER.rstrip("\n"),
@@ -198,6 +220,9 @@ def validate_user(user: str) -> None:
 def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
     """把运行系统（Live）的 pacman.conf 与它 Include 的文件一起写进目标。
 
+    写进目标的 conf 不照抄：`target_pacman_conf()` 先去掉了 `Optional Trust`
+    （issue #135）—— 装后系统必须验包签名，Live 的宽松只在在线安装期间有效。
+
     Include 的目标在**运行系统**上解析（pacman 的语义，不是相对 conf 文件）。
     少一个文件就硬失败：静默跳过会在装后系统的第一次 `pacman -Syu` 才暴露。
     """
@@ -208,7 +233,7 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
             EXIT_CONFIGURE,
             hint="默认读运行系统的 /etc/pacman.conf —— 这个安装器要在 Live 里跑",
         )
-    text = read_text(str(conf_path))
+    text = target_pacman_conf(read_text(str(conf_path)))
     includes = iter_includes(text)
 
     write_text(runner, f"{cfg.target}/etc/pacman.conf", text)
@@ -347,6 +372,29 @@ def target_has_reflector(target: str) -> bool:
     return Path(f"{target}/usr/lib/systemd/system/reflector.timer").is_file()
 
 
+#: archlinuxcn-keyring 包提供的钥匙串文件：populate 之前必须先有它（pacstrap 装的）
+ARCHLINUXCN_KEYRING = "usr/share/pacman/keyrings/archlinuxcn.gpg"
+
+
+def require_archlinuxcn_keyring(runner: Runner, cfg: TargetConfig) -> None:
+    """目标里的 `archlinuxcn` 钥匙串必须在 populate 之前存在。
+
+    装后系统的 conf 已收紧（#135），`pacman-key --populate archlinuxcn` 依赖
+    pacstrap 装进去的 `archlinuxcn-keyring` 包 —— 缺了就硬失败，不能静默跳到
+    装后系统第一次 `pacman -Syu` 才报「签名无法校验」。
+    """
+    keyring = Path(cfg.target) / ARCHLINUXCN_KEYRING
+    if runner.dry_run:
+        # dry-run 只在没动过的盘上预览命令序列，目标里自然没有这个文件
+        return
+    if not keyring.is_file():
+        raise InstallerError(
+            f"目标系统里没有 {keyring}（archlinuxcn-keyring 没装上）",
+            EXIT_CONFIGURE,
+            hint="装后包清单里要有 archlinuxcn-keyring；pacstrap 装完后再跑 configure",
+        )
+
+
 def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
                   root_password: str | None = None) -> None:
     """必须在目标系统里跑的几条。顺序有讲究，别调换。
@@ -386,6 +434,10 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     runner.reporter.emit(step_event("configure", "keyring-refresh", "填充目标密钥环"))
     runner.reporter.note("几十秒")
     runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinux"]), exit_code=EXIT_CONFIGURE)
+    # archlinuxcn 的 key 只能在这里导入：装后 conf 已收紧（#135），而它的 keyring
+    # 包由 pacstrap 装进目标 —— packages.init_keyring 跑在 pacstrap 之前，那里没有它
+    require_archlinuxcn_keyring(runner, cfg)
+    runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinuxcn"]), exit_code=EXIT_CONFIGURE)
 
     # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
     runner.reporter.emit(step_event("configure", "services", "启用 NetworkManager"))

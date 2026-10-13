@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           ./scripts/pr-acceptance-context.sh --pr "$PR" --out "$GITHUB_WORKSPACE/.pr-acceptance"
 
-      - name: head 没变就不重复评论
+      - name: head 没变、或没有判据可对账 → 不发评论
         id: gate
         if: steps.fork.outputs.skip != 'true'
         env:
@@ -76,6 +76,15 @@ jobs:
           head=$(awk -F'\t' '$1=="head"{print $2}' .pr-acceptance/meta.tsv | cut -c1-7)
           [ -n "$head" ] || { echo "::error::读不到 head sha"; exit 1; }
           echo "head=$head" >>"$GITHUB_OUTPUT"
+
+          # 没有可对账的判据时**整条不发**：一条只剩表头和免责声明的评论读者读不懂，是纯噪音
+          # （维护者 2026-10-13 定）。放在查旧评论之前，省一次 API 调用。
+          # 刻意不删旧评论：本检查只发、不删别人可见的状态。
+          if grep -q '^⚠️ 无法判定' .pr-acceptance/facts.md; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "没有可对账的判据，跳过（不发评论）。"
+            exit 0
+          fi
 
           old=$(gh api "repos/{owner}/{repo}/issues/$PR/comments" --paginate \
                   -q '.[] | select(.body | contains("mipl-acceptance: head=")) | .id' | tail -1 || true)
@@ -104,8 +113,8 @@ jobs:
           model: 'deepseek-v4-flash'
           # 判断类任务压温度：同一份正文跑三次，档位不该变
           temperature: '0.2'
-          # 默认 1000 会把复核意见截断
-          max_tokens: '8000'
+          # 默认 1000 会把复核意见截断；篇幅上限在 rubric 第十节，这里只是别在写成之前被截断。
+          max_tokens: '10000'
           # 必须是**容器内**的工作区挂载点（Docker action 的 WORKDIR 是 /app）
           system_prompt: 'file:///github/workspace/docs/work/ai-review-rubric.md'
           input_prompt: 'file:///github/workspace/.pr-acceptance/context.md'
@@ -128,9 +137,8 @@ jobs:
             else
               echo "⚠️ 逐条复核本次没有输出，上面只有脚本算出的机械信号（不是判决）。"
             fi
-            echo
-            echo '---'
-            echo '本评论由 `scripts/pr-acceptance-context.sh` 按 `docs/work/ai-review-rubric.md` 第十节生成：**只对账，不裁决** —— 不判真伪、不出「通过 / 不通过」、不打 label、不 request changes。'
+            # 末尾不写免责声明（维护者 2026-10-13 定）：「不裁决 / 不判真伪」这类话读者读不懂，
+            # 反而分不清是机器判不了还是 PR 有问题。不裁决由 rubric 的措辞纪律管模型，不靠这句话。
             echo
             printf '<!-- mipl-acceptance: head=%s -->\n' "$HEAD"
           } >.pr-acceptance/comment.md

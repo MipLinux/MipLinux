@@ -13,9 +13,9 @@ MipLinux 自己的代码与配置以 **GPL-3.0-or-later** 授权（[README 的�
 
 ## 我们改过的第三方程序
 
-**cage** —— Live 的 kiosk 合成器。构建时取 cage v0.3.1 源码，套
-[cage-0.3.1-enable-tap.patch](scripts/patches/cage-0.3.1-enable-tap.patch) 打开触摸板轻点，编译成 `mipl-cage` 装进 ISO。
-许可是 **MIT**（Copyright (c) 2018-2020 Jente Hidskes；Copyright (c) 2019 The Sway authors）；
+| 程序 | 许可 | 我们做了什么 |
+|---|---|---|
+| cage v0.3.1 | MIT（Copyright (c) 2018-2020 Jente Hidskes；Copyright (c) 2019 The Sway authors） | Live 的 kiosk 合成器：套 [cage-0.3.1-enable-tap.patch](scripts/patches/cage-0.3.1-enable-tap.patch) 打开触摸板轻点，编译成 `mipl-cage` 装进 ISO |
 
 ## 相容性
 

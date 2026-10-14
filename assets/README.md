@@ -8,14 +8,14 @@
 与 `installer/frontend/app/renderer/assets/logo/` 里安装器用的 logo 及其派生尺寸
 （逐份用途、来源与再生成方式见该目录 README）。
 
-**署名写法**（CC BY-SA 4.0 第 3 条的要求）：
+**署名写法**：
 
 ```txt
 MipLinux 项目（https://github.com/MipLinux/MipLinux），CC BY-SA 4.0
 ```
 
 **名称与商标不在授权范围内。** CC BY-SA 4.0 授予的是素材本身的著作权许可，
-不授予「MipLinux」名称与标识作为来源标记的使用权（该许可第 2(b)(2) 条明确排除商标权）。
+不授予「MipLinux」名称与标识作为来源标记的使用权。
 改造后再分发时，请换用不会与本发行版混淆的名称，并标明改动。
 
 **本目录不含上游素材：** `profile/syslinux/splash.png` 是 archiso 带进来的 Arch Linux 品牌图（GPL-3.0-or-later），

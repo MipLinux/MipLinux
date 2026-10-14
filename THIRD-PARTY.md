@@ -1,0 +1,30 @@
+# 第三方组件与许可
+
+MipLinux 自己的代码与配置以 **GPL-3.0-or-later** 授权（[README 的「许可」小节](README.md#许可)）；
+品牌素材按 **CC BY-SA 4.0** 单独授权（[assets/README.md](assets/README.md)）。
+本文件只管第三方：**它们各自是什么许可、我们改过什么、每一类的清单在哪。**
+
+**纪律：** 各家的许可原件随组件走 —— 不动、不合并、不换许可；升级时版本、文件、sha256 与许可原件同一笔提交。
+**本文件不抄各类清单**，抄了就是第二份会漂的真相。
+
+## 每一类的清单在哪
+
+| 类别 | 权威清单 |
+|---|---|
+| 前端 vendored 资源 | [vendor/README.md](installer/frontend/app/vendor/README.md) —— 版本、来源 URL、sha256、许可原件逐个列在一起 |
+| `profile/`：派生自上游的构建源 | [profile/PROFILE.md](profile/PROFILE.md) —— 上游是 archiso 的 releng profile（GPL-3.0-or-later），版本、拷贝日期与有意差异都登记在那里 |
+| 产物里再分发的软件包 | [Live 清单](profile/packages.x86_64) · [装后清单](installer/backend/mipl_installer/data/target-packages.x86_64) —— 包来自 Arch 官方仓库与 `[archlinuxcn]`，各包保留自己的许可，由 `pacman` 装到 `/usr/share/licenses/`；源码在 Arch 官方仓库与 ABS |
+
+## 我们改过的第三方程序
+
+只有一处，清单就在这里（将来每多一个补丁，加一条）：
+
+**cage** —— Live 的 kiosk 合成器。构建时取 cage v0.3.1 源码，套
+[cage-0.3.1-enable-tap.patch](scripts/patches/cage-0.3.1-enable-tap.patch) 打开触摸板轻点，编译成 `mipl-cage` 装进 ISO。
+许可是 **MIT**（Copyright (c) 2018-2020 Jente Hidskes；Copyright (c) 2019 The Sway authors）；
+MIT 的条件是随分发附上版权声明与许可全文，这条件对补丁版同样适用。
+
+## 相容性
+
+随附的第三方许可都与主许可 GPL-3.0-or-later 相容：MIT 是宽松许可；
+OFL 允许字体随任意软件分发，字体自身仍受 OFL 约束。产物里的 Arch 软件包属聚合分发，各包许可互不影响。

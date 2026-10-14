@@ -88,3 +88,11 @@ sudo ./scripts/mipl.sh qemu --serial console
 - **分工在 [Issues](https://github.com/MipLinux/MipLinux/issues?q=label%3Atask) 里**，怎么写见[工作 issue 规范](docs/work/README.md)。
 - `main` 受保护，PR 必须含 code owner（[@LaT-SKY](https://github.com/LaT-SKY)）的审核，见 [CODEOWNERS](.github/CODEOWNERS)。
 - 一个 PR 只做一件事；出界的改动先按 [Issue 模板](.github/ISSUE_TEMPLATE/) 提 issue，不夹带进 PR。
+
+---
+
+## 许可
+
+- **代码与配置**：**GPL-3.0-or-later**，全文见 [LICENSE](LICENSE)。
+- **品牌素材**（logo 及派生尺寸）：单独按 **CC BY-SA 4.0** 授权；名称与商标不随素材授权，见 [assets/README.md](assets/README.md)。
+- **第三方组件**：随仓库或随产物分发的第三方东西，各自保留原许可；清单与我们做过的改动见 [THIRD-PARTY.md](THIRD-PARTY.md)。

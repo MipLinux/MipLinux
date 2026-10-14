@@ -1,0 +1,62 @@
+--- a/seat.c
++++ b/seat.c
+@@ -11,11 +11,13 @@
+ #include "config.h"
+ 
+ #include <assert.h>
++#include <libinput.h>
+ #include <linux/input-event-codes.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <wayland-server-core.h>
+ #include <wlr/backend.h>
++#include <wlr/backend/libinput.h>
+ #include <wlr/backend/multi.h>
+ #include <wlr/backend/session.h>
+ #include <wlr/types/wlr_cursor.h>
+@@ -438,6 +440,27 @@
+ 	struct cg_seat *seat = wl_container_of(listener, seat, new_input);
+ 	struct wlr_input_device *device = data;
+ 
++	if (device->type == WLR_INPUT_DEVICE_POINTER) {
++		if (!wlr_input_device_is_libinput(device)) {
++			wlr_log(WLR_INFO, "Pointer %s is not a libinput device", device->name);
++		} else {
++			struct libinput_device *libinput_device = wlr_libinput_get_device_handle(device);
++			int tap_fingers = libinput_device_config_tap_get_finger_count(libinput_device);
++			wlr_log(WLR_INFO, "Pointer %s supports tapping with %d fingers", device->name, tap_fingers);
++			if (tap_fingers > 0) {
++				enum libinput_config_status status = libinput_device_config_tap_set_enabled(
++					libinput_device, LIBINPUT_CONFIG_TAP_ENABLED);
++				if (status != LIBINPUT_CONFIG_STATUS_SUCCESS) {
++					wlr_log(WLR_ERROR, "Cannot enable touchpad tapping on %s: %s", device->name,
++						libinput_config_status_to_str(status));
++				} else {
++					wlr_log(WLR_INFO, "Enabled touchpad tapping on %s (state=%d)", device->name,
++						libinput_device_config_tap_get_enabled(libinput_device));
++				}
++			}
++		}
++	}
++
+ 	switch (device->type) {
+ 	case WLR_INPUT_DEVICE_KEYBOARD:
+ 		handle_new_keyboard(seat, wlr_keyboard_from_input_device(device), false);
+--- a/meson.build
++++ b/meson.build
+@@ -38,6 +38,7 @@
+ endif
+ 
+ wlroots        = dependency('wlroots-0.20', fallback: ['wlroots', 'wlroots'])
++libinput       = dependency('libinput')
+ wayland_server = dependency('wayland-server')
+ xkbcommon      = dependency('xkbcommon')
+ math           = cc.find_library('m')
+@@ -112,6 +113,7 @@
+   dependencies: [
+     wayland_server,
+     wlroots,
++    libinput,
+     xkbcommon,
+     math,
+   ],

@@ -3,5 +3,11 @@ Welcome to MipLinux!
 Tips:
   Wired network: just plug in (DHCP)
   Wi-Fi: nmcli or nmtui
+    nmcli device wifi rescan
+    nmcli device wifi list
+    nmcli device wifi connect "SSID" password "PWD"
+
+If the installer UI disappears: press Ctrl+Alt+F1 to return to it (it runs on tty1).
+If tty1 shows a shell instead, run: systemctl start mipl-installer
 
 Docs: https://github.com/MipLinux/MipLinux

@@ -68,7 +68,7 @@ docs/work/
 | 角色 | 是谁 | 宿主机 | 能碰的范围 |
 |---|---|---|---|
 | 维护者 | [@LaT-SKY](https://github.com/LaT-SKY) | CachyOS | 全部；`main` 受保护，PR 必须有其审核；真机、`root` 操作与公开发布由其本人执行 |
-| 协作者 A | [@ieer040126](https://github.com/ieer040126) | Arch Linux | 按 issue 指派的范围改；跨线改动先提 issue |
+| 协作者 A | [@ideer0126](https://github.com/ideer0126) | Arch Linux | 按 issue 指派的范围改；跨线改动先提 issue |
 | 协作者 B | [@yks0630](https://github.com/yks0630) | Arch Linux | 同上 |
 
 人够三条线并行，所以同一轮**通常同时开三个 issue**（每个都要写明文件路径，见下）。

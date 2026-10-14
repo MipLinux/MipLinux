@@ -18,7 +18,7 @@
 set -eu
 
 SEATD_LAUNCH=/usr/bin/seatd-launch
-CAGE=/usr/bin/cage
+CAGE=/usr/local/bin/mipl-cage
 INSTALLER=/usr/local/bin/mipl-installer
 
 for binary in "$SEATD_LAUNCH" "$CAGE" "$INSTALLER"; do
@@ -59,6 +59,7 @@ else
     echo "mipl-kiosk: 没有可用 GPU（或为虚拟 GPU）→ 用 wlroots 默认渲染器" >&2
 fi
 
+# Live 用经 libinput 轻点补丁构建的 mipl-cage；上游 cage 默认不启用多数触摸板的轻点。
 # `--` 之后是 cage 的命令行：-s = allow VT switching；再往后是 cage 的客户端。
 # 多余参数透传给安装器，方便在 Live 里手工试 --theme=dark / --scale=2 / --self-test。
 exec "$SEATD_LAUNCH" -- "$CAGE" -s "$INSTALLER" "$@"

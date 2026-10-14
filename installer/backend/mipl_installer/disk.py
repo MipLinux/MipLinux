@@ -25,6 +25,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 from . import util
 from .events import step_event
@@ -144,6 +145,10 @@ class Candidate:
     size: int
     removable: bool
     in_use: bool
+    #: 占着这块盘的挂载**全部**来自我们的目标命名空间（`/mnt/mipl` 及其子树）。
+    #: 那不是用户环境的一部分，是上一次安装没收拾干净的现场，开工前会清掉 ——
+    #: 所以它不该把盘从候选表里抹掉（#105 实机：盘直接消失，连选都选不了）。
+    stale_target: bool = False
     #: "gpt" / "dos" / None（读不到就老实说不知道）
     table_type: str | None = None
     partitions: tuple[Partition, ...] = ()
@@ -158,8 +163,11 @@ class Candidate:
 
         **这不是动手时的守卫** —— 真正的守卫是 `assert_usable`（装的那一刻再查
         一遍，见 cli/pipeline）。这里只负责把盘分成「可选 / 不可选」两堆。
+
+        `in_use` 但 `stale_target` 的盘算可选：占用我们自己的，`pipeline.run`
+        动手前会 `cleanup_stale_target` 清掉；真清不掉时守卫照样拒绝。
         """
-        return not self.in_use and not self.too_small
+        return (not self.in_use or self.stale_target) and not self.too_small
 
 
 # ── 该不该动手 ────────────────────────────────────────────────────────
@@ -204,6 +212,76 @@ def stray_mountpoints(mountinfo_text: str, devices: list[str], keep: set[str]) -
     return strays
 
 
+@dataclass(frozen=True)
+class MountEntry:
+    """`mountinfo` 里的一行：挂载点 / 来源 / 文件系统类型。
+
+    三样都留着 —— 归属判断看挂载点，报错文案要说得清「是谁挂的」。
+    """
+
+    mountpoint: str
+    source: str
+    fstype: str
+
+
+def mount_entries(mountinfo_text: str) -> list[MountEntry]:
+    """把 `mountinfo` 解析成条目（字段含义见 `mount_sources` 的说明）。"""
+    entries: list[MountEntry] = []
+    for line in mountinfo_text.splitlines():
+        fields = line.split()
+        if "-" not in fields:
+            continue
+        sep = fields.index("-")
+        if len(fields) < sep + 3:
+            continue
+        entries.append(MountEntry(fields[4], fields[sep + 2], fields[sep + 1]))
+    return entries
+
+
+def _is_under(mountpoint: str, target: str) -> bool:
+    """`mountpoint` 是 `target` 本身或它的子孙。
+
+    按路径分段比，**不能用裸 `startswith`**：`/mnt/mipl2` 不是 `/mnt/mipl` 的子树。
+    """
+    base = target.rstrip("/")
+    if not base:
+        return True
+    return mountpoint == base or mountpoint.startswith(base + "/")
+
+
+def mounts_under(mountinfo_text: str, target: str) -> list[MountEntry]:
+    """目标命名空间里的挂载 —— **只可能是安装器自己留下的**。
+
+    这是 #105 的归属判据：`/mnt/mipl` 是安装器的保留路径，用户挂盘挂不到这里，
+    所以「在这个路径下」就等于「是我们的」，不必再去问文件系统标签。
+    """
+    return [entry for entry in mount_entries(mountinfo_text) if _is_under(entry.mountpoint, target)]
+
+
+def stale_target_sources(mountinfo_text: str, target: str) -> set[str]:
+    """挂在目标命名空间下的**挂载源**（设备路径）。
+
+    用途是给候选盘分类：一块盘如果正被这些源占着，那占用是**我们自己**的，
+    不该让它从候选表里消失（见 `Candidate.stale_target`）。
+    """
+    return {entry.source for entry in mounts_under(mountinfo_text, target)}
+
+
+def ancestor_mounts(mountinfo_text: str, target: str) -> list[MountEntry]:
+    """`target` 的严格祖先里的挂载点（不含根）。
+
+    祖先上挂着东西时**不能动手**：`ensure_dir(target)` 会把目录建进**别人的文件
+    系统**，我们的挂载还会叠在人家那一层之上。根（`/`）不算 —— 它永远是挂载点
+    （Live 的 overlay / tmpfs），算进来这条守卫就成了永远拒绝。
+    """
+    base = target.rstrip("/")
+    if not base:
+        return []
+    parts = [part for part in base.split("/") if part]
+    parents = {"/" + "/".join(parts[:depth]) for depth in range(1, len(parts))}
+    return [entry for entry in mount_entries(mountinfo_text) if entry.mountpoint in parents]
+
+
 def same_device(source: str, device: str) -> bool:
     """`/dev/vda1` 属于 `/dev/vda`；`/dev/vda` 不等于 `/dev/vdb`。"""
     if source == device:
@@ -221,13 +299,19 @@ def assert_usable(
     size_bytes: int,
     sources: set[str],
     target_mountpoint: str,
-    target_is_mountpoint: bool,
+    target_mounts: list[MountEntry],
+    blocking_ancestors: list[MountEntry],
 ) -> Layout:
     """动手前的全部守卫。**任一条不过就不动手**，不「先做着看看」。
 
     每一条都带 `reason`（机器可读的失败码）：界面据此挑自己的句子、并在能一键
-    补救的那一条上给出按钮（`targetMounted` → 「卸载 /mnt」，见 `queries.unmount_target`）。
-    没有 `reason` 的话，界面只能去比对中文报错 —— 那是外部工具的措辞，改一个字就失效。
+    补救的那一条上给出按钮（`targetMounted` → 「卸载目标挂载点」，见
+    `queries.unmount_target`）。没有 `reason` 的话，界面只能去比对中文报错 ——
+    那是外部工具的措辞，改一个字就失效。
+
+    挂载这一条分成两半，因为**归属不同、出路也不同**：`target_mounts` 是我们
+    自己上一次留下的（`cleanup_stale_target` 会先清，清不掉才拦到这里），
+    `blocking_ancestors` 是别人的挂载 —— 我们不替谁卸，只能说明白让他自己处理。
     """
     if not util.is_block_device(device):
         raise InstallerError(
@@ -243,11 +327,21 @@ def assert_usable(
             hint="去掉分区号，给整盘路径（/dev/vda1 → /dev/vda）",
             reason="isPartition",
         )
-    if target_is_mountpoint:
+    if blocking_ancestors:
+        points = "、".join(entry.mountpoint for entry in blocking_ancestors)
         raise InstallerError(
-            f"{target_mountpoint} 已经是个挂载点，拒绝把系统装上去",
+            f"{points} 上挂着别的东西，不能在里面建目标系统",
             EXIT_GUARD,
-            hint=f"手动卸载后再跑；安装器不替谁卸载机器上已有的挂载",
+            hint=(f"这些挂载不是安装器留下的；先自己卸掉"
+                  f"（`umount -R {blocking_ancestors[0].mountpoint}`），或把它们挂到别处再重试"),
+            reason="targetMountedForeign",
+        )
+    if target_mounts:
+        points = "、".join(entry.mountpoint for entry in target_mounts)
+        raise InstallerError(
+            f"{target_mountpoint} 下还挂着上一次留下的挂载：{points}",
+            EXIT_GUARD,
+            hint=f"自动清理没成功（多半有进程占着它）；手动 `umount -R {target_mountpoint}` 后再跑",
             reason="targetMounted",
         )
 
@@ -477,19 +571,35 @@ def list_candidates(
     sysfs_root: str = "/sys",
     disk_root: str = "/dev",
     sources: set[str] | None = None,
+    mountinfo_text: str | None = None,
+    target: str | None = None,
     runner: Runner | None = None,
 ) -> list[Candidate]:
     """选盘页的数据源：枚举所有**整块盘**，每块附上能确证的事实。
 
     `runner` 给了就顺手用 `blkid` 补文件系统类型与卷标（Live 里是 root，读得到）；
     不给就只报 sysfs 那几列 —— 开发机上跑得动，不必是 root。
+
+    **一块盘只被我们自己的目标挂载占着时，照样是候选**（`stale_target`）：
+    上一次被强杀留下的 `/mnt/mipl` 会让盘的挂载源命中它自己，把它从列表里抹掉 ——
+    于是用户在选盘页看见「没有找到可用的磁盘」，连重试的机会都没有（#105 实机）。
     """
+    if mountinfo_text is None:
+        mountinfo_text = util.read_text("/proc/self/mountinfo")
     if sources is None:
-        sources = mount_sources(util.read_text("/proc/self/mountinfo"))
-    return [
-        inspect(device, sysfs_root=sysfs_root, sources=sources, runner=runner)
-        for device in detect_disks(sysfs_root=sysfs_root, disk_root=disk_root)
-    ]
+        sources = mount_sources(mountinfo_text)
+    stale = stale_target_sources(mountinfo_text, target or util.DEFAULT_TARGET)
+
+    candidates: list[Candidate] = []
+    for device in detect_disks(sysfs_root=sysfs_root, disk_root=disk_root):
+        candidate = inspect(device, sysfs_root=sysfs_root, sources=sources, runner=runner)
+        mounted = {source for source in sources if same_device(source, device)}
+        ours = {source for source in stale if same_device(source, device)}
+        # 「只有我们的」才算：盘上同时还挂着别人的东西时，它照旧不可选
+        if ours and mounted <= ours:
+            candidate = replace(candidate, stale_target=True)
+        candidates.append(candidate)
+    return candidates
 
 
 def _ensure_node(runner: Runner, path: str, major: int, minor: int) -> bool:
@@ -669,8 +779,15 @@ def make_filesystems(runner: Runner, esp: str, root: str) -> None:
     runner.run(["mkfs.ext4", "-F", "-L", EXT4_LABEL, root], exit_code=EXIT_GUARD)
 
 
-def mount_target(runner: Runner, root: str, esp: str, target: str = "/mnt") -> None:
-    """root 挂到 target，ESP 挂到 target/boot（理由见模块开头）。"""
+def mount_target(runner: Runner, root: str, esp: str, target: str = util.DEFAULT_TARGET,
+                 *, on_root_mounted: Callable[[], None] | None = None) -> None:
+    """root 挂到 target，ESP 挂到 target/boot（理由见模块开头）。
+
+    `on_root_mounted` 在 root **真的挂上**的那一刻被调用：收尾的「挂上了没有」
+    只能从这里拿到 —— 等本函数返回再置位就晚了。ESP 挂载失败、或随后的 UUID
+    读不到时，root 已经挂在 target 上，而调用方还以为没挂过（#105 的残留就是
+    这么来的：普通失败路径也留挂载）。dry-run 下不挂，也就不通知。
+    """
     runner.reporter.emit(step_event("disk", "mount", "挂载到目标系统"))
     if not runner.dry_run:
         # mkfs 完到这儿之间，udisks 可能已经自动挂上了目标分区：先解除再挂我们的
@@ -679,11 +796,13 @@ def mount_target(runner: Runner, root: str, esp: str, target: str = "/mnt") -> N
             runner.run(["umount", point], check=False)
     ensure_dir(runner, target)
     runner.run(["mount", root, target], exit_code=EXIT_GUARD)
+    if on_root_mounted is not None and not runner.dry_run:
+        on_root_mounted()
     ensure_dir(runner, f"{target}/boot")
     runner.run(["mount", esp, f"{target}/boot"], exit_code=EXIT_GUARD)
 
 
-def unmount_target(runner: Runner, target: str = "/mnt") -> None:
+def unmount_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> None:
     """卸载。**失败不抛** —— 收尾阶段再抛一个异常，只会盖掉真正的失败原因。"""
     if runner.dry_run:
         return
@@ -692,6 +811,37 @@ def unmount_target(runner: Runner, target: str = "/mnt") -> None:
     runner.reporter.note("卸载目标：等磁盘写缓存落盘，写入量大时这一步可能看似停住几分钟")
     for argv in (["umount", "-R", target], ["umount", "-R", f"{target}/boot"], ["umount", target]):
         runner.run(argv, check=False)
+    # **卸没卸掉要说出来。** `check=False` 一路静默，于是「卸载目标」这句旁白可以
+    # 与事实相反（实测：日志句柄把目标钉成 busy，挂载留了下来，用户只看到下一次
+    # 开工装不了，没有任何解释）。这里再看一眼挂载表，把真相摆在日志里（#105）。
+    if is_mountpoint(target):
+        runner.reporter.note(
+            f"卸载没成功：{target} 还挂着（多半有进程占着它）；"
+            f"下一次开工会自动清理，也可以手动 `umount -R {target}`"
+        )
+
+
+def cleanup_stale_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> list[str]:
+    """清掉**我们自己**上一次留在目标命名空间里的挂载（#105）。
+
+    强杀 / 关窗 / 断电走不到失败收尾，`target` 下会剩下 root、ESP，以及
+    `arch-chroot` 挂的 proc / sys / dev / run / tmp。它们会把这一次的守卫拦在
+    门外（`reason=targetMounted`），用户面对一个装不了的现场。
+
+    只在**目标命名空间**（`target` 及其子树）里动手 —— 那是安装器的保留路径，
+    用户挂盘挂不到那里；祖先上的外来挂载一律不碰（见 `ancestor_mounts`）。
+    返回卸掉的挂载点，没有残留时是空表。**在守卫之前调用**，否则残留会先被
+    拦下，而且我们自己那块盘还会被 `diskInUse` 误读成「正在被使用」。
+    """
+    if runner.dry_run:
+        return []
+    entries = mounts_under(util.read_text("/proc/self/mountinfo"), target)
+    if not entries:
+        return []
+    points = [entry.mountpoint for entry in entries]
+    runner.reporter.note("清掉上一次留下的挂载：" + "、".join(points))
+    unmount_target(runner, target)
+    return points
 
 
 def uuid_of(runner: Runner, device: str) -> str:

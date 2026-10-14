@@ -110,7 +110,7 @@ installer/
 最高风险的一段，且**与界面无关** —— 先做完它，界面才是「套壳」而不是「猜」。
 
 - `disk.py`：`wipefs` 擦盘 → GPT → ESP 512 MiB + root 剩余（**盘尾留 1 MiB 给 GPT 备份表头**，压上去内核会丢分区）
-- `packages.py`：`pacstrap` 到 `/mnt`；清单读 `backend/mipl_installer/data/target-packages.x86_64`
+- `packages.py`：`pacstrap` 到目标挂载点（`/mnt/mipl`）；清单读 `backend/mipl_installer/data/target-packages.x86_64`
 - `configure.py`：`fstab`（按 UUID）、locale、时区、用户 + sudo、`pacman-key --init/--populate`、mirrorlist 写死国内源、chroot 内 `mkinitcpio -P`
 - `boot.py`：`bootctl install` + loader entry（只写需要显式覆盖的内核参数）+ `efibootmgr`
 
@@ -182,15 +182,16 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 | 失败模式 | 兜底 / 验收 |
 |---|---|
 | NVRAM 写不进（主板满 / 只读） | 复制到 `\EFI\BOOT\BOOTX64.EFI`（可移除介质路径），并在界面上说明 |
-| 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续）　✅ 2026-10-04 QEMU 实测（[tech/04 §7.2](tech/04-安装逻辑与实测.md)） |
+| 装包中途断网 | 重试；失败不留半成品（重来一遍，而不是在残骸上继续）　✅ 2026-10-04 QEMU 实测（[tech/04 §8.2](tech/04-安装逻辑与实测.md)） |
 | `pacman-key` 没初始化 | 检查点 6 会暴露 —— M1 的 `configure.py` 必须做 `--init` / `--populate` |
 | `reflector` 覆盖 mirrorlist | 装后系统不启用它的 timer（防线见 [tech/05](tech/05-装后系统验证.md) §3.1） |
 | 安装器崩溃 | `OnFailure=` 拉起 `mipl-installer-tty.service`，把 tty1 交回 `getty`（**不自动重启**安装器）；日志看 `journalctl -u mipl-installer` 与 `journalctl -u mipl-installer-tty` |
+| 强杀 / 关窗 / 断电后目标路径下留着上一次的挂载 | 残留不让目标盘从选盘页消失（只被我们自己占着的盘照旧可选，并说明会在开工前清理）；开工前清掉**我们自己的**残留（`/mnt/mipl` 及其子树）；祖先上的外来挂载照旧拦住并说明，不替谁卸　✅ 2026-10-14 QEMU 实测（[tech/04 §8.6](tech/04-安装逻辑与实测.md)） |
 | QEMU 无 GPU，Electron 起不来 | `WLR_RENDERER=pixman` + Chromium 自带的 SwiftShader 软渲染（M2 先验） |
 | Electron 以 root 身份起不来 | Chromium 沙箱在 root 下拒绝启动 → 启动器固定加 `--no-sandbox`（整个 Live 就是可信 kiosk 场景，风险写入 D14 条目） |
 | Electron 在 cage 里不走 Wayland | 启动器固定 `--ozone-platform=wayland`；XWayland **不在** Live 清单里，不许依赖它兜底 |
 | 中文 SSID / 密码 | `nmcli` 走 UTF-8；界面 CJK 字体已在 Live 清单里 |
-| 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次　✅ 2026-10-04 QEMU 实测（[tech/04 §7.1](tech/04-安装逻辑与实测.md)） |
+| 4K 扇区 / NVMe | 用 `pyparted` 的对齐参数；QEMU 里挂一块 4K 盘验一次　✅ 2026-10-04 QEMU 实测（[tech/04 §8.1](tech/04-安装逻辑与实测.md)） |
 
 ---
 

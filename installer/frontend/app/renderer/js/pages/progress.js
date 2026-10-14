@@ -62,14 +62,19 @@ const SLOW_STEPS = new Set(['keyring-init', 'keyring-populate', 'keyring-refresh
  *
  * 认得的用本地化文案（英文模式才不会冒出中文），**认不出的照实摆后端那句** ——
  * 编一句「安装失败」比原文更没用（同 `network.err.other` 的道理）。
- * `action` 是能一键补救的那几条：目前只有「`/mnt` 被占用」（守卫拒绝时盘一个
- * 字节都没动，卸掉挂载就能重来）。
+ * `action` 是能一键补救的那几条，**只有我们自己的挂载才配得上按钮**：守卫拒绝时
+ * 盘一个字节都没动，卸掉就能重来。`targetMountedForeign`（别人挂在我们目标路径
+ * 上面）刻意不给 `action` —— 卸别人的挂载不是安装器该做的事。
  */
 const KNOWN_FAILURES = {
   targetMounted: {
     title: 'progress.err.targetMounted',
     hint: 'progress.err.targetMountedHint',
     action: 'unmountTarget',
+  },
+  targetMountedForeign: {
+    title: 'progress.err.targetMountedForeign',
+    hint: 'progress.err.targetMountedForeignHint',
   },
 };
 

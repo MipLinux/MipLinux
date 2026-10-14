@@ -11,7 +11,7 @@
 #     mount -o ro /dev/sr0 /run/mipl-src      # ← 实测源码盘是 sr0
 #     bash /run/mipl-src/installer/tests/live-rehearsal.sh /dev/vda
 #
-# 源码挂在 /run/mipl-src 而不是 /mnt —— /mnt 是**安装器要用的**目标挂载点，
+# 源码挂在 /run/mipl-src，不挂在安装器的目标路径下 —— 那是**安装器要用的**地方，
 # 两者混在一起会让「装到哪」这件事变得说不清。
 #
 # 为什么还要当场装 python-pyparted：线 E 的包清单还没落地（M0 在做）。
@@ -27,7 +27,7 @@ die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
 # 把安装日志留一份在**目标盘**上：Live 是内存盘，poweroff 之后 /tmp 里的东西
 # 就没了，而失败现场恰恰是最需要留下来的。装完的系统里能直接 `cat /root/…`。
 keep_log() {
-  local disk="$1" log="$2" target="${3:-/mnt}" root_part
+  local disk="$1" log="$2" target="${3:-/mnt/mipl}" root_part
   [[ -f "$log" ]] || return 0
   # 最后一个分区是 root（第一个是 ESP）。
   # **必须带 `-l`（list 模式）**：`lsblk` 的树线（`└─`）在管道里也会输出，

@@ -63,7 +63,7 @@ class TestReadPackageList(unittest.TestCase):
 
 class TestInstallOrder(unittest.TestCase):
     """`FakeRunner` 只在「跑命令」这一层是替身：`ensure_dir` / `write_text` 仍会
-    真的落盘，所以目标一律用 tmp（也顺带证明我们没往 /mnt 乱写）。"""
+    真的落盘，所以目标一律用 tmp（也顺带证明我们没往真目标乱写）。"""
 
     def test_keyring_before_pacstrap(self):
         runner = FakeRunner()
@@ -147,15 +147,18 @@ class TestPackageCounter(unittest.TestCase):
         self.assertEqual([(e.step, e.total) for e in install_events[1:]], [(1, 3), (2, 3), (3, 3)])
 
     def test_pacstrap_only_takes_a_hook_when_a_counter_is_given(self):
-        plain = FakeRunner()
-        packages.pacstrap(plain, "/mnt", ["base"], "/etc/pacman.conf")
-        self.assertEqual(plain.line_hooks, [None])
+        # 目标必须是个真的存在、又写得进的目录：`pacstrap` 里的 `ensure_dir`
+        # 会真 mkdir（替身只挡命令），拿默认目标跑就会往宿主机的 /mnt 里写。
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = FakeRunner()
+            packages.pacstrap(plain, tmp, ["base"], "/etc/pacman.conf")
+            self.assertEqual(plain.line_hooks, [None])
 
-        wired = FakeRunner()
-        packages.pacstrap(wired, "/mnt", ["base"], "/etc/pacman.conf",
-                          counter=packages.PackageCounter(RecordingReporter()))
-        self.assertEqual(len(wired.line_hooks), 1)
-        self.assertTrue(callable(wired.line_hooks[0]))
+            wired = FakeRunner()
+            packages.pacstrap(wired, tmp, ["base"], "/etc/pacman.conf",
+                              counter=packages.PackageCounter(RecordingReporter()))
+            self.assertEqual(len(wired.line_hooks), 1)
+            self.assertTrue(callable(wired.line_hooks[0]))
 
 
 if __name__ == "__main__":

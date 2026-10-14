@@ -16,6 +16,15 @@
     sudo ./scripts/mipl.sh installer --serial console        # 2. 起 QEMU（另开一个终端）
     python3 installer/tests/live-e2e.py out/installer-serial.sock --log out/live-e2e.log
 
+**只验收尾 / 残留这类与「装了什么」无关的行为时，别用完整清单**（一轮几十分钟）：
+
+    ... live-e2e.py <socket> --packages nano --steps disk,packages --skip-kill
+
+`--packages` 覆盖包清单，`--steps` 只跑其中几个阶段 —— 两者都直接透给后端 CLI。
+**取消那一轮要留一个后续阶段**（例 `disk,packages,configure`）：取消只在阶段之间生效，
+信号落在最后一个阶段等于没取消。提速开关与串口路径的 108 字节上限见
+[tech/04 §8.6](../../docs/work/tech/04-安装逻辑与实测.md)。
+
 脚本**不启动也不关闭 QEMU** —— 那是 `mipl.sh` 的事（根文件的红线：命令一律走脚本）；
 它只连上去、敲命令、记日志，最后 `poweroff`。
 
@@ -40,6 +49,39 @@ INSTALL_TIMEOUT = 3600.0
 #: Live 里后端的位置：构建脚本把整个 `installer/` 拷到 `/usr/local/lib/mipl-installer/`。
 BACKEND = "/usr/local/lib/mipl-installer/backend"
 RUN = f"PYTHONPATH={BACKEND} python3 -m mipl_installer"
+
+#: `--packages`：只验「挂载收尾 / 残留恢复」这类**与装了什么无关**的行为时，换成一份
+#: 精简清单。完整清单在 QEMU 里一轮要几十分钟（实测 30+ 分钟），而这些判据一条都不
+#: 依赖字体 / 输入法 / NVIDIA 那些大包。
+PACKAGES_PATH = "/tmp/mipl-packages.txt"
+
+
+def packages_setup(packages: str) -> str:
+    """在客机里写下精简清单（不给 `--packages` 时是空串，脚本里留了占位符）。"""
+    if not packages:
+        return ""
+    return f"printf '%s\\n' {packages} > {PACKAGES_PATH}\n"
+
+
+def run_options(packages: str, steps: str) -> str:
+    """追加到安装器命令行上的开关：包清单 + 只跑哪几个阶段。"""
+    parts = []
+    if packages:
+        parts.append(f"--packages-file {PACKAGES_PATH}")
+    if steps:
+        parts.append(f"--steps {steps}")
+    return (" ".join(parts) + " ") if parts else ""
+
+
+def prepare(script: str, packages: str, steps: str) -> str:
+    """把脚本里的占位符换成实际开关。
+
+    脚本是 import 时求值的 f-string，而这两个值要到 `main()` 才知道，所以用占位符 +
+    发送前替换 —— 比把整段 heredoc 塞进函数体（那会改动缩进，而缩进是发给客机的
+    正文）安全得多。
+    """
+    return (script.replace("__PACKAGES_SETUP__", packages_setup(packages))
+                  .replace("__RUN_OPTIONS__", run_options(packages, steps)))
 
 #: ANSI 控制序列：CSI（`\x1b[...m` 之类）、OSC（`\x1b]3008;...\x1b\\`，systemd 的会话跟踪）、
 #: 以及字符集切换（`\x1b(B`）。串口上这些一个都不少 —— 见 `wait_for` 的说明。
@@ -172,6 +214,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--verify-target", action="store_true",
                         help="不装盘，只把装好的目标盘只读挂上验一遍（检查点 5 的静态面）")
     parser.add_argument("--skip-cancel", action="store_true", help="跳过取消那一轮")
+    parser.add_argument("--packages", default="",
+                        help="覆盖包清单（空格分隔）。只验挂载收尾这类与装了什么无关的"
+                             "行为时给个一两个小包，一轮就从几十分钟压到一两分钟")
+    parser.add_argument("--steps", default="",
+                        help="只跑其中几个阶段（逗号分隔，例：disk,packages）")
+    parser.add_argument("--skip-kill", action="store_true",
+                        help="跳过强杀那一轮（默认跑：残留 + 候选表取证，恢复由真装那轮证明）")
     return parser.parse_args(argv)
 
 
@@ -244,9 +293,9 @@ CANCEL_SCRIPT = f"""#!/bin/sh
 # 取消那一轮：**装到 packages 阶段**再举手。
 #
 # 为什么挑 packages：那时盘已经擦过、也挂上了 —— 取消要是没走失败收尾那条路，
-# /mnt 底下会留着一堆挂载点，而那正是最难查的现场（pipeline.run 的注释写着这条）。
-echo "CANCEL-BEFORE-FINDMNT=[$(findmnt /mnt)]"
-printf '%s\\n' mipltest | {RUN} --disk /dev/vda --yes --password-stdin --json-events \\
+# 目标路径底下会留着一堆挂载点，而那正是最难查的现场（pipeline.run 的注释写着这条）。
+echo "CANCEL-BEFORE-FINDMNT=[$(findmnt -R -n -o TARGET /mnt/mipl 2>/dev/null | tr '\\n' ' ')]"
+__PACKAGES_SETUP__printf '%s\\n' mipltest | {RUN} __RUN_OPTIONS__--disk /dev/vda --yes --password-stdin --json-events \\
   --locale ja_JP.UTF-8 --keymap de --timezone Asia/Tokyo --hostname mipl-e2e \\
   > /tmp/cancel.jsonl 2> /tmp/cancel.err &
 PID=$!
@@ -260,21 +309,61 @@ sleep 5
 kill -USR1 $PID && echo "CANCEL-SIGNAL-SENT"
 wait $PID
 echo "CANCEL-EXIT=$?"
-echo "CANCEL-AFTER-FINDMNT=[$(findmnt /mnt)]"
+echo "CANCEL-AFTER-FINDMNT=[$(findmnt -R -n -o TARGET /mnt/mipl 2>/dev/null | tr '\\n' ' ')]"
 echo "CANCEL-EVENTS-TAIL"
 tail -8 /tmp/cancel.jsonl
 echo "CANCEL-DONE"
 """
 
+KILL_SCRIPT = f"""#!/bin/sh
+# 强杀 + 恢复（#105 实机就是这么撞上的）：装到 packages 再**整棵进程树** SIGKILL。
+#
+# 为什么杀整棵树：实机上是关窗 / systemd 停 unit —— 整个 cgroup 一起死，
+# Python 与它下面的 pacstrap 谁也跑不到失败收尾。只杀 Python 的话 pacstrap 会
+# 变成孤儿继续写盘，验出来的现场是假的。
+kill_tree() {{
+  for child in $(cat /proc/$1/task/$1/children 2>/dev/null); do kill_tree "$child"; done
+  kill -9 "$1" 2>/dev/null
+}}
+__PACKAGES_SETUP__printf '%s\\n' mipltest | {RUN} __RUN_OPTIONS__--disk /dev/vda --yes --password-stdin --json-events \\
+  > /tmp/kill.jsonl 2> /tmp/kill.err &
+PID=$!
+i=0
+while [ $i -lt 900 ]; do
+  if grep -q '"phase": "packages"' /tmp/kill.jsonl 2>/dev/null; then break; fi
+  i=$((i+1)); sleep 2
+done
+echo "KILL-PHASE-REACHED=$i"
+sleep 5
+kill_tree "$PID"
+echo "KILL-SENT"
+sleep 2
+# 子树一起列出来：`arch-chroot` 会在目标下再挂 proc/sys/dev/run/tmp，
+# 只看顶层会漏掉它们（#105 正文点名的就是这几个）。
+echo "KILL-LEFT-FINDMNT=[$(findmnt -R -n -o TARGET /mnt/mipl 2>/dev/null | tr '\\n' ' ')]"
+# 杀干净了没有：还有进程占着目标，就说明这次「强杀」没杀透，现场是假的。
+echo "KILL-MOUNT-USERS=[$(fuser -m /mnt/mipl 2>/dev/null | tr '\\n' ' ')]"
+# 关键取证：盘还在不在候选表里。**不该**因为残留而整块消失（用户实机：
+# 只剩一句「没有找到可用的磁盘」，连重试都进不去）。
+echo "KILL-DISKS-BEGIN"
+{RUN} --print-disks 2>/dev/null
+echo ""
+echo "KILL-DISKS-END"
+echo "KILL-DONE"
+"""
+
 INSTALL_SCRIPT = f"""#!/bin/sh
 # 真装一次：高级安装的三项都用**非默认值**，好让装后系统验得出差别
 # （默认是 zh_CN.UTF-8 / us / Asia/Shanghai，验不出「选择真的写进去了」）。
-printf '%s\\n' mipltest | {RUN} --disk /dev/vda --yes --password-stdin --json-events \\
+__PACKAGES_SETUP__printf '%s\\n' mipltest | {RUN} __RUN_OPTIONS__--disk /dev/vda --yes --password-stdin --json-events \\
   --log /tmp/ev.jsonl \\
   --locale ja_JP.UTF-8 --keymap de --timezone Asia/Tokyo --hostname mipl-e2e
 echo "INSTALL-EXIT=$?"
+# 恢复的直接证据：这一轮开工时清掉了上一次强杀留下的挂载。中文在串口上会被打成
+# U+FFFD，所以这里只报**计数**；逐字那句在下面的 base64 里，解出来能核对。
+echo "INSTALL-CLEANUP-NOTES=[$(grep '"kind": "note"' /tmp/ev.jsonl 2>/dev/null | grep -c '/mnt/mipl')]"
 echo "INSTALL-TARGET-FILES-BEGIN"
-grep -H . /mnt/etc/locale.conf /mnt/etc/vconsole.conf /mnt/etc/hostname 2>&1
+grep -H . /mnt/mipl/etc/locale.conf /mnt/mipl/etc/vconsole.conf /mnt/mipl/etc/hostname 2>&1
 echo "INSTALL-TARGET-FILES-END"
 # 事件流的**逐字**副本。串口会把非 ASCII 打成 U+FFFD（guest tty 层的锅，不是安装器的），
 # 所以整份 base64 —— base64 是纯 ASCII，串口毁不掉。日志在 /tmp 里，重启就没了，
@@ -292,14 +381,20 @@ def probe(serial: Serial, timeout: float) -> None:
     serial.run_script("probe.sh", r"PROBE-DONE", timeout=timeout)
 
 
-def cancel(serial: Serial) -> None:
-    serial.script("cancel.sh", CANCEL_SCRIPT)
+def cancel(serial: Serial, packages: str = "", steps: str = "") -> None:
+    serial.script("cancel.sh", prepare(CANCEL_SCRIPT, packages, steps))
     serial.run_script("cancel.sh", r"CANCEL-DONE", timeout=INSTALL_TIMEOUT)
 
 
-def install(serial: Serial) -> None:
-    serial.script("install.sh", INSTALL_SCRIPT)
+def install(serial: Serial, packages: str = "", steps: str = "") -> None:
+    serial.script("install.sh", prepare(INSTALL_SCRIPT, packages, steps))
     serial.run_script("install.sh", r"INSTALL-DONE", timeout=INSTALL_TIMEOUT)
+
+
+def kill_recover(serial: Serial, packages: str = "", steps: str = "") -> None:
+    """强杀一轮，把残留与候选表**原样取证**（恢复由后面的真装那一轮证明）。"""
+    serial.script("kill.sh", prepare(KILL_SCRIPT, packages, steps))
+    serial.run_script("kill.sh", r"KILL-DONE", timeout=INSTALL_TIMEOUT)
 
 
 VERIFY_SCRIPT = f"""#!/bin/sh
@@ -308,8 +403,8 @@ VERIFY_SCRIPT = f"""#!/bin/sh
 # 为什么不用 `guestmount`：那要装 libguestfs（新增依赖，得先过维护者）。
 # 而「回到 Live 把盘挂上看看」既不需要新东西，又是真机上人本来就会做的事。
 # `-o ro` 是硬要求：这一步只读，一个字节都不该改。
-mkdir -p /mnt
-if mount -o ro /dev/vda2 /mnt; then
+mkdir -p /mnt/mipl
+if mount -o ro /dev/vda2 /mnt/mipl; then
   echo "VERIFY-MOUNT=ok"
 else
   echo "VERIFY-MOUNT=FAILED"
@@ -317,30 +412,30 @@ fi
 echo "VERIFY-FILES-BEGIN"
 for f in etc/locale.conf etc/vconsole.conf etc/hostname etc/locale.gen; do
   echo "--- /$f ---"
-  cat "/mnt/$f" 2>&1 | head -5
+  cat "/mnt/mipl/$f" 2>&1 | head -5
 done
-echo "VERIFY-LOCALTIME=$(readlink /mnt/etc/localtime 2>&1)"
-echo "VERIFY-JA-ENABLED=$(grep -c '^ja_JP.UTF-8' /mnt/etc/locale.gen 2>&1)"
+echo "VERIFY-LOCALTIME=$(readlink /mnt/mipl/etc/localtime 2>&1)"
+echo "VERIFY-JA-ENABLED=$(grep -c '^ja_JP.UTF-8' /mnt/mipl/etc/locale.gen 2>&1)"
 echo "VERIFY-FSTAB-BEGIN"
-cat /mnt/etc/fstab 2>&1
+cat /mnt/mipl/etc/fstab 2>&1
 echo "VERIFY-FSTAB-END"
-# ESP 是**另一个分区**（vda1）：只挂 root 的话 `/mnt/boot` 只是个空目录，
-# 于是 `ls /mnt/boot/loader/entries/` 会报「没有那个文件」—— 那看着像缺陷，
+# ESP 是**另一个分区**（vda1）：只挂 root 的话 `/mnt/mipl/boot` 只是个空目录，
+# 于是 `ls /mnt/mipl/boot/loader/entries/` 会报「没有那个文件」—— 那看着像缺陷，
 # 其实是脚本自己没挂 ESP。引导项与 root UUID 的对照必须在这里做。
 echo "VERIFY-BOOTLOADER"
-mkdir -p /mnt/boot
-if mount -o ro /dev/vda1 /mnt/boot; then
+mkdir -p /mnt/mipl/boot
+if mount -o ro /dev/vda1 /mnt/mipl/boot; then
   echo "VERIFY-ESP=ok"
-  ls /mnt/boot/loader/entries/ 2>&1
-  cat /mnt/boot/loader/entries/miplinux.conf 2>&1
+  ls /mnt/mipl/boot/loader/entries/ 2>&1
+  cat /mnt/mipl/boot/loader/entries/miplinux.conf 2>&1
   # 引导项里的 root UUID 必须与实际 root 分区的 UUID 一致 —— 对不上就是「装完起不来」
   echo "VERIFY-ROOT-UUID=$(blkid -s UUID -o value /dev/vda2 2>&1)"
-  umount /mnt/boot && echo "VERIFY-ESP-UMOUNT=ok"
+  umount /mnt/mipl/boot && echo "VERIFY-ESP-UMOUNT=ok"
 else
   echo "VERIFY-ESP=FAILED"
 fi
 echo "VERIFY-FILES-END"
-umount /mnt && echo "VERIFY-UMOUNT=ok"
+umount /mnt/mipl && echo "VERIFY-UMOUNT=ok"
 # 事件流的**逐字**副本：串口会把非 ASCII 打成 U+FFFD（tty 层的锅，不是安装器的），
 # 所以整个文件 base64 出来 —— base64 是纯 ASCII，串口毁不掉它。
 echo "VERIFY-EVENTLOG-BEGIN"
@@ -377,8 +472,12 @@ def main(argv: list[str] | None = None) -> int:
         probe(serial, args.timeout)
         if not args.probe_only:
             if not args.skip_cancel:
-                cancel(serial)
-            install(serial)
+                cancel(serial, args.packages, args.steps)
+            if not args.skip_kill:
+                # 强杀留下的残留 + 候选表取证；紧接着的 `install` 就是「恢复」的证据 ——
+                # 它跑的是同一条 CLI，残留要是没被清掉，那一轮会直接撞守卫。
+                kill_recover(serial, args.packages, args.steps)
+            install(serial, args.packages, args.steps)
         serial.line("poweroff")
         serial.drain(3.0)
     except TimeoutError as exc:

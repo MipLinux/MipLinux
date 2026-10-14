@@ -156,9 +156,51 @@ class TestInspectFacts(_SysfsCase):
         self.assertEqual(disk.model_of("/dev/vda", sysfs_root=str(self.root)), "")
 
 
+class TestStaleTargetCandidates(_SysfsCase):
+    """上一次安装留下的挂载，不该让盘从候选表里消失（#105 实机）。
+
+    现场：强杀之后 `/mnt/mipl` 还挂着目标盘的 vda1/vda2；`in_use` 于是为真，
+    前端只列 `usable` 的盘 —— 用户看见「没有找到可用的磁盘」，连重试都进不去。
+    """
+
+    MOUNTINFO = "\n".join([
+        "31 30 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+        "41 30 8:17 / /mnt/mipl rw,relatime - ext4 /dev/vda2 rw",
+        "42 30 8:18 / /mnt/mipl/boot rw,relatime - vfat /dev/vda1 rw",
+    ])
+
+    def _candidates(self, mountinfo: str) -> dict[str, disk.Candidate]:
+        _disk(self.block, "vda")
+        found = disk.list_candidates(sysfs_root=str(self.root), disk_root="/dev",
+                                     mountinfo_text=mountinfo, runner=None)
+        return {item.path: item for item in found}
+
+    def test_only_our_own_mounts_keeps_the_disk_selectable(self):
+        vda = self._candidates(self.MOUNTINFO)["/dev/vda"]
+        self.assertTrue(vda.in_use)          # 事实照旧：它确实被占着
+        self.assertTrue(vda.stale_target)    # 但占着它的是我们自己
+        self.assertTrue(vda.usable)          # 所以它还留在候选表里
+
+    def test_a_foreign_mount_on_the_same_disk_still_blocks_it(self):
+        """盘上同时挂着别人的东西时，它照旧不可选 —— 我们不替谁卸。"""
+        mountinfo = self.MOUNTINFO + "\n43 30 8:19 / /run/media/user rw - ext4 /dev/vda3 rw"
+        vda = self._candidates(mountinfo)["/dev/vda"]
+        self.assertTrue(vda.in_use)
+        self.assertFalse(vda.stale_target)
+        self.assertFalse(vda.usable)
+
+    def test_a_clean_machine_marks_nothing_stale(self):
+        vda = self._candidates("31 30 8:1 / / rw,relatime - ext4 /dev/sda1 rw")["/dev/vda"]
+        self.assertFalse(vda.in_use)
+        self.assertFalse(vda.stale_target)
+        self.assertTrue(vda.usable)
+
+
 class TestUsableAndFits(unittest.TestCase):
-    def _candidate(self, size: int, *, in_use: bool = False) -> disk.Candidate:
-        return disk.Candidate(path="/dev/vda", model="", size=size, removable=False, in_use=in_use)
+    def _candidate(self, size: int, *, in_use: bool = False,
+                   stale_target: bool = False) -> disk.Candidate:
+        return disk.Candidate(path="/dev/vda", model="", size=size, removable=False,
+                              in_use=in_use, stale_target=stale_target)
 
     def test_large_free_disk_is_usable(self):
         candidate = self._candidate(40 * GiB)
@@ -174,6 +216,15 @@ class TestUsableAndFits(unittest.TestCase):
         candidate = self._candidate(40 * GiB, in_use=True)
         self.assertFalse(candidate.too_small)
         self.assertFalse(candidate.usable)
+
+    def test_stale_target_disk_is_usable(self):
+        """占着它的**只有我们自己**的残留 → 还可选：开工前会清掉（#105）。"""
+        candidate = self._candidate(40 * GiB, in_use=True, stale_target=True)
+        self.assertTrue(candidate.usable)
+
+    def test_stale_target_does_not_rescue_a_too_small_disk(self):
+        """「是我们的残留」不改变容量事实：小盘照旧不可选。"""
+        self.assertFalse(self._candidate(2 * GiB, in_use=True, stale_target=True).usable)
 
     def test_fits_agrees_with_plan_layout(self):
         """`fits` 与 `plan_layout` 必须**同源**：两套阈值会让「列表里可选、装时被拒」。"""

@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from mipl_installer import disk, events, options, packages, pipeline
-from mipl_installer.util import EXIT_CONFIGURE, EXIT_USAGE, InstallerError
+from mipl_installer.util import EXIT_CONFIGURE, EXIT_GUARD, EXIT_USAGE, InstallerError
 from tests.support import FakeRunner, RecordingReporter
 
 
@@ -88,6 +88,14 @@ class _RunCase(unittest.TestCase):
             patch = mock.patch.object(pipeline, name)
             self.steps[name] = patch.start()
             self.addCleanup(patch.stop)
+
+        # 真 `step_disk` 在 root **真的挂上**那一刻置位 `state.mounted`（经
+        # `disk.mount_target` 的回调）。替身得照这个契约来，否则收尾那几条断言
+        # 验的是替身自己的行为，而不是 `run()` 的收尾逻辑（#105）。
+        def _fake_step_disk(runner, plan, cfg, layout, state):
+            state.mounted = True
+
+        self.steps["step_disk"].side_effect = _fake_step_disk
 
     def plan(self, **overrides) -> pipeline.Plan:
         params = dict(disk="/dev/vda")
@@ -299,6 +307,199 @@ class TestRunFailure(_RunCase):
         self.assertIn("失败收尾：卸载目标", self.reporter.notes)
 
 
+class _DetachOrderRunner(FakeRunner):
+    """跑 `umount` 之前先检查：目标盘那份日志关掉了没有（#105 实测的 `目标忙`）。"""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.umount_with_the_log_open: list[list[str]] = []
+
+    def run(self, argv, **kwargs):
+        command = [str(a) for a in argv]
+        if command and command[0] == "umount" and not getattr(self.reporter, "detached_logs", False):
+            self.umount_with_the_log_open.append(command)
+        return super().run(argv, **kwargs)
+
+
+class TestTargetLogIsClosedBeforeUnmount(unittest.TestCase):
+    """**回归测试**：用户报的「停止 / 杀掉之后目标还挂着」（#105 第二轮实机）。
+
+    根因不是强杀 —— 安装器**自己的日志**开在目标文件系统上，收尾的
+    `umount -R /mnt/mipl` 一律 `目标忙`（EBUSY），于是「卸载目标」这句旁白与事实
+    相反，挂载留在盘上，下一次开工连盘都选不了。判据：**任何** `umount` 之前，
+    目标盘那份日志必须已经关掉。
+    """
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = _DetachOrderRunner(reporter=self.reporter)
+        patches = [
+            mock.patch("mipl_installer.pipeline.Runner", return_value=self.runner),
+            mock.patch("mipl_installer.util.require_root"),
+            mock.patch("mipl_installer.util.is_block_device", return_value=True),
+            mock.patch("mipl_installer.util.is_partition", return_value=False),
+            mock.patch("mipl_installer.util.size_of_device", return_value=40 * disk.GiB),
+            mock.patch("mipl_installer.util.read_text", return_value=""),
+            mock.patch("mipl_installer.disk.is_mountpoint", return_value=False),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.steps = {}
+        for name in ("step_disk", "step_packages", "step_configure", "step_boot"):
+            patch = mock.patch.object(pipeline, name)
+            self.steps[name] = patch.start()
+            self.addCleanup(patch.stop)
+
+        def _fake_step_disk(runner, plan, cfg, layout, state):
+            state.mounted = True
+
+        self.steps["step_disk"].side_effect = _fake_step_disk
+
+    def _run(self) -> None:
+        pipeline.run(pipeline.Plan(disk="/dev/vda"), self.reporter, password="pw",
+                     confirm=lambda *a: None)
+
+    def test_a_failing_run_closes_the_target_log_first(self):
+        self.steps["step_packages"].side_effect = InstallerError("装包失败", EXIT_USAGE)
+        with self.assertRaises(InstallerError):
+            self._run()
+        self.assertEqual(self.runner.umount_with_the_log_open, [],
+                         "umount 跑在日志关掉之前 —— 目标忙，挂载会留下来")
+
+    def test_a_completed_run_closes_the_target_log_first(self):
+        self._run()
+        self.assertEqual(self.runner.umount_with_the_log_open, [])
+
+
+class TestStaleTargetRecovery(unittest.TestCase):
+    """残留挂载不能让下一次安装进不去（#105 实机第二轮反馈）。
+
+    现场：上一次被强杀，`/mnt/mipl` 还挂着目标盘的 `/dev/vda1`、`/dev/vda2`。
+    开工时**先清掉它再跑守卫** —— 顺序反了的话，`targetMounted` 与 `diskInUse`
+    会一起把这次安装拦在门外。清理失败（有人占着）时才允许守卫拒绝。
+    """
+
+    STALE = "\n".join([
+        "31 30 8:16 / /mnt/mipl rw,relatime - ext4 /dev/vda2 rw",
+        "32 30 8:17 / /mnt/mipl/boot rw,relatime - vfat /dev/vda1 rw",
+    ])
+    CLEAN = "31 30 8:1 / / rw,relatime - ext4 /dev/sda1 rw"
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = FakeRunner(reporter=self.reporter)
+        patches = [
+            mock.patch("mipl_installer.pipeline.Runner", return_value=self.runner),
+            mock.patch("mipl_installer.util.require_root"),
+            mock.patch("mipl_installer.util.is_block_device", return_value=True),
+            mock.patch("mipl_installer.util.is_partition", return_value=False),
+            mock.patch("mipl_installer.util.size_of_device", return_value=40 * disk.GiB),
+            mock.patch("mipl_installer.util.read_text", side_effect=self._read_text),
+            # 非 dry-run 下 `ensure_dir` 是真 mkdir：单测不许碰宿主机的 /mnt
+            mock.patch("mipl_installer.disk.ensure_dir"),
+            mock.patch("mipl_installer.disk.wipe_and_partition",
+                       return_value=("/dev/vda1", "/dev/vda2")),
+            mock.patch("mipl_installer.disk.make_filesystems"),
+            mock.patch("mipl_installer.disk.uuid_of", return_value="UUID"),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _read_text(self, path: str) -> str:
+        """mountinfo：替身不真卸，所以按「有没有跑过 umount」判断现场变了没有。
+
+        `stale_forever` 打开时永远返回残留 —— 模拟「有进程占着，卸不掉」。
+        """
+        if path != "/proc/self/mountinfo":
+            return ""
+        if self.unmounted and not self.stale_forever:
+            return self.CLEAN
+        return self.STALE
+
+    #: 默认：能被清掉（`umount` 一出现，mountinfo 就变干净）
+    stale_forever = False
+
+    @property
+    def unmounted(self) -> bool:
+        return any("umount" in " ".join(cmd) for cmd in self.runner.history)
+
+    def _run(self) -> None:
+        plan = pipeline.Plan(disk="/dev/vda", steps=("disk",))
+        pipeline.run(plan, self.reporter, password="pw", confirm=lambda *a: None)
+
+    def test_the_leftovers_are_cleared_before_the_guard(self):
+        self._run()
+        commands = [" ".join(cmd) for cmd in self.runner.history]
+        umount_at = next(i for i, c in enumerate(commands) if "umount" in c)
+        mount_at = next(i for i, c in enumerate(commands) if c.startswith("mount "))
+        self.assertLess(umount_at, mount_at, f"清理没排在挂载之前：{commands}")
+
+    def test_the_leftovers_do_not_block_this_run(self):
+        """这一轮跑完了 —— 没有 `targetMounted`、也没有 `diskInUse`。"""
+        self._run()
+
+    def test_a_leftover_we_cannot_clear_is_still_refused(self):
+        """清不掉的残留照样拦：那时盘一个字节都不该动。"""
+        plan = pipeline.Plan(disk="/dev/vda", steps=("disk",))
+        with mock.patch.object(type(self), "stale_forever", True):
+            with self.assertRaises(InstallerError) as ctx:
+                pipeline.run(plan, self.reporter, password="pw", confirm=lambda *a: None)
+        self.assertEqual(ctx.exception.reason, "targetMounted")
+        self.assertFalse(any("wipefs" in " ".join(cmd) for cmd in self.runner.history))
+
+
+class TestMountBookkeepingSurvivesPartialFailure(unittest.TestCase):
+    """#105 的根因回归：`mounted` 只能在 root **真挂上**那一刻置位。
+
+    旧判据是「`disk` 阶段跑完了」，于是 ESP 挂载失败、或随后 UUID 读不到时，
+    root 已经挂在盘上，收尾却以为没挂过 —— 「上一次留下的挂载」就是这么来的。
+    这一组**不 mock `step_disk`**，让真的挂载流程跑在替身 Runner 上。
+    """
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = FakeRunner(reporter=self.reporter)
+        patches = [
+            mock.patch("mipl_installer.pipeline.Runner", return_value=self.runner),
+            mock.patch("mipl_installer.util.require_root"),
+            mock.patch("mipl_installer.util.is_block_device", return_value=True),
+            mock.patch("mipl_installer.util.is_partition", return_value=False),
+            mock.patch("mipl_installer.util.size_of_device", return_value=40 * disk.GiB),
+            mock.patch("mipl_installer.util.read_text", return_value=""),
+            # 非 dry-run 下 `ensure_dir` 是真 mkdir：单测不许碰宿主机的 /mnt
+            mock.patch("mipl_installer.disk.ensure_dir"),
+            mock.patch("mipl_installer.disk.wipe_and_partition",
+                       return_value=("/dev/vda1", "/dev/vda2")),
+            mock.patch("mipl_installer.disk.make_filesystems"),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _run(self) -> None:
+        plan = pipeline.Plan(disk="/dev/vda", steps=("disk",))
+        pipeline.run(plan, self.reporter, password="pw", confirm=lambda *a: None)
+
+    def test_esp_mount_failure_still_unmounts_the_root_we_mounted(self):
+        # root 是 vda2、ESP 是 vda1：只让 ESP 那一条 mount 失败
+        self.runner.fail_patterns = {"mount /dev/vda1"}
+        with self.assertRaises(InstallerError):
+            self._run()
+        self.assertTrue(any("umount" in c for c in self.runner.commands()),
+                        f"ESP 挂载失败后没卸 root：{self.runner.commands()}")
+        self.assertIn("失败收尾：卸载目标", self.reporter.notes)
+
+    def test_uuid_failure_after_mount_still_unmounts(self):
+        with mock.patch("mipl_installer.disk.uuid_of",
+                        side_effect=InstallerError("读不到 UUID", EXIT_GUARD)):
+            with self.assertRaises(InstallerError):
+                self._run()
+        self.assertTrue(any("umount" in c for c in self.runner.commands()),
+                        f"UUID 读不到之后没卸 root：{self.runner.commands()}")
+
+
 class TestRunCancel(_RunCase):
     def test_cancel_raises_cancelled_and_touches_nothing(self):
         with self.assertRaises(pipeline.Cancelled) as ctx:
@@ -312,6 +513,26 @@ class TestRunCancel(_RunCase):
             with self.subTest(destructive=destructive):
                 self.assertFalse(any(destructive in c for c in commands))
         self.assertEqual(self.phases(), ["start"])
+
+
+    def test_cancel_after_the_target_is_mounted_still_unmounts(self):
+        """**回归测试**：取消要卸干净，不只是「什么都没做就取消」。
+
+        既有的 `TestRunCancel` 是 dry-run、在第一阶段之前就举手 —— 它证明不了
+        「盘已经挂上以后再取消」会怎样，而那才是实机现场（装到 packages 时点取消）。
+        """
+        calls = {"n": 0}
+
+        def cancel() -> bool:
+            calls["n"] += 1
+            return calls["n"] > 1          # 第一次放行（disk），第二次举手
+
+        with self.assertRaises(pipeline.Cancelled):
+            pipeline.run(self.plan(steps=("disk", "packages")), self.reporter,
+                         password="pw", confirm=lambda *a: None, should_cancel=cancel)
+        self.assertTrue(any("umount" in c for c in self.runner.commands()),
+                        f"取消后没卸目标：{self.runner.commands()}")
+        self.assertIn("失败收尾：卸载目标", self.reporter.notes)
 
 
 class TestResolveLayout(_RunCase):
@@ -343,6 +564,28 @@ class TestAttachTargetLog(unittest.TestCase):
             reporter.close()
             self.assertEqual(extra.read_text(encoding="utf-8"),
                              "    挂载前的一行\n    挂载后的一行\n")
+
+    def test_detach_closes_the_target_sink(self):
+        """**回归测试**：收尾卸载前必须**关掉**（不是「不再写」）目标盘那份日志。
+
+        实测（#105）：句柄开着时 `umount -R /mnt/mipl` 一律 `目标忙`，于是
+        「卸载目标」成了假话、挂载留在盘上。判据落在**句柄真的关了**上 ——
+        只把它从落点列表里摘掉、不关文件，内核那边照样是 EBUSY。
+        """
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            extra = Path(tmp) / "target.log"
+            reporter = events.TextReporter(stream=io.StringIO())
+            reporter.attach_log_path(str(extra))
+            handle = reporter._extra[0]
+            reporter.note("关之前")
+            reporter.detach_log_paths()
+            reporter.note("关之后")
+            reporter.close()
+            self.assertTrue(handle.closed, "卸载前没有把关掉 —— umount 会 EBUSY")
+            text = extra.read_text(encoding="utf-8")
+        self.assertIn("关之前", text)
+        self.assertNotIn("关之后", text)
 
     def test_json_reporter_writes_every_sink(self):
         import io

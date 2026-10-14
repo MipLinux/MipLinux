@@ -265,7 +265,8 @@ class TestSmallHelpers(unittest.TestCase):
         self.assertFalse(util.is_partition("/dev/null"))
 
     def test_chroot_argv_prefixes_arch_chroot(self):
-        self.assertEqual(util.chroot_argv("/mnt", ["locale-gen"]), ["arch-chroot", "/mnt", "locale-gen"])
+        self.assertEqual(util.chroot_argv(util.DEFAULT_TARGET, ["locale-gen"]),
+                         ["arch-chroot", util.DEFAULT_TARGET, "locale-gen"])
 
     def test_error_render_shows_the_hint(self):
         text = InstallerError("出事了", EXIT_GUARD, hint="那么办").render()

@@ -19,6 +19,8 @@ class RecordingReporter:
         self.notes: list[str] = []
         self.events: list = []
         self.commands: list[str] = []
+        #: 目标盘那份日志关掉了没有 —— 收尾卸载前必须关（#105 的 `目标忙`）。
+        self.detached_logs = False
 
     def emit(self, event) -> None:
         self.events.append(event)
@@ -28,6 +30,9 @@ class RecordingReporter:
 
     def command(self, argv) -> None:
         self.commands.append(" ".join(str(a) for a in argv))
+
+    def detach_log_paths(self) -> None:
+        self.detached_logs = True
 
     def text(self) -> str:
         return "\n".join(self.notes + ["$ " + c for c in self.commands])

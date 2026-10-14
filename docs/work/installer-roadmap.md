@@ -29,7 +29,7 @@
 |---|---|---|
 | 语言 | Python 3 | Live 里本来就有（`reflector` 依赖它，与 `archinstall` 无关）；测试与迭代最省事 |
 | 界面 | **Electron（HTML/CSS/JS）+ 官方仓库 `electron44`** | 应用本体只有 HTML/CSS/JS，运行时用系统包、不打包、不引 npm 依赖；iso 体积账见 [tech/11](tech/11-安装器前端实测.md) |
-| kiosk 合成器 | `cage` | 单窗口全屏的 Wayland 合成器，专为这种场景而生；与 P5 的用户桌面（niri / Hyprland）不冲突 |
+| kiosk 合成器 | `cage` | 单窗口全屏的 Wayland 合成器，专为这种场景而生；与 D15 的用户桌面（Hyprland）不冲突 |
 | 分区 | `python-pyparted` | 官方 Python 绑定（`archinstall` 同栈）；后续做双系统沿用同一条路 |
 | 联网 | NetworkManager + `nmcli` | Issue #30；安装器直接调命令行，不用自己写 D-Bus |
 | 引导（装后系统） | systemd-boot | UEFI-only 下与 ISO 自身的 `uefi.systemd-boot` 一致，少维护一套 |
@@ -89,7 +89,7 @@ installer/
 | **M0** | 骨架与可测环境 | QEMU 里开机直进安装器界面（还没有真功能） | 界面能起来；安装器崩了能落回 TTY | 无 |
 | **M1** | 逻辑闭环（无界面） | core 单独跑通「空盘 → 能启动的系统」 | 检查点 4 + 检查点 6 | 无 |
 | **M2** | Electron 前端最小可用 | 12 个页面（普通 8 步 / 高级 12 步）把 M1 的流程包起来 | QEMU 里全程图形化装完一次 | M1 |
-| **M3** | 装后系统完整 | 中文、输入法、N 卡、国内源、桌面 | 检查点 5 + 真机 NVIDIA（两次） | P5 |
+| **M3** | 装后系统完整 | 中文、输入法、N 卡、国内源、桌面 | 检查点 5 + 真机 NVIDIA（两次） | 无 |
 | **M4** | 联网与镜像 | 安装器里选网、测速、写源 | QEMU 用户网络 + 真机 Wi-Fi | M2、P11 |
 | **M5** | 发布准备 | 签名、校验和、Release、中文文档 | 一条命令产出可发布产物 | D10、D13 |
 
@@ -139,7 +139,7 @@ V3 的 `cage` 12 页实机测试由维护者于 2026-10-08 报告已完成，记
 
 ### M3 · 装后系统完整
 
-装后系统包清单、`fcitx5` + CJK 字体、`nvidia-open` / `nvidia-utils`、国内源继承、桌面（P5 定案后）。
+装后系统包清单、`fcitx5` + CJK 字体、`nvidia-open` / `nvidia-utils`、国内源继承、桌面（D15）。
 
 **验收：** 检查点 5，**真机 NVIDIA 验两次**（Live 能亮 / 装完能用）—— 09-19 就写下的纪律，别把第一次通过当成目标达成。
 **产出：** `docs/work/tech/05-装后系统验证.md`
@@ -206,8 +206,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 
 | 问题 | 影响 | 何时必须落 |
 |---|---|---|
-| [P5](../knowledge/06-待定事项.md) niri / Hyprland | M3 的桌面 | M3 前 |
-| [P11](../knowledge/06-待定事项.md) `archlinuxcn` 政策 | 构建与 Live 的 `pacman.conf` | M4 前 |
+| [P11](../knowledge/06-待定事项.md) 构建与 Live 的 `archlinuxcn` 政策（#148） | 两份 `pacman.conf` | M4 前 |
 | Live 是否裁 `fcitx5*` / `archinstall` | ISO 体积 | M0 |
 
 **协调：** 有一条正在移除 `iwd` 的分支尚未合入。等它落地后再改 `packages.x86_64` 与 `airootfs` 的网络配置，
@@ -221,6 +220,7 @@ ISO 签名 + SHA256 + Release 说明模板 + 中文安装文档 + `v0.x.y` tag �
 |---|---|
 | [knowledge/02-环境与工具链.md](../knowledge/02-环境与工具链.md) | 技术栈（D14）的成篇展开 |
 | [knowledge/06-待定事项.md](../knowledge/06-待定事项.md) | 附录 A「已定案索引」给结论与去处，附录 B 是已否决的方案 |
+| [knowledge/07-决策表.md](../knowledge/07-决策表.md) | D 编号全表 |
 | [knowledge/05-测试方法.md](../knowledge/05-测试方法.md) | 六个检查点与安装器端到端验证 |
 | [knowledge/03-项目结构.md](../knowledge/03-项目结构.md) | `installer/` 在仓库里的位置 |
 | [knowledge/04-架构决策.md](../knowledge/04-架构决策.md) | NVIDIA 与中文两部分的实现依据 |

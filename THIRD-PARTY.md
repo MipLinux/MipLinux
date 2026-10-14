@@ -2,10 +2,6 @@
 
 MipLinux 自己的代码与配置以 **GPL-3.0-or-later** 授权（[README 的「许可」小节](README.md#许可)）；
 品牌素材按 **CC BY-SA 4.0** 单独授权（[assets/README.md](assets/README.md)）。
-本文件只管第三方：**它们各自是什么许可、我们改过什么、每一类的清单在哪。**
-
-**纪律：** 各家的许可原件随组件走 —— 不动、不合并、不换许可；升级时版本、文件、sha256 与许可原件同一笔提交。
-**本文件不抄各类清单**，抄了就是第二份会漂的真相。
 
 ## 每一类的清单在哪
 
@@ -17,12 +13,9 @@ MipLinux 自己的代码与配置以 **GPL-3.0-or-later** 授权（[README 的�
 
 ## 我们改过的第三方程序
 
-只有一处，清单就在这里（将来每多一个补丁，加一条）：
-
 **cage** —— Live 的 kiosk 合成器。构建时取 cage v0.3.1 源码，套
 [cage-0.3.1-enable-tap.patch](scripts/patches/cage-0.3.1-enable-tap.patch) 打开触摸板轻点，编译成 `mipl-cage` 装进 ISO。
 许可是 **MIT**（Copyright (c) 2018-2020 Jente Hidskes；Copyright (c) 2019 The Sway authors）；
-MIT 的条件是随分发附上版权声明与许可全文，这条件对补丁版同样适用。
 
 ## 相容性
 

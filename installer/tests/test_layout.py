@@ -44,11 +44,15 @@ class TestPlanLayout(unittest.TestCase):
         `/proc/partitions` 里少一个、`/dev` 里没有节点，而 `lsblk` 照样把盘上的表
         列出来（它自己去读设备），于是报错完全指不到布局。
         """
-        for total in (40 * GiB, 6 * GiB, 128 * GiB + 7):
+        for total in (40 * GiB, 10 * GiB, 128 * GiB + 7):
             with self.subTest(total=total):
                 layout = disk.plan_layout(total)
                 tail = total - (layout.root_start + layout.root_size)
                 self.assertGreaterEqual(tail, disk.GPT_TAIL_RESERVE)
+
+    def test_old_capacity_limit_is_refused(self):
+        with self.assertRaises(InstallerError):
+            disk.plan_layout(6 * GiB)
 
     def test_too_small_is_refused(self):
         with self.assertRaises(InstallerError) as ctx:

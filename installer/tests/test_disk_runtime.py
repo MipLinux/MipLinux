@@ -39,6 +39,10 @@ class TestWipeOrder(unittest.TestCase):
 
     def setUp(self):
         self.runner = FakeRunner()
+        for helper in ("_prepare_partitioning", "_assert_not_busy", "_verify_partition_layout", "_node_matches"):
+            patcher = mock.patch.object(disk, helper, return_value=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         # 让「等节点」这一步马上失败，好观察命令顺序
         patch = mock.patch.object(disk, "WAIT_ATTEMPTS", 1)
         patch.start()
@@ -87,6 +91,11 @@ class TestWipeOrder(unittest.TestCase):
 
 
 class TestWaitForPartitionNodes(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(disk, "_node_matches", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_returns_when_the_kernel_has_both_and_nodes_exist(self):
         runner = FakeRunner()
         with mock.patch("mipl_installer.disk.kernel_partitions", return_value=FAKE_PARTS), \
@@ -206,7 +215,7 @@ class TestCleanupStaleTarget(unittest.TestCase):
 
     def test_unmounts_our_namespace_and_leaves_the_users_mount_alone(self):
         runner = FakeRunner()
-        with mock.patch("mipl_installer.util.read_text", return_value=self.STALE):
+        with mock.patch("mipl_installer.util.read_text", side_effect=[self.STALE, self.STALE, "", "", ""]):
             points = disk.cleanup_stale_target(runner, util.DEFAULT_TARGET)
         self.assertEqual(points, [util.DEFAULT_TARGET, f"{util.DEFAULT_TARGET}/boot",
                                   f"{util.DEFAULT_TARGET}/proc"])
@@ -246,6 +255,213 @@ class TestUuidGuard(unittest.TestCase):
         runner.dry_run = True
         runner.outputs["blkid"] = util.DRY
         self.assertEqual(disk.uuid_of(runner, "/dev/vda2"), util.DRY)
+
+
+class TestDiskSafetyRegressions(unittest.TestCase):
+    def test_dependency_failure_precedes_all_disk_commands(self):
+        runner = FakeRunner()
+        with mock.patch.object(disk, '_prepare_partitioning', side_effect=InstallerError('missing parted', 2)):
+            with self.assertRaises(InstallerError):
+                disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+        self.assertEqual(runner.history, [])
+
+    def test_new_mount_before_wipe_is_rejected(self):
+        runner = FakeRunner()
+        with mock.patch.object(disk, '_prepare_partitioning'), mock.patch.object(
+            disk.util, 'read_text', side_effect=lambda path: (
+                '31 1 254:2 / /media/data rw - ext4 /dev/vda2 rw' if path.endswith('mountinfo')
+                else 'Filename Type Size Used Priority\n'
+            )
+        ):
+            with self.assertRaises(InstallerError) as ctx:
+                disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+        self.assertEqual(ctx.exception.reason, 'diskInUse')
+        self.assertEqual(runner.history, [])
+
+    def test_active_swap_blocks_an_unmounted_disk(self):
+        with mock.patch.object(disk.util, 'read_text', return_value=(
+            'Filename Type Size Used Priority\n/dev/vda2 partition 1024 0 -2\n'
+        )):
+            self.assertEqual(disk._busy_sources('/dev/vda', set()), {'/dev/vda2'})
+
+    def test_unreadable_swap_state_fails_closed(self):
+        with mock.patch.object(disk.util, 'read_text', side_effect=OSError('unreadable')):
+            with self.assertRaises(InstallerError):
+                disk._busy_sources('/dev/vda', set())
+
+    def test_nvme_and_mmc_dry_run_paths(self):
+        for device, expected in (('/dev/vda', ('/dev/vda1', '/dev/vda2')),
+                                 ('/dev/nvme0n1', ('/dev/nvme0n1p1', '/dev/nvme0n1p2')),
+                                 ('/dev/mmcblk0', ('/dev/mmcblk0p1', '/dev/mmcblk0p2'))):
+            runner = FakeRunner(dry_run=True)
+            with self.subTest(device=device), mock.patch.object(disk, 'kernel_partitions', return_value=[]), mock.patch.object(
+                disk, '_prepare_partitioning', side_effect=AssertionError('must not probe')
+            ):
+                self.assertEqual(disk.wipe_and_partition(runner, device, LAYOUT), expected)
+
+    def test_wrong_partition_set_is_rejected(self):
+        for parts in ([FAKE_PARTS[0], ('/dev/vda3', 254, 3)], FAKE_PARTS + [('/dev/vda3', 254, 3)]):
+            with self.subTest(parts=parts), mock.patch.object(disk, 'kernel_partitions', return_value=parts), mock.patch.object(
+                disk, 'WAIT_ATTEMPTS', 1
+            ), mock.patch.object(disk, '_node_matches', return_value=True):
+                with self.assertRaises(InstallerError):
+                    disk.wait_for_partition_nodes(FakeRunner(), '/dev/vda')
+
+    def test_wrong_device_node_is_rejected(self):
+        with mock.patch.object(disk, 'kernel_partitions', return_value=FAKE_PARTS), mock.patch.object(
+            disk, 'WAIT_ATTEMPTS', 1
+        ), mock.patch.object(disk.os.path, 'exists', return_value=True), mock.patch.object(disk, '_node_matches', return_value=False):
+            with self.assertRaises(InstallerError):
+                disk.wait_for_partition_nodes(FakeRunner(), '/dev/vda')
+
+    def test_regular_file_is_not_a_partition_node(self):
+        with tempfile.NamedTemporaryFile() as file:
+            self.assertFalse(disk._node_matches(file.name, 254, 1))
+
+    def test_partprobe_failure_does_not_reach_formatting_or_wait(self):
+        runner = FakeRunner()
+        runner.fail_patterns.add('partprobe')
+        with mock.patch.object(disk, '_prepare_partitioning'), mock.patch.object(disk, '_assert_not_busy'), mock.patch.object(
+            disk, 'kernel_partitions', return_value=[]
+        ), mock.patch.object(disk, '_parted_create'), mock.patch.object(disk, 'wait_for_partition_nodes') as wait:
+            with self.assertRaises(InstallerError):
+                disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+        wait.assert_not_called()
+
+    def test_residual_child_mount_is_reported_and_not_returned_as_removed(self):
+        table = '31 1 254:1 / /mnt/mipl/boot rw - vfat /dev/vda1 rw'
+        reporter = RecordingReporter()
+        runner = FakeRunner(reporter=reporter)
+        runner.fail_patterns.add('umount')
+        with mock.patch.object(disk.util, 'read_text', return_value=table), mock.patch.object(disk.os.path, 'ismount', return_value=False):
+            self.assertEqual(disk.cleanup_stale_target(runner), [])
+            self.assertTrue(disk.is_mountpoint('/mnt/mipl'))
+        self.assertTrue(any('卸载没成功' in note for note in reporter.notes))
+
+    def test_successful_recursive_unmount_does_not_repeat_commands(self):
+        runner = FakeRunner()
+        with mock.patch.object(disk.util, 'read_text', return_value=''), mock.patch.object(disk.os.path, 'ismount', return_value=False):
+            disk.unmount_target(runner)
+        self.assertEqual(runner.commands(), ['umount -R /mnt/mipl'])
+
+    def test_escaped_automount_path_is_decoded_before_unmount(self):
+        runner = FakeRunner()
+        table = r'31 1 254:2 / /run/media/My\040Disk rw - ext4 /dev/vda2 rw'
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(disk.util, 'read_text', return_value=table):
+            disk.mount_target(runner, '/dev/vda2', '/dev/vda1', tmp)
+        self.assertEqual(runner.history[0], ['umount', '/run/media/My Disk'])
+
+
+class TestDeviceTopology(unittest.TestCase):
+    def test_mapping_dependencies_include_underlying_partition_and_disk(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            block = Path(tmp) / 'class/block'
+            physical = block / 'nvme0n1'
+            partition = physical / 'nvme0n1p2'
+            partition.mkdir(parents=True)
+            (partition / 'partition').write_text('2')
+            for name in ('dm-0', 'dm-1'):
+                (block / name / 'slaves').mkdir(parents=True)
+            (block / 'dm-0/slaves/nvme0n1p2').symlink_to(partition)
+            (block / 'dm-1/slaves/dm-0').symlink_to(block / 'dm-0')
+            ancestors = disk._block_ancestors('/dev/dm-1', sysfs_root=tmp)
+            self.assertEqual(ancestors, {'dm-1', 'dm-0', 'nvme0n1p2', 'nvme0n1'})
+            with mock.patch.object(disk, '_block_ancestors', return_value=ancestors):
+                self.assertTrue(disk.same_device('/dev/dm-1', '/dev/nvme0n1'))
+                self.assertTrue(disk.same_device('/dev/dm-1', '/dev/nvme0n1p2'))
+                self.assertFalse(disk.same_device('/dev/dm-1', '/dev/nvme0n1p1'))
+
+    def test_alias_and_canonical_device_match(self):
+        original = disk.os.path.realpath
+        def realpath(path, **kwargs):
+            return '/dev/nvme0n1' if str(path) == '/dev/disk/by-id/test' else original(path, **kwargs)
+        with mock.patch.object(disk.os.path, 'realpath', side_effect=realpath):
+            self.assertTrue(disk.same_device('/dev/nvme0n1p2', '/dev/disk/by-id/test'))
+            self.assertFalse(disk.same_device('/dev/nvme0n11p2', '/dev/disk/by-id/test'))
+
+    def test_holder_on_an_unmounted_partition_blocks_disk(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'vda/vda2/holders/dm-0').mkdir(parents=True)
+            (root / 'vda/vda2/partition').write_text('2')
+            real_path = Path
+            def path(value):
+                return root if value == '/sys/class/block' else real_path(value)
+            with mock.patch.object(disk, 'Path', side_effect=path), mock.patch.object(
+                disk.util, 'read_text', return_value='Filename Type Size Used Priority\n'
+            ):
+                self.assertEqual(disk._busy_sources('/dev/vda', set()), {'/dev/dm-0'})
+
+
+class TestPartitionPreflight(unittest.TestCase):
+    def _parted(self):
+        from types import SimpleNamespace
+        dev = SimpleNamespace(sectorSize=512, optimalAlignedConstraint=object(), clobber=mock.Mock())
+        table = mock.Mock()
+        def geometry(**kwargs):
+            return SimpleNamespace(start=kwargs['start'], length=kwargs['length'])
+        def partition(**kwargs):
+            return SimpleNamespace(geometry=kwargs['geometry'], setFlag=mock.Mock())
+        module = SimpleNamespace(getDevice=mock.Mock(return_value=dev),
+                                 freshDisk=mock.Mock(return_value=table),
+                                 Geometry=geometry, FileSystem=mock.Mock(), Partition=partition,
+                                 PARTITION_NORMAL=0, PARTITION_ESP=18)
+        return module, dev, table
+
+    def test_missing_module_or_esp_support_never_wipes(self):
+        import sys
+        module, dev, table = self._parted()
+        del module.PARTITION_ESP
+        for value in (None, module):
+            runner = FakeRunner()
+            with self.subTest(module=value), mock.patch.dict(sys.modules, {'parted': value}):
+                with self.assertRaises(InstallerError):
+                    disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+            self.assertEqual(runner.history, [])
+        dev.clobber.assert_not_called()
+        table.commit.assert_not_called()
+
+    def test_geometry_failure_is_detected_without_writes(self):
+        import sys
+        module, dev, table = self._parted()
+        table.addPartition.side_effect = ValueError('alignment impossible')
+        with mock.patch.dict(sys.modules, {'parted': module}):
+            with self.assertRaises(InstallerError):
+                disk._prepare_partitioning('/dev/vda', LAYOUT)
+        dev.clobber.assert_not_called()
+        table.commit.assert_not_called()
+
+    def test_prepared_table_is_reused_for_commit(self):
+        import sys
+        module, dev, table = self._parted()
+        with mock.patch.dict(sys.modules, {'parted': module}):
+            prepared = disk._prepare_partitioning('/dev/vda', LAYOUT)
+            dev.clobber.assert_not_called()
+            table.commit.assert_not_called()
+            disk._parted_create('/dev/vda', LAYOUT, prepared=prepared)
+        self.assertEqual(module.freshDisk.call_count, 1)
+        dev.clobber.assert_called_once()
+        table.commit.assert_called_once()
+
+    def test_wrong_kernel_geometry_is_rejected(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for number, start, size in ((1, LAYOUT.esp_start, LAYOUT.esp_size),
+                                       (2, LAYOUT.root_start, LAYOUT.root_size)):
+                node = root / 'vda' / f'vda{number}'
+                node.mkdir(parents=True)
+                (node / 'start').write_text(str(start // 512))
+                (node / 'size').write_text(str(size // 512))
+            def path(value):
+                return root if value == '/sys/class/block' else Path(value)
+            with mock.patch.object(disk, 'Path', side_effect=path):
+                disk._verify_partition_layout('/dev/vda', LAYOUT)
+                (root / 'vda/vda2/start').write_text('2048')
+                with self.assertRaises(InstallerError):
+                    disk._verify_partition_layout('/dev/vda', LAYOUT)
 
 
 if __name__ == "__main__":

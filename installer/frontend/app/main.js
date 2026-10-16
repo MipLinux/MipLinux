@@ -425,6 +425,7 @@ function createWindow(launch) {
         `--mipl-ui-scale=${launch.uiScale || 0}`,
         `--mipl-renderer=${launch.renderer}`,
         `--mipl-probe=${process.env.MIPL_PROBE ? '1' : '0'}`,
+        `--mipl-input-trace=${process.env.MIPL_INPUT_TRACE === '1' ? '1' : '0'}`,
       ],
     },
   });
@@ -500,6 +501,14 @@ app.whenReady().then(async () => {
     return;
   }
   const win = createWindow(launch);
+
+  // 只在排查输入链时开启；记录事件类型与按钮，不记录坐标、按键或页面内容。
+  if (process.env.MIPL_INPUT_TRACE === '1') {
+    ipcMain.on('mipl:input-trace', (event, type, button, pointerType) => {
+      if (event.sender !== win.webContents) return;
+      console.log(`[mipl-input] ${type} button=${button} pointer=${pointerType}`);
+    });
+  }
 
   ipcMain.handle('mipl:reboot', async () => {
     // 完成页的「重启」= 后端的 `--reboot` 出口（`systemctl reboot`）。

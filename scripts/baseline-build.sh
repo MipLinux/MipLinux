@@ -443,6 +443,7 @@ run mkdir -p -- "$staged"
 run cp -aT -- "$src" "$staged"
 run mkdir -p -- "$staged/airootfs/usr/local/lib/mipl-installer"
 run cp -aT -- "${REPO_ROOT}/installer" "$staged/airootfs/usr/local/lib/mipl-installer"
+run cp -- "${REPO_ROOT}/scripts/patches/cage-0.3.1-enable-tap.patch" "${OUT_DIR}/cage-0.3.1-enable-tap.patch"
 # 别把开发机的 __pycache__ / .pyc 带进 ISO
 run find "$staged/airootfs" \
     -type d -name __pycache__ -exec rm -rf -- {} +
@@ -959,6 +960,9 @@ fi
 #              所以只装 archiso 永远不会带上它。
 #   arch-install-scripts  显式列出来，免得依赖变动后 pacstrap 悄悄不见了
 WANT_PKGS=(archiso mkinitcpio arch-install-scripts)
+if [[ "${PROFILE}" == /profile ]]; then
+  WANT_PKGS+=(curl gcc libinput libxkbcommon meson ninja patch pkgconf wayland wlroots0.20)
+fi
 
 echo "==> 安装构建工具链：${WANT_PKGS[*]}"
 pacman_install() {
@@ -1046,6 +1050,37 @@ if [[ ${#_missing_tools[@]} -gt 0 || ${#_missing_pkgs[@]} -gt 0 ]]; then
   exit 1
 fi
 echo "    全部到位。"
+
+if [[ "${PROFILE}" == /profile ]]; then
+  echo "==> 构建带轻点配置的 Cage 0.3.1"
+  cage_archive=/out/cage-v0.3.1.tar.gz
+  cage_source="${WORK_DIR}/cage-0.3.1"
+  cage_sha=6dc1619665acd367e0174c93b234002549a66f55f1de9197d67f0305415babc8
+  cage_patch=/out/cage-0.3.1-enable-tap.patch
+  [[ -f "${cage_patch}" ]] || { echo "错误：缺少 Cage 轻点补丁：${cage_patch}" >&2; exit 1; }
+  if [[ ! -f "${cage_archive}" ]]; then
+    curl --fail --location --retry 3 --silent --show-error \
+      https://github.com/cage-kiosk/cage/archive/refs/tags/v0.3.1.tar.gz \
+      -o "${cage_archive}"
+  fi
+  printf '%s  %s\n' "${cage_sha}" "${cage_archive}" | sha256sum --check --status || {
+    echo "错误：Cage 0.3.1 源码校验失败：${cage_archive}" >&2
+    exit 1
+  }
+  mkdir -p "${cage_source}"
+  tar -xzf "${cage_archive}" -C "${cage_source}" --strip-components=1
+  patch --batch --forward -p1 -d "${cage_source}" < "${cage_patch}"
+  meson setup "${cage_source}/build" "${cage_source}" \
+    --buildtype=release -Dman-pages=disabled -Dwrap_mode=nofallback
+  meson compile -C "${cage_source}/build"
+  install -Dm755 "${cage_source}/build/cage" \
+    /out/profile-staged/airootfs/usr/local/bin/mipl-cage
+  /out/profile-staged/airootfs/usr/local/bin/mipl-cage -v
+  test -x /profile/airootfs/usr/local/bin/mipl-cage || {
+    echo "错误：patched Cage 没进入 profile 装配副本" >&2
+    exit 1
+  }
+fi
 
 echo "==> 开始构建"
 echo "    工作目录：${WORK_DIR}"

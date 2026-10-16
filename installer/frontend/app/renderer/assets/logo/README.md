@@ -9,6 +9,9 @@
 | `logo-128.png` | 顶栏品牌位（显示 ~36px，2x / 3x 屏够用） |
 | `logo-64.png` | 小尺寸（步骤条、列表头、favicon 级） |
 
+**许可：** 这三个文件与 `assets/mipl-logo.png` 同属品牌素材，按 **CC BY-SA 4.0** 单独授权，不随主项目走 GPL ——
+署名写法与商标说明见 [assets/README.md](../../../../../../assets/README.md)，许可全文见同目录的 [LICENSE](../../../../../../assets/LICENSE)。
+
 ## 来源与再生成
 
 原始文件：`MipLinuxLogo.png`（维护者本机，1254×1254 RGBA，725 207 B，

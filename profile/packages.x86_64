@@ -143,6 +143,14 @@ man-pages-zh_cn
 networkmanager
 # <== 网络 · NetworkManager <==
 
+# ==> 仓库信任 · archlinuxcn 签名 ==>
+# pacman 的 `-r` 不搬 GPGDir，pacstrap 验签用的是 **Live 的** keyring；而它由
+# pacman-init.service 开机无参 `pacman-key --populate` 建起来 —— 那个命令导入
+# /usr/share/pacman/keyrings 下的**全部**钥匙串。所以 keyring 包必须在这份清单里，
+# 否则装后清单里的 archlinuxcn 包只能靠 keyserver 现取 key，随机失败（#138）。
+archlinuxcn-keyring
+# <== 仓库信任 · archlinuxcn 签名 <==
+
 # ==> 安装器 ==>
 cage
 wlr-randr

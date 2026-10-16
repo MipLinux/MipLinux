@@ -33,6 +33,18 @@ function argValue(prefix) {
   return hit ? hit.slice(prefix.length) : null;
 }
 
+// #84：区分“libinput/cage 没送来按钮”和“页面收到了按钮却没响应”。
+// 仅在 MIPL_INPUT_TRACE=1 时启用；捕获阶段能看见被控件拦截的事件。
+if (argValue('--mipl-input-trace=') === '1') {
+  window.addEventListener('DOMContentLoaded', () => {
+    for (const type of ['pointerdown', 'pointerup', 'click']) {
+      document.addEventListener(type, (event) => {
+        ipcRenderer.send('mipl:input-trace', type, event.button, event.pointerType || 'mouse');
+      }, true);
+    }
+  });
+}
+
 const config = {
   theme: argValue('--mipl-theme=') === 'light' ? 'light' : 'dark',
   themeSource: argValue('--mipl-theme-source=') || 'auto',

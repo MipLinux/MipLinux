@@ -451,7 +451,9 @@ run cp -- "$src/airootfs/etc/pacman.d/mirrorlist" "$src/airootfs/etc/pacman.d/mi
 # 目标系统使用同一份换源实现，避免复制 Live 运行时文件。
 local network="$staged/airootfs/usr/local/lib/mipl-installer/backend/mipl_installer/data/network"
 run mkdir -p -- "$network"
-run cp -- "$src/airootfs/usr/local/bin/mipl-mirror-switch" "$src/airootfs/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch" "$network/"
+run cp -- "$src/airootfs/usr/local/bin/mipl-mirror-switch" "$src/airootfs/usr/local/bin/mipl-mirror-watch" \
+    "$src/airootfs/etc/systemd/system/mipl-mirror-watch.service" \
+    "$src/airootfs/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch" "$network/"
 run cp -- "${REPO_ROOT}/scripts/patches/cage-0.3.1-enable-tap.patch" "${OUT_DIR}/cage-0.3.1-enable-tap.patch"
 # 别把开发机的 __pycache__ / .pyc 带进 ISO
 run find "$staged/airootfs" \

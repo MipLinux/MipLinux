@@ -1,0 +1,12 @@
+[Unit]
+Description=MipLinux proxy and route mirror probe watcher
+After=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mipl-mirror-watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

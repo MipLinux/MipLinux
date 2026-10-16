@@ -273,6 +273,8 @@ def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
     data = Path(__file__).parent / "data/network"
     for name, destination in (
         ("mipl-mirror-switch", "/usr/local/bin/mipl-mirror-switch"),
+        ("mipl-mirror-watch", "/usr/local/bin/mipl-mirror-watch"),
+        ("mipl-mirror-watch.service", "/etc/systemd/system/mipl-mirror-watch.service"),
         ("90-mipl-mirror-switch", "/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch"),
     ):
         source = data / name
@@ -281,7 +283,8 @@ def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
             continue
         if not source.is_file():
             raise InstallerError(f"缺少网络换源文件：{source}", EXIT_CONFIGURE)
-        write_text(runner, cfg.target + destination, read_text(str(source)), mode=0o755)
+        write_text(runner, cfg.target + destination, read_text(str(source)),
+                   mode=0o644 if destination.endswith(".service") else 0o755)
 
 
 def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
@@ -378,7 +381,7 @@ def verify_password(runner: Runner, cfg: TargetConfig, user: str) -> str:
 
 
 def reflector_guard(has_reflector: bool) -> list[str]:
-    """禁用 reflector 自带定时入口；测速由 NetworkManager 事件统一触发。"""
+    """禁用 reflector 自带定时入口；测速由网络与代理事件触发。"""
     if not has_reflector:
         return []
     return ["systemctl", "disable", "reflector.timer", "reflector.service"]
@@ -458,6 +461,8 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
     runner.reporter.emit(step_event("configure", "services", "启用 NetworkManager"))
     runner.run(chroot_argv(target, ["systemctl", "enable", "NetworkManager"]), exit_code=EXIT_CONFIGURE)
+    runner.run(chroot_argv(target, ["systemctl", "enable", "mipl-mirror-watch.service"]),
+               exit_code=EXIT_CONFIGURE)
 
     # 5.5 reflector 守卫（#23）：装了才关，没装就不产生任何命令
     if target_has_reflector(target):

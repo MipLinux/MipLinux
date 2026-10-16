@@ -15,7 +15,7 @@ HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类�
 
 在哪跑：Live 与装后系统共用同一机制；首次联网、重连及 VPN 变化均触发。
 
-谁调用：`etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch`（网络变化触发）；也可手动跑。
+谁调用：NetworkManager dispatcher（网络事件）、mipl-mirror-watch（装后代理/路由变化）；也可手动跑。
 
 用法：
     mipl-mirror-switch --dry-run          # 只算不写，可以不在 Live 里跑
@@ -23,7 +23,7 @@ HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类�
     mipl-mirror-switch --force            # 忽略连通性与最小间隔（调试用）
 
 退出码：0 = 换成功、或有意跳过（网络没通 / 刚换过 / 已有一次在跑）；1 = 出错了。
-某半边失败时退出码仍是 0（NM 的 dispatcher 没人在看），但日志写明、且**不写 stamp** ——
+某半边失败时 NM 入口退出码仍是 0，代理监听入口退出 1 以便重试；日志写明、且**不写 stamp** ——
 stamp 记的是「上次成功换源」，只在成功时才写，失败的下一次触发可以立刻重试。
 日志同时写 stdout 与 <run-dir>/mipl-mirror-switch.log（NM dispatcher 的 stdout 不好捞，
 落一份文件，QEMU 里直接 `cat` 就有证据），并带上每轮耗时（两半各自 + 总计）——
@@ -469,7 +469,7 @@ def main(argv: list[str]) -> int:
     log(f"── 触发：{args.trigger}" + (f"（{args.interface}）" if args.interface else "")
         + ("[dry-run]" if args.dry_run else ""))
 
-    network_event = args.trigger in {"up", "vpn-up", "connectivity-change", "dhcp4-change", "dhcp6-change"}
+    network_event = args.trigger in {"up", "vpn-up", "connectivity-change", "dhcp4-change", "dhcp6-change", "proxy-route-change"}
     requested = time.monotonic_ns()
 
     try:
@@ -502,7 +502,7 @@ def main(argv: list[str]) -> int:
         connectivity = nm_connectivity()
         if connectivity != "full" and not args.force:
             log(f"NetworkManager 报告的连通性是 {connectivity}，没到 full，先不换")
-            return 0
+            return 75 if args.trigger == "proxy-route-change" else 0
         log(f"NetworkManager 连通性：{connectivity}")
 
         work_dir = Path(tempfile.mkdtemp(prefix="mirror-switch.", dir=str(run_dir)))
@@ -532,7 +532,7 @@ def main(argv: list[str]) -> int:
                 # 才准重试 —— 而网络刚起来的那几秒正是最该重试的时候。所以失败不写。
                 log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试"
                     f"（{cost}）")
-                return 0
+                return 1 if args.trigger == "proxy-route-change" else 0
             if network_event:
                 event_stamp.write_text(str(started_event), encoding="utf-8")
             stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")

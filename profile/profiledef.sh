@@ -32,6 +32,7 @@ file_permissions=(
   ["/usr/local/bin/Installation_guide"]="0:0:755"
   ["/usr/local/bin/livecd-sound"]="0:0:755"
   ["/usr/local/bin/mipl-mirror-switch"]="0:0:755"
+  ["/usr/local/bin/mipl-mirror-watch"]="0:0:755"
   ["/usr/local/bin/mipl-cage"]="0:0:755"
   ["/usr/local/lib/mipl-installer/frontend/mipl-installer"]="0:0:755"
   ["/usr/local/lib/mipl-installer/frontend/mipl-kiosk"]="0:0:755"

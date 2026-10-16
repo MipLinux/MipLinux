@@ -1,0 +1,180 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""观察桌面代理与 TUN 路由变化，稳定后串行触发现有测速入口。
+
+系统代理只作为事件来源，不把用户代理地址传给 root 的下载工具。
+--user-state 以会话用户身份读取 GSettings/KDE，仅返回摘要，不输出代理地址或凭据。
+"""
+from __future__ import annotations
+
+import argparse
+import configparser
+import hashlib
+import json
+import os
+import pwd
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+WORKER = '/usr/local/bin/mipl-mirror-switch'
+SELF = '/usr/local/bin/mipl-mirror-watch'
+PROXY_KEYS = {'mode', 'autoconfig-url', 'ignore-hosts', 'use-same-proxy', 'host', 'port'}
+ROUTE_KEYS = {'dst', 'gateway', 'dev', 'table', 'protocol', 'type', 'metric',
+              'prefsrc', 'scope', 'flags', 'nexthops', 'nhid', 'pref'}
+
+
+def command(argv: list[str], *, env: dict[str, str] | None = None) -> str | None:
+    try:
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=4)
+        return result.stdout if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def user_state() -> str:
+    """调用者已降权；只读取代理相关键，避免其他桌面设置变化触发测速。"""
+    state = {}
+    text = command(['/usr/bin/gsettings', 'list-recursively', 'org.gnome.system.proxy'])
+    if text is not None:
+        state['gsettings'] = sorted(line for line in text.splitlines()
+                                    if len(line.split(None, 2)) == 3
+                                    and line.split(None, 2)[1] in PROXY_KEYS)
+    config = configparser.ConfigParser(interpolation=None, strict=False)
+    config_dir = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config')))
+    try:
+        with (config_dir / 'kioslaverc').open() as stream:
+            config.read_string(stream.read(65536))
+        if config.has_section('Proxy Settings'):
+            state['kde'] = {key: value for key, value in config['Proxy Settings'].items()
+                            if key in {'proxytype', 'httpproxy', 'httpsproxy', 'socksproxy',
+                                       'noproxyfor', 'proxy config script'}}
+    except (OSError, configparser.Error, UnicodeError):
+        pass
+    return digest(state)
+
+
+def route_state(text: str) -> str:
+    """忽略 DHCP/IPv6 租期倒计时，只比较实际转发路径。"""
+    routes = json.loads(text)
+    stable = [{key: value for key, value in route.items() if key in ROUTE_KEYS}
+              for route in routes]
+    return digest(sorted(stable, key=lambda item: json.dumps(item, sort_keys=True)))
+
+
+def link_state(text: str) -> str:
+    links = json.loads(text)
+    stable = [{key: link.get(key) for key in ('ifname', 'operstate', 'link_type', 'master')}
+              | {'flags': sorted(link.get('flags', [])),
+                 'kind': link.get('linkinfo', {}).get('info_kind')}
+              for link in links]
+    return digest(sorted(stable, key=lambda item: str(item['ifname'])))
+
+
+def snapshot() -> dict[str, str]:
+    state = {}
+    links = command(['/usr/bin/ip', '-j', '-d', 'link', 'show'])
+    if links is not None:
+        try:
+            state['links'] = link_state(links)
+        except (ValueError, TypeError, AttributeError):
+            pass
+    for family in ('-4', '-6'):
+        for kind in ('route', 'rule'):
+            argv = ['/usr/bin/ip', '-j', family, kind, 'show']
+            if kind == 'route':
+                argv += ['table', 'all']
+            output = command(argv)
+            if output is not None:
+                try:
+                    state[family + kind] = (route_state(output) if kind == 'route'
+                                             else digest(json.loads(output)))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+    users = command(['/usr/bin/loginctl', 'list-users', '--no-legend', '--no-pager'])
+    for line in (users or '').splitlines():
+        fields = line.split()
+        if not fields or not fields[0].isdigit():
+            continue
+        uid = int(fields[0])
+        if uid == 0 or not Path(f'/run/user/{uid}/bus').exists():
+            continue
+        try:
+            user = pwd.getpwuid(uid)
+        except KeyError:
+            continue
+        # 从会话用户权限读取，不以 root 打开用户文件或载入用户配置。
+        env = ['PATH=/usr/bin', f'HOME={user.pw_dir}', f'XDG_RUNTIME_DIR=/run/user/{uid}',
+               f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus']
+        output = command(['/usr/bin/runuser', '-u', user.pw_name, '--', '/usr/bin/env', '-i',
+                          *env, '/usr/bin/python3', SELF, '--user-state'])
+        if output is not None and len(output.strip()) == 64:
+            state[f'user:{uid}'] = output.strip()
+    return state
+
+
+class Changes:
+    """失败读取不抹掉上次状态；只启动一个 worker，期间变化留到下一轮。"""
+    def __init__(self, debounce: float = 2):
+        self.debounce = debounce
+        self.observed: dict[str, str] = {}
+        self.candidate: dict[str, str] | None = None
+        self.launched: dict[str, str] | None = None
+        self.since = 0.0
+
+    def ready(self, current: dict[str, str], now: float, *, busy: bool) -> bool:
+        self.observed.update(current)
+        if not self.observed:
+            return False
+        if self.observed != self.candidate:
+            self.candidate = self.observed.copy()
+            self.since = now
+        return (not busy and self.candidate != self.launched
+                and now - self.since >= self.debounce)
+
+    def started(self) -> None:
+        self.launched = self.candidate.copy()
+
+    def failed(self, now: float) -> None:
+        self.launched = None
+        self.since = now + 30 - self.debounce
+
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--user-state', action='store_true')
+    args = parser.parse_args(argv)
+    if args.user_state:
+        print(user_state())
+        return 0
+    if os.geteuid() != 0:
+        parser.error('监听服务必须由系统 systemd 以 root 启动')
+    changes = Changes()
+    worker = None
+    while True:
+        if worker is not None and worker.poll() is not None:
+            if worker.returncode != 0:
+                changes.failed(time.monotonic())
+                print('测速未完成，保留现有列表，30 秒后重试', flush=True)
+            worker = None
+        busy = worker is not None
+        if changes.ready(snapshot(), time.monotonic(), busy=busy):
+            try:
+                worker = subprocess.Popen([WORKER, '--trigger', 'proxy-route-change'])
+            except OSError as exc:
+                print(f'无法启动测速：{exc.__class__.__name__}', flush=True)
+                changes.failed(time.monotonic())
+            else:
+                changes.started()
+                print('用户代理设置或路由变化稳定，触发测速（不转发用户代理凭据）', flush=True)
+        time.sleep(5)
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

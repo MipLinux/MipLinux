@@ -57,6 +57,14 @@ class TestNetworkMirrors(unittest.TestCase):
                 self.assertEqual(self.run_event(tmp), (0, 0, 0))
                 lock.assert_called_once_with(root, wait=True)
 
+    def test_proxy_event_ignores_recent_stamp_and_reports_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_event(tmp)
+            self.assertEqual(self.run_event(tmp, 'proxy-route-change'), (0, 1, 1))
+            self.assertEqual(self.run_event(tmp, 'proxy-route-change', connectivity='limited'),
+                             (75, 0, 0))
+            self.assertEqual(self.run_event(tmp, 'proxy-route-change', result=None), (1, 1, 1))
+
     def test_official_failure_preserves_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -73,13 +81,18 @@ class TestNetworkMirrors(unittest.TestCase):
             data = root / 'data/network'
             data.mkdir(parents=True)
             hook = ROOT / 'profile/airootfs/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch'
-            for source in (SCRIPT, hook):
+            watcher = ROOT / 'profile/airootfs/usr/local/bin/mipl-mirror-watch'
+            service = ROOT / 'profile/airootfs/etc/systemd/system/mipl-mirror-watch.service'
+            for source in (SCRIPT, hook, watcher, service):
                 (data / source.name).write_bytes(source.read_bytes())
             target = root / 'target'
             with patch.object(configure, '__file__', str(root / 'configure.py')):
                 configure.copy_mirror_switch(FakeRunner(), configure.TargetConfig(target=str(target)))
             for source, dest in ((SCRIPT, 'usr/local/bin/mipl-mirror-switch'),
-                                 (hook, 'etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch')):
+                                 (hook, 'etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch'),
+                                 (watcher, 'usr/local/bin/mipl-mirror-watch'),
+                                 (service, 'etc/systemd/system/mipl-mirror-watch.service')):
                 installed = target / dest
                 self.assertEqual(installed.read_bytes(), source.read_bytes())
-                self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(installed.stat().st_mode & 0o777,
+                                 0o644 if dest.endswith(".service") else 0o755)

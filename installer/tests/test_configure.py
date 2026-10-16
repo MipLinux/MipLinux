@@ -200,6 +200,7 @@ class TestChrootSteps(unittest.TestCase):
             # 它依赖的 keyring 包是 pacstrap 装的，只可能在这里出现
             f"arch-chroot {tmp} pacman-key --populate archlinuxcn",
             f"arch-chroot {tmp} systemctl enable NetworkManager",
+            f"arch-chroot {tmp} systemctl enable mipl-mirror-watch.service",
             f"arch-chroot {tmp} mkinitcpio -P",
         ]
         positions = [commands.index(cmd) for cmd in order]

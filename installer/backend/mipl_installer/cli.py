@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--packages-file", default=packages.default_packages_file(),
                         help="装后系统的包清单（默认 installer/backend/mipl_installer/data/target-packages.x86_64）")
     parser.add_argument("--pacman-conf", default="/etc/pacman.conf",
-                        help="pacman 配置来源（默认运行系统的；Live 里就是出厂设置）")
+                        help="pacman 配置来源（默认路径读取 ISO 内独立出厂基线；自定义路径读取指定文件）")
     parser.add_argument("--mirrorlist", default="/etc/pacman.d/mirrorlist",
                         help="conf 里没有 Include 时，写进目标的 mirrorlist 来源")
     parser.add_argument("--steps", default=",".join(STEP_ORDER),

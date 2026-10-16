@@ -39,6 +39,9 @@ class TestReadPackageList(unittest.TestCase):
             self.assertIn(needed, listed)
         # 装后 conf 对 [archlinuxcn] 验签（#135），key 就靠这个包提供
         self.assertIn("archlinuxcn-keyring", listed)
+        # 网络事件测速及桌面代理检测需要运行时与代理 schema（#90 的 QEMU 回归）。
+        for needed in ("reflector", "gsettings-desktop-schemas"):
+            self.assertIn(needed, listed)
 
     def test_missing_file(self):
         with self.assertRaises(InstallerError) as ctx:

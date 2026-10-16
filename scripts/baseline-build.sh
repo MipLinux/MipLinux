@@ -443,6 +443,17 @@ run mkdir -p -- "$staged"
 run cp -aT -- "$src" "$staged"
 run mkdir -p -- "$staged/airootfs/usr/local/lib/mipl-installer"
 run cp -aT -- "${REPO_ROOT}/installer" "$staged/airootfs/usr/local/lib/mipl-installer"
+# 独立基线来自同一份 profile；Live 换源只写 /etc，不影响安装器的数据。
+local baseline="$staged/airootfs/usr/local/lib/mipl-installer/backend/mipl_installer/data/pacman-baseline"
+run mkdir -p -- "$baseline/etc/pacman.d"
+run cp -- "$src/airootfs/etc/pacman.conf" "$baseline/etc/pacman.conf"
+run cp -- "$src/airootfs/etc/pacman.d/mirrorlist" "$src/airootfs/etc/pacman.d/mirrorlist-archlinuxcn" "$baseline/etc/pacman.d/"
+# 目标系统使用同一份换源实现，避免复制 Live 运行时文件。
+local network="$staged/airootfs/usr/local/lib/mipl-installer/backend/mipl_installer/data/network"
+run mkdir -p -- "$network"
+run cp -- "$src/airootfs/usr/local/bin/mipl-mirror-switch" "$src/airootfs/usr/local/bin/mipl-mirror-watch" \
+    "$src/airootfs/etc/systemd/system/mipl-mirror-watch.service" \
+    "$src/airootfs/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch" "$network/"
 run cp -- "${REPO_ROOT}/scripts/patches/cage-0.3.1-enable-tap.patch" "${OUT_DIR}/cage-0.3.1-enable-tap.patch"
 # 别把开发机的 __pycache__ / .pyc 带进 ISO
 run find "$staged/airootfs" \

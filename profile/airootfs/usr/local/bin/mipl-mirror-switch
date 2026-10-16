@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""mipl-mirror-switch —— 网络一变就重新测速选源（Issue #18 · Live 侧第一版）。
+"""mipl-mirror-switch —— 网络一变就重新测速选源（Live 与装后系统）。
 
 管的是**两处源**（只换一半等于没换）：
 
@@ -13,19 +13,16 @@
 依赖：只用了 Live 里已有的东西。`python3` 本来就因为 `reflector` 在（D14 也是这么记的），
 HTTP 探测走标准库 —— **不引 `curl` / `wget` / `rate-mirrors` 这类新包**（根文件红线）。
 
-在哪跑：**只有 Live 会真的写**。`airootfs/` 会被装后系统继承，所以装后系统里也有这个
-脚本 —— 但装后系统的换源策略是 Issue #23 / P11 的事，这里用 Live 标记
-（`/run/archiso/` 下 archiso 留下的挂载点，见 LIVE_MARKERS）挡住：装后系统上它一声不响地
-退出（退出码 0，不写任何东西）。#23 定案后改的是这个判断，不是另写一份脚本。
+在哪跑：Live 与装后系统共用同一机制；首次联网、重连及 VPN 变化均触发。
 
 谁调用：`etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch`（网络变化触发）；也可手动跑。
 
 用法：
     mipl-mirror-switch --dry-run          # 只算不写，可以不在 Live 里跑
-    mipl-mirror-switch                    # 真换（仅 Live）
-    mipl-mirror-switch --force            # 忽略 Live 判断、连通性与最小间隔（调试用）
+    mipl-mirror-switch                    # 真换
+    mipl-mirror-switch --force            # 忽略连通性与最小间隔（调试用）
 
-退出码：0 = 换成功、或有意跳过（非 Live / 网络没通 / 刚换过 / 已有一次在跑）；1 = 出错了。
+退出码：0 = 换成功、或有意跳过（网络没通 / 刚换过 / 已有一次在跑）；1 = 出错了。
 某半边失败时退出码仍是 0（NM 的 dispatcher 没人在看），但日志写明、且**不写 stamp** ——
 stamp 记的是「上次成功换源」，只在成功时才写，失败的下一次触发可以立刻重试。
 日志同时写 stdout 与 <run-dir>/mipl-mirror-switch.log（NM dispatcher 的 stdout 不好捞，
@@ -64,11 +61,6 @@ from pathlib import Path
 OFFICIAL_MIRRORLIST = Path("/etc/pacman.d/mirrorlist")
 CN_MIRRORLIST = Path("/etc/pacman.d/mirrorlist-archlinuxcn")
 DEFAULT_MIRRORLIST_DIR = Path("/etc/pacman.d")
-# Live 的判据：archiso 在 /run/archiso 下建的东西。**不能只看 bootmnt** —— copytoram 启动
-# （ISO 整个拷进内存）会在拷完后卸载 ISO，`bootmnt` 随之消失；那时守卫会把 Live 误判成装后
-# 系统、一声不响什么都不干（2026-10-12 真机实测：/run/archiso 下只剩 airootfs 与 copytoram）。
-# `airootfs` 是 squashfs 的挂载点，两种启动方式都在，拿它当主判据、bootmnt 只作兼容。
-LIVE_MARKERS = (Path("/run/archiso/airootfs"), Path("/run/archiso/bootmnt"))
 DEFAULT_RUN_DIR = Path("/run")
 
 REFLECTOR = "/usr/bin/reflector"
@@ -429,39 +421,31 @@ def nm_connectivity() -> str:
     return proc.stdout.strip() or "unknown"
 
 
-def acquire_lock(run_dir: Path) -> int:
-    """同一时刻只允许一个实例。拿不到锁 = 已经有一次在跑，不是错误。"""
+def acquire_lock(run_dir: Path, *, wait: bool = False) -> int:
+    """同一时刻只测速一次；网络事件等待锁，手动重复调用直接跳过。"""
     fd = os.open(run_dir / "mipl-mirror-switch.lock", os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
     except OSError as exc:
         os.close(fd)
         raise LockBusy from exc
     return fd
 
 
-def is_live() -> bool:
-    """Live 的判据：archiso 在 /run/archiso 下留下的东西（见上面的 LIVE_MARKERS）。
-
-    装后系统里没有它们 —— 于是这个脚本在装后系统上什么都不做（那是 Issue #23 的范围）。
-    """
-    return any(path.exists() for path in LIVE_MARKERS)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mipl-mirror-switch",
-        description="网络变更后测速换源（Issue #18 · Live 侧）",
+        description="网络变更后测速换源（Live 与装后系统）",
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="只算不写：真去测速，但 /etc 一个字节都不动；可以不在 Live 里跑")
     parser.add_argument("--force", action="store_true",
-                        help="忽略 Live 判断、连通性与最小间隔（调试用；正常路径别传）")
+                        help="忽略连通性与最小间隔（调试用；正常路径别传）")
     parser.add_argument("--trigger", default="manual",
-                        help="谁触发的，只进日志（NM dispatcher 传 up / connectivity-change）")
+                        help="触发类型（网络事件等待串行处理并跳过手动最小间隔）")
     parser.add_argument("--interface", default="", help="触发时的网卡名，只进日志")
     parser.add_argument("--min-interval", type=int, default=DEFAULT_MIN_INTERVAL,
-                        help=f"两次换源之间的最小间隔秒数，默认 {DEFAULT_MIN_INTERVAL}")
+                        help=f"手动换源之间的最小间隔秒数，默认 {DEFAULT_MIN_INTERVAL}")
     parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR),
                         help=f"锁 / 时间戳 / 日志 / 临时文件放哪，默认 {DEFAULT_RUN_DIR}")
     parser.add_argument("--mirrorlist-dir", default=str(DEFAULT_MIRRORLIST_DIR),
@@ -485,14 +469,12 @@ def main(argv: list[str]) -> int:
     log(f"── 触发：{args.trigger}" + (f"（{args.interface}）" if args.interface else "")
         + ("[dry-run]" if args.dry_run else ""))
 
-    if not args.dry_run and not args.force and not is_live():
-        log("不是 Live（" + "、".join(str(p) for p in LIVE_MARKERS)
-            + " 都不存在），什么都不做 —— 装后系统的换源策略见 Issue #23")
-        return 0
+    network_event = args.trigger in {"up", "vpn-up", "connectivity-change", "dhcp4-change", "dhcp6-change"}
+    requested = time.monotonic_ns()
 
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
-        lock_fd = acquire_lock(run_dir)
+        lock_fd = acquire_lock(run_dir, wait=network_event)
     except LockBusy:
         log("另一次换源还在跑（拿不到锁），这次跳过")
         return 0
@@ -501,8 +483,17 @@ def main(argv: list[str]) -> int:
         return 1
 
     try:
+        event_stamp = run_dir / "mipl-mirror-switch.event"
+        if network_event and not args.dry_run and event_stamp.is_file():
+            try:
+                if int(event_stamp.read_text()) >= requested:
+                    log("该网络事件已由等待期间开始的测速覆盖，这次跳过")
+                    return 0
+            except (OSError, ValueError):
+                pass
+        started_event = time.monotonic_ns()
         stamp = run_dir / "mipl-mirror-switch.stamp"
-        if not args.dry_run and not args.force and stamp.is_file():
+        if not network_event and not args.dry_run and not args.force and stamp.is_file():
             age = time.time() - stamp.stat().st_mtime
             if age < args.min_interval:
                 log(f"距上次换源只有 {age:.0f}s（< {args.min_interval}s），这次跳过")
@@ -542,6 +533,8 @@ def main(argv: list[str]) -> int:
                 log("这轮有半边失败（" + "、".join(failed) + "），不写 stamp，下次触发可以立刻重试"
                     f"（{cost}）")
                 return 0
+            if network_event:
+                event_stamp.write_text(str(started_event), encoding="utf-8")
             stamp.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
             log("换源结束（官方：" + state_text(official_changed)
                 + "；archlinuxcn：" + state_text(cn_changed) + f"；{cost}）")

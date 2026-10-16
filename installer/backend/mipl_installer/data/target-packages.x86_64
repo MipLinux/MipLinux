@@ -18,6 +18,8 @@ linux
 linux-firmware
 mkinitcpio
 networkmanager
+# 网络事件测速换源；reflector 带入所需 Python 运行时。
+reflector
 sudo
 efibootmgr
 nano

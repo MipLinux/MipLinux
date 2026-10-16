@@ -268,6 +268,22 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
         write_text(runner, f"{cfg.target}{include}", read_text(str(source)))
 
 
+def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
+    """安装受控的网络事件入口；reflector 自带定时任务仍由守卫禁用。"""
+    data = Path(__file__).parent / "data/network"
+    for name, destination in (
+        ("mipl-mirror-switch", "/usr/local/bin/mipl-mirror-switch"),
+        ("90-mipl-mirror-switch", "/etc/NetworkManager/dispatcher.d/90-mipl-mirror-switch"),
+    ):
+        source = data / name
+        if runner.dry_run and not source.is_file():
+            runner.reporter.note(f"[dry-run] ISO 构建时将打包网络换源文件：{source}")
+            continue
+        if not source.is_file():
+            raise InstallerError(f"缺少网络换源文件：{source}", EXIT_CONFIGURE)
+        write_text(runner, cfg.target + destination, read_text(str(source)), mode=0o755)
+
+
 def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
     """把运行系统（Live）的字体 fallback 配置复制进目标。
 
@@ -362,12 +378,7 @@ def verify_password(runner: Runner, cfg: TargetConfig, user: str) -> str:
 
 
 def reflector_guard(has_reflector: bool) -> list[str]:
-    """装后系统的 mirrorlist 不能被 reflector 覆盖（#23）。
-
-    reflector 装了就关掉它的 timer / service —— 它一跑，装后系统写好的国内源
-    就被重排/换掉，第一次 `pacman -Syu` 直接断（#23 已经踩过）。现在目标清单
-    里没有 reflector，这条是**防线**：等 M4 的清单把它带进来时自动生效。
-    """
+    """禁用 reflector 自带定时入口；测速由 NetworkManager 事件统一触发。"""
     if not has_reflector:
         return []
     return ["systemctl", "disable", "reflector.timer", "reflector.service"]
@@ -475,6 +486,7 @@ def configure_system(
     root_password: str | None = None,
 ) -> None:
     copy_pacman_config(runner, cfg)
+    copy_mirror_switch(runner, cfg)
     copy_fonts_conf(runner, cfg)
     write_static_files(runner, cfg, root_uuid, esp_uuid)
     run_in_chroot(runner, cfg, password, root_password)

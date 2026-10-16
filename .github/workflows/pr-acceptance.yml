@@ -65,7 +65,12 @@ jobs:
           set -euo pipefail
           ./scripts/pr-acceptance-context.sh --pr "$PR" --out "$GITHUB_WORKSPACE/.pr-acceptance"
 
-      - name: head 没变、或没有判据可对账 → 不发评论
+      # 步骤名必须是**中性的**：这一步只决定「发不发评论」，而跳过有**两种互斥**的原因。
+      # 原名把「head 没变」排在前面，配上绿色 ✓，读者只能读成「工具判定 head 没变」——
+      # 2026-10-16 在 PR #154 实测踩到：真实原因是「没有可对账的判据」，与 head 无关，
+      # 而页面上「没查」和「查过没问题」长得一模一样。
+      # 原因一律写进 run 页面（step summary + 注解），不靠步骤名传达。
+      - name: 门槛：head / 判据（决定是否发评论）
         id: gate
         if: steps.fork.outputs.skip != 'true'
         env:
@@ -77,12 +82,25 @@ jobs:
           [ -n "$head" ] || { echo "::error::读不到 head sha"; exit 1; }
           echo "head=$head" >>"$GITHUB_OUTPUT"
 
+          # 步骤名不能按运行结果变化，日志正文又要点进去才看得见 —— 所以结论落在
+          # `$GITHUB_STEP_SUMMARY`（run 页面上直接显示）与 `::notice::`（注解）上。
+          report() { # $1=标题 $2=一句结论
+            {
+              echo "### 验收对账：$1"
+              echo
+              echo "- head：\`$head\`"
+              echo "- 结论：$2"
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "::notice::$2"
+          }
+
           # 没有可对账的判据时**整条不发**：一条只剩表头和免责声明的评论读者读不懂，是纯噪音
           # （维护者 2026-10-13 定）。放在查旧评论之前，省一次 API 调用。
           # 刻意不删旧评论：本检查只发、不删别人可见的状态。
           if grep -q '^⚠️ 无法判定' .pr-acceptance/facts.md; then
             echo "skip=true" >>"$GITHUB_OUTPUT"
-            echo "没有可对账的判据，跳过（不发评论）。"
+            report "没有可对账的判据，不发评论" \
+              "没有可对账的判据（PR 正文没写 \`Closes #N\`，或关联 issue 没有「验收」段），本次不评论 —— 这是「没得对」，不是「查过没问题」。"
             exit 0
           fi
 
@@ -94,12 +112,14 @@ jobs:
                         | sed -n 's/.*mipl-acceptance: head=\([0-9a-f]\{7\}\).*/\1/p' | head -1)
             if [ "$oldhead" = "$head" ]; then
               echo "skip=true" >>"$GITHUB_OUTPUT"
-              echo "head 没变（$head），跳过。"
+              report "head 没变，不发评论" "上一次评论已经覆盖 head $head，跳过。"
             else
               echo "skip=false" >>"$GITHUB_OUTPUT"
+              report "发出评论" "上一次评论是 $oldhead，本次 head 是 $head，更新那一条。"
             fi
           else
             echo "skip=false" >>"$GITHUB_OUTPUT"
+            report "发出评论" "这条 PR 上还没有本检查的评论，新建一条（head $head）。"
           fi
 
       - name: 逐条复核（AI 定档）

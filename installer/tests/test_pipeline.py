@@ -251,6 +251,18 @@ class TestPreflight(_RunCase):
                         with self.assertRaises(InstallerError):
                             pipeline.preflight(self.plan(**overrides))
 
+    def test_rejects_a_target_outside_the_reserved_namespace(self):
+        """`--target` 也是「动盘之前该查掉的参数」。
+
+        `/` 是**最坏的那一个**：开工前的自动清理拿 `target` 当归属判据，判宽到根
+        就等于「整台机器都是我们的残留」。校验落在 `preflight`（#105 复核）。
+        """
+        for target in ("/", "/mnt", "", "mnt/mipl", "/mnt/../etc"):
+            with self.subTest(target=target):
+                with self.assertRaises(InstallerError) as ctx:
+                    pipeline.preflight(self.plan(target=target))
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
 
 class TestConfirmBlocksDiskCommands(unittest.TestCase):
     """不 mock `step_disk`：让真的擦盘流程摆在那里，证明守卫真的挡得住。"""
@@ -440,6 +452,24 @@ class TestStaleTargetRecovery(unittest.TestCase):
         """这一轮跑完了 —— 没有 `targetMounted`、也没有 `diskInUse`。"""
         self._run()
 
+    def test_a_dangerous_target_never_reaches_the_cleanup(self):
+        """**回归（#105 复核）**：`--target /` 不能变成 `umount -R /`。
+
+        清理跑在守卫之前，所以「先拦住」这件事没有别的地方可依靠 —— 这里从头跑
+        `run()`，要的是**一条 umount 都没出现过**，而不只是「抛了异常」。
+        """
+        for target in ("/", "/mnt"):
+            with self.subTest(target=target):
+                plan = pipeline.Plan(disk="/dev/vda", steps=("disk",), target=target)
+                with self.assertRaises(InstallerError) as ctx:
+                    pipeline.run(plan, self.reporter, password="pw",
+                                 confirm=lambda *a: None)
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+                self.assertFalse(
+                    any("umount" in " ".join(cmd) for cmd in self.runner.history),
+                    f"非法 target 之前已经动手卸了：{self.runner.history}",
+                )
+
     def test_a_leftover_we_cannot_clear_is_still_refused(self):
         """清不掉的残留照样拦：那时盘一个字节都不该动。"""
         plan = pipeline.Plan(disk="/dev/vda", steps=("disk",))
@@ -448,6 +478,36 @@ class TestStaleTargetRecovery(unittest.TestCase):
                 pipeline.run(plan, self.reporter, password="pw", confirm=lambda *a: None)
         self.assertEqual(ctx.exception.reason, "targetMounted")
         self.assertFalse(any("wipefs" in " ".join(cmd) for cmd in self.runner.history))
+
+    #: 复核第 4 条那一幕的现场：**整台机器都合格**（`/mnt` 下有东西、目标盘自己的
+    #: 分区也挂着）。`--target /` 时这些全落进归属判据里 —— 修好之前会先卸了再说。
+    DOCUMENTED_HAZARD = "\n".join([
+        "31 30 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+        "40 30 8:9 / /mnt rw,relatime - ext4 /dev/vdb1 rw",
+        "41 30 8:16 / /mnt/mipl rw,relatime - ext4 /dev/vda2 rw",
+    ])
+
+    def test_a_dangerous_target_cannot_unmount_the_machine(self):
+        """**这条才是真反证**：不清掉残留时，`--target /` 会去卸 `/` 与 `/mnt`。
+
+        上面那条干净现场只能证明「没人动手」；这条把现场摆成复核描述的样子，
+        断言的是**没出现过任何具名的卸载命令**。把 `options.validate_target()`
+        或 `disk._is_under()` 的修复撤掉，这里会打印出 `umount -R /`。
+        """
+        for target, forbidden in (("/", "/"), ("/mnt", "/mnt"), ("", "/")):
+            with self.subTest(target=target):
+                self.runner.history.clear()
+                plan = pipeline.Plan(disk="/dev/vda", steps=("disk",), target=target)
+                with mock.patch("mipl_installer.util.read_text",
+                                return_value=self.DOCUMENTED_HAZARD):
+                    with self.assertRaises(InstallerError):
+                        pipeline.run(plan, self.reporter, password="pw",
+                                     confirm=lambda *a: None)
+                commands = [" ".join(cmd) for cmd in self.runner.history]
+                self.assertFalse(
+                    [c for c in commands if "umount" in c and forbidden in c],
+                    f"非法 target 之前已经动手卸了：{commands}",
+                )
 
 
 class TestMountBookkeepingSurvivesPartialFailure(unittest.TestCase):

@@ -115,6 +115,17 @@ class TestTargetNamespace(unittest.TestCase):
     def test_a_clean_machine_has_nothing_under_target(self):
         self.assertEqual(disk.mounts_under(self.SAMPLE, "/mnt/other"), [])
 
+    def test_empty_target_owns_nothing(self):
+        """**回归**：`target` 为空 / 只剩斜杠时不能「全都算」。
+
+        归属判宽了的代价不是报错，是清理把整台机器当成自己的残留去卸 ——
+        `/` 那种写法在这里必须一个字都不匹配（#105 复核）。
+        """
+        for target in ("", "/"):
+            with self.subTest(target=target):
+                self.assertEqual(disk.mounts_under(self.SAMPLE, target), [])
+                self.assertEqual(disk.stale_target_sources(self.SAMPLE, target), set())
+
 
 class TestSameDevice(unittest.TestCase):
     def test_partition_belongs_to_disk(self):

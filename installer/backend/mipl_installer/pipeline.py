@@ -232,6 +232,10 @@ def preflight(plan: Plan) -> None:
     options.validate_locale(plan.locale)
     options.validate_timezone(plan.timezone)
     options.validate_keymap(plan.keymap)
+    # 目标挂载点也要在这里查：开工前的自动清理拿它当**归属判据**（`target` 之下
+    # 就当成我们自己的残留去卸），而清理跑在守卫之前。`--target /` 放进来的话，
+    # 这一关之前的守卫一次都不会跑（#105 复核）。
+    options.validate_target(plan.target)
 
 
 def resolve_layout(plan: Plan, runner: Runner, reporter: Reporter) -> disk.Layout:

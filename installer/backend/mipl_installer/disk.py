@@ -242,10 +242,14 @@ def _is_under(mountpoint: str, target: str) -> bool:
     """`mountpoint` 是 `target` 本身或它的子孙。
 
     按路径分段比，**不能用裸 `startswith`**：`/mnt/mipl2` 不是 `/mnt/mipl` 的子树。
+
+    `target` 为空 / 只剩斜杠时返回 `False`（**不是**「全都算」）：这里的调用者拿它
+    判定归属再动手卸，判宽了的代价是把整台机器都当成我们的。传参那头有
+    `options.validate_target()` 兜着，这条是它没跑到时的第二道。
     """
     base = target.rstrip("/")
     if not base:
-        return True
+        return False
     return mountpoint == base or mountpoint.startswith(base + "/")
 
 

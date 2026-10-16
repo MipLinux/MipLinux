@@ -37,6 +37,11 @@ EXIT_UNEXPECTED = 7  # 兜底
 #: dry-run 下的取值占位符。**不要**把它当成合法 UUID 去用。
 DRY = "<dry-run>"
 
+#: 装系统时目标挂载在哪。**专用子目录，不是 `/mnt` 本身** —— 归属由路径判定：
+#: `/mnt` 上可能是用户自己挂的盘，而这个名字下面只可能是安装器留下的（#105）。
+#: 默认值只有这一处，其余模块一律引它。
+DEFAULT_TARGET = "/mnt/mipl"
+
 
 class InstallerError(Exception):
     """带退出码的失败。消息面向用户，hint 是「接下来敲什么」。

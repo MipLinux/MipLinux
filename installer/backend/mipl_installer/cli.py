@@ -57,7 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     # `--disk` **不是** required：只读出口不该逼人先指一块盘。安装模式下缺了它
     # 由 `queries.require_disk_argv()` 报错，文案与原来的 argparse 提示一致。
     parser.add_argument("--disk", default=None, help="目标盘（整块盘，例如 /dev/vda）；安装模式下必填")
-    parser.add_argument("--target", default="/mnt", help="目标系统的挂载点（默认 /mnt）")
+    parser.add_argument("--target", default=util.DEFAULT_TARGET,
+                        help=f"目标系统的挂载点（默认 {util.DEFAULT_TARGET}）")
     parser.add_argument("--hostname", default="mipl", help="装后系统的主机名")
     parser.add_argument("--user", default="mipl", help="要创建的用户（wheel 组，能 sudo）")
     parser.add_argument("--password-stdin", action="store_true",
@@ -92,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     exits = parser.add_argument_group(
         "只读出口",
         "看一眼运行环境，不动盘、不需要 root（--connect-wifi / --reboot / "
-        "--unmount-target 除外：它们分别真的连网、真的重启、真的卸载 /mnt）。"
+        "--unmount-target 除外：它们分别真的连网、真的重启、真的卸载目标挂载点）。"
         "输出恰好一份 JSON 文档。",
     )
     pick = exits.add_mutually_exclusive_group()

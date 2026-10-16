@@ -833,7 +833,7 @@ module.exports = async function probe({ app, win, launch }) {
     check(ringTops.length === 1, '进度页：环的纵向位置不随子步骤变化（不重新居中）', ringTops);
 
     // ---------------------------------------------------------- 6.9 失败页：能一键卸载
-    // 2026-10-06 实机反馈两条：错误提示丑、`/mnt` 被占用时只能切 tty 手敲 umount。
+    // 2026-10-06 实机反馈两条：错误提示丑、目标被占用时只能切 tty 手敲 umount。
     //
     // 怎么造这个现场：先让这一轮假安装跑起来（`startedAt` 有值 = 这是**当前**这一轮），
     // 再在**页面内**把失败状态注进去并重画。不能靠「先去别的页、再带着失败状态进来」——
@@ -847,8 +847,8 @@ module.exports = async function probe({ app, win, launch }) {
       startedAt: Date.now(), done: false, cancelled: false,
       cancelRequested: true, cancelSent: false,
       failed: true,
-      failure: '/mnt 已经是个挂载点，拒绝把系统装上去',
-      failureHint: '手动卸载后再跑；安装器不替谁卸载机器上已有的挂载',
+      failure: '/mnt/mipl 下还挂着上一次留下的挂载：/mnt/mipl、/mnt/mipl/boot',
+      failureHint: '自动清理没成功（多半有进程占着它）；手动 umount -R /mnt/mipl 后再跑',
       failureReason: 'targetMounted',
     })`);
     await run('window.__mipl.rerender()');
@@ -866,11 +866,11 @@ module.exports = async function probe({ app, win, launch }) {
         button: btn ? btn.textContent.trim() : null,
       };
     })()`);
-    check(!failureView.missing && failureView.title === '目标挂载点已经被占用',
+    check(!failureView.missing && failureView.title === '目标挂载点还被占用着',
       '失败页：标题走本地化文案（不是后端那句原文）', failureView.title);
     check(Boolean(failureView.hint), '失败页：下一步那句话在', failureView.hint);
     check(failureView.extra === 0, '失败页：没有多余的折叠块 / 原始输出框', failureView.extra);
-    check(failureView.button === '卸载 /mnt', '失败页：有「卸载 /mnt」按钮', failureView.button);
+    check(failureView.button === '卸载目标挂载点', '失败页：有「卸载目标挂载点」按钮', failureView.button);
     await shot('failure-target-mounted-1024x768');
 
     const afterUnmount = await run(`(async () => {
@@ -885,7 +885,52 @@ module.exports = async function probe({ app, win, launch }) {
       };
     })()`);
     check(!afterUnmount.button && Boolean(afterUnmount.done),
-      '失败页：按一下就把「卸载 /mnt」变成「已卸载」（按钮不该留在那儿等人重复点）', afterUnmount);
+      '失败页：按一下就把「卸载目标挂载点」变成「已卸载」（按钮不该留在那儿等人重复点）', afterUnmount);
+
+    // 别人的挂载（`targetMountedForeign`）：说清楚，但**不该给按钮** —— 卸别人的
+    // 挂载不是安装器该做的事。这条是「按钮不能对外来挂载生效」的离线防线。
+    // 载荷必须和上面那段一样完整：`startedAt` 缺了的话，进度页会当成「新的一轮」
+    // 重开，失败状态当场被冲掉（`setData` 是整体替换，不是合并）。
+    await run(`window.__mipl.setData('progress', {
+      phaseIndex: 0, stepId: null, step: null, total: null, steps: [], lines: [],
+      startedAt: Date.now(), done: false, cancelled: false,
+      cancelRequested: true, cancelSent: false,
+      failed: true,
+      failure: '/mnt 上挂着别的东西，不能在里面建目标系统',
+      failureHint: '这些挂载不是安装器留下的；先自己卸掉',
+      failureReason: 'targetMountedForeign',
+    })`);
+    await run('window.__mipl.rerender()');
+    await sleep(320);
+    const foreignView = await run(`(() => {
+      const block = document.getElementById('progress-error');
+      if (!block) return { missing: true };
+      return {
+        title: block.querySelector('.failure__title')?.textContent || '',
+        button: Boolean(document.getElementById('failure-unmount')),
+      };
+    })()`);
+    check(foreignView.title === '目标路径上面挂着别的东西',
+      '失败页：外来挂载走自己的本地化文案', foreignView.title);
+    check(foreignView.button === false,
+      '失败页：外来挂载**没有**一键卸载按钮（不替谁卸别人的挂载）', foreignView.button);
+
+    // ------------------------------------------------- 6.10 目标盘：残留挂载要说明白
+    // #105 实机：上一次被强杀留下的挂载让目标盘整个从候选表里消失（选盘页显示
+    // 「没有找到可用的磁盘」）。盘现在还在列表里，但「被占用却还能选」必须给出
+    // 理由 —— 不解释就等于让用户猜。
+    await run('window.__mipl.goTo("disk")');
+    await sleep(320);
+    const staleCards = await run(`(() => {
+      const cards = [...document.querySelectorAll('.disk-card')];
+      const texts = cards.map((card) => card.textContent || '');
+      return {
+        count: cards.length,
+        withNote: texts.filter((text) => text.includes('上一次安装留下的挂载')).length,
+      };
+    })()`);
+    check(staleCards.count >= 3, '目标盘：残留的那块盘没有被抹掉，仍在列表里', staleCards);
+    check(staleCards.withNote === 1, '目标盘：残留的那块盘说出了理由（自动清理）', staleCards);
 
     // ---------------------------------------------------------- 7. reduced-motion
     try {

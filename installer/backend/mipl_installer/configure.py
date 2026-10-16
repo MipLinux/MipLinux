@@ -26,6 +26,7 @@ from pathlib import Path
 from . import options
 from .events import step_event
 from .util import (
+    DEFAULT_TARGET,
     EXIT_CONFIGURE,
     InstallerError,
     Runner,
@@ -60,7 +61,7 @@ class TargetConfig:
     默认值都按中文用户与国内环境给（D10 / D11），命令行可以逐项覆盖。
     """
 
-    target: str = "/mnt"
+    target: str = DEFAULT_TARGET
     hostname: str = "mipl"
     user: str = "mipl"
     locale: str = "zh_CN.UTF-8"
@@ -422,7 +423,7 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     else:
         runner.reporter.note(
             f"root 未设密码（账号保持锁定）：只能用 {cfg.user} + sudo 提权。"
-            "要设就在装完之后 `arch-chroot /mnt passwd root`，或重装时带上 --root-password-stdin"
+            f"要设就在装完之后 `arch-chroot {cfg.target} passwd root`，或重装时带上 --root-password-stdin"
         )
 
     # 3. locale：写在 /etc/locale.gen 里的是「要生成什么」，locale-gen 才真的生成

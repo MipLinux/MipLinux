@@ -121,9 +121,9 @@ class TestDryRun(unittest.TestCase):
             "mkfs.vfat",
             "mkfs.ext4",
             "mount",
-            "pacstrap -C /etc/pacman.conf -G -M /mnt",
-            "arch-chroot /mnt locale-gen",
-            "arch-chroot /mnt mkinitcpio -P",
+            f"pacstrap -C /etc/pacman.conf -G -M {util.DEFAULT_TARGET}",
+            f"arch-chroot {util.DEFAULT_TARGET} locale-gen",
+            f"arch-chroot {util.DEFAULT_TARGET} mkinitcpio -P",
             "bootctl --esp-path=/boot install",
         ):
             with self.subTest(expected=expected):
@@ -173,7 +173,7 @@ class TestDryRun(unittest.TestCase):
 class TestLogLocations(unittest.TestCase):
     """失败收尾里那句「日志在哪」：只报**确实存在**的文件，不报推测出来的路径。"""
 
-    def _args(self, log=None, target="/mnt"):
+    def _args(self, log=None, target=util.DEFAULT_TARGET):
         return argparse.Namespace(log=log, target=target)
 
     def test_nothing_to_report_when_nothing_exists(self):

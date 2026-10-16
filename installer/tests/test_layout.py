@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from mipl_installer import disk
+from mipl_installer import disk, util
 from mipl_installer.util import EXIT_GUARD, InstallerError
 
 GiB = disk.GiB
@@ -77,6 +77,56 @@ class TestMountSources(unittest.TestCase):
         self.assertEqual(disk.mount_sources("garbage without separator\n"), set())
 
 
+class TestTargetNamespace(unittest.TestCase):
+    """目标挂载点是**专用子目录**，归属靠路径判定（#105）。
+
+    样本里刻意混进了两种「像但不是」：`/mnt/mipl2`（前缀相同、不是子树）与用户
+    挂在自己 `/mnt` 上的盘（祖先）。前者不能被算成我们的，后者不能被我们碰。
+    """
+
+    SAMPLE = "\n".join([
+        "31 30 8:1 / / rw,relatime - ext4 /dev/vda1 rw",
+        "40 30 8:2 / /mnt rw,relatime - ext4 /dev/vdb1 rw",
+        "41 30 8:3 / /mnt/mipl rw,relatime - ext4 /dev/vdc1 rw",
+        "42 30 8:4 / /mnt/mipl/boot rw,relatime - vfat /dev/vdc2 rw",
+        "43 30 0:24 / /mnt/mipl/proc rw - proc proc rw",
+        "44 30 8:5 / /mnt/mipl2 rw,relatime - ext4 /dev/vdd1 rw",
+    ])
+
+    def test_parses_mountpoint_source_and_fstype(self):
+        entries = disk.mount_entries(self.SAMPLE)
+        self.assertEqual(entries[0], disk.MountEntry("/", "/dev/vda1", "ext4"))
+        self.assertIn(disk.MountEntry("/mnt/mipl/proc", "proc", "proc"), entries)
+
+    def test_under_finds_ours_including_children(self):
+        points = [e.mountpoint for e in disk.mounts_under(self.SAMPLE, util.DEFAULT_TARGET)]
+        self.assertEqual(points, ["/mnt/mipl", "/mnt/mipl/boot", "/mnt/mipl/proc"])
+
+    def test_sibling_with_the_same_prefix_is_not_ours(self):
+        """`/mnt/mipl2` 不是 `/mnt/mipl` 的子树 —— 裸 `startswith` 会把它算进来。"""
+        points = [e.mountpoint for e in disk.mounts_under(self.SAMPLE, util.DEFAULT_TARGET)]
+        self.assertNotIn("/mnt/mipl2", points)
+
+    def test_ancestors_hold_the_foreign_mount_and_exclude_root(self):
+        """根永远是挂载点；把它算进祖先，这条守卫就成了永远拒绝。"""
+        points = [e.mountpoint for e in disk.ancestor_mounts(self.SAMPLE, util.DEFAULT_TARGET)]
+        self.assertEqual(points, ["/mnt"])
+
+    def test_a_clean_machine_has_nothing_under_target(self):
+        self.assertEqual(disk.mounts_under(self.SAMPLE, "/mnt/other"), [])
+
+    def test_empty_target_owns_nothing(self):
+        """**回归**：`target` 为空 / 只剩斜杠时不能「全都算」。
+
+        归属判宽了的代价不是报错，是清理把整台机器当成自己的残留去卸 ——
+        `/` 那种写法在这里必须一个字都不匹配（#105 复核）。
+        """
+        for target in ("", "/"):
+            with self.subTest(target=target):
+                self.assertEqual(disk.mounts_under(self.SAMPLE, target), [])
+                self.assertEqual(disk.stale_target_sources(self.SAMPLE, target), set())
+
+
 class TestSameDevice(unittest.TestCase):
     def test_partition_belongs_to_disk(self):
         self.assertTrue(disk.same_device("/dev/vda1", "/dev/vda"))
@@ -103,8 +153,9 @@ class TestAssertUsable(unittest.TestCase):
             device="/dev/vda",
             size_bytes=40 * GiB,
             sources={"/dev/vdb1"},
-            target_mountpoint="/mnt",
-            target_is_mountpoint=False,
+            target_mountpoint=util.DEFAULT_TARGET,
+            target_mounts=[],
+            blocking_ancestors=[],
         )
         params.update(kwargs)
         return disk.assert_usable(**params)
@@ -127,19 +178,32 @@ class TestAssertUsable(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
 
     def test_refuses_mounted_target(self):
+        """目标路径下还有挂载（我们自己上一次留下的）→ 拒绝并给一键卸载。"""
         with self.assertRaises(InstallerError) as ctx:
-            self._call(target_is_mountpoint=True)
+            self._call(target_mounts=[disk.MountEntry(util.DEFAULT_TARGET, "/dev/vdb1", "ext4")])
         self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
-        # 失败码是**给界面的**：界面拿它挑自己的句子，并给出「卸载 /mnt」那个按钮
-        # （见 queries.unmount_target）。没有它，界面只能去比对中文报错。
+        # 失败码是**给界面的**：界面拿它挑自己的句子，并给出「卸载目标挂载点」那个
+        # 按钮（见 queries.unmount_target）。没有它，界面只能去比对中文报错。
         self.assertEqual(ctx.exception.reason, "targetMounted")
 
+    def test_refuses_foreign_mount_above_target(self):
+        """祖先上挂着别人的东西 → 拦住，但**不给**一键卸载（不是我们的挂载）。"""
+        with self.assertRaises(InstallerError) as ctx:
+            self._call(blocking_ancestors=[disk.MountEntry("/mnt", "/dev/vdb1", "ext4")])
+        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+        self.assertEqual(ctx.exception.reason, "targetMountedForeign")
+        # 「谁挂的」要说出来：消息里有那个挂载点
+        self.assertIn("/mnt", str(ctx.exception))
+
     def test_every_guard_carries_a_failure_code(self):
-        """四条守卫都要有 `reason` —— 少一条，界面在那条路上就只能照抄中文。"""
+        """五条守卫都要有 `reason` —— 少一条，界面在那条路上就只能照抄中文。"""
         cases = {
             "notBlockDevice": {"is_block_device": False},
             "isPartition": {"is_partition": True},
-            "targetMounted": {"target_is_mountpoint": True},
+            "targetMountedForeign": {"blocking_ancestors": [
+                disk.MountEntry("/mnt", "/dev/vdb1", "ext4")]},
+            "targetMounted": {"target_mounts": [
+                disk.MountEntry(util.DEFAULT_TARGET, "/dev/vdb1", "ext4")]},
             "diskInUse": {"sources": {"/dev/vda2"}},   # 挂载来源里出现目标盘 = 它在被使用
         }
         for reason, overrides in cases.items():

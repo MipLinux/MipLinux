@@ -76,6 +76,7 @@ const CANDIDATE_DISKS = [
     sizeBytes: 21474836480,
     sizeLabel: '20 GiB',
     partitions: 0,
+    staleTarget: false,
     recommended: true,
   },
   {
@@ -84,6 +85,7 @@ const CANDIDATE_DISKS = [
     sizeBytes: 500107862016,
     sizeLabel: '465.8 GiB',
     partitions: 3,
+    staleTarget: false,
     recommended: false,
   },
   {
@@ -92,6 +94,9 @@ const CANDIDATE_DISKS = [
     sizeBytes: 1000204886016,
     sizeLabel: '931.5 GiB',
     partitions: 1,
+    // 这一块刻意标成「上一次安装留下的挂载」：探针得真的画出那句说明 ——
+    // 让这条分支躺在代码里没人走，等于没验（#105）。
+    staleTarget: true,
     recommended: false,
   },
 ];
@@ -271,9 +276,9 @@ export class Mock {
   }
 
   /**
-   * 「卸载 /mnt」的离线替身（`Backend.unmountTarget` 的同形实现）。
+   * 「卸载目标挂载点」的离线替身（`Backend.unmountTarget` 的同形实现）。
    *
-   * 离屏探针里 `/mnt` 当然没挂着，所以回「卸好了」—— 探针要验的是**按钮接上了、
+   * 离屏探针里目标路径当然没挂着，所以回「卸好了」—— 探针要验的是**按钮接上了、
    * 按下去有反馈**，不是真的去卸谁的东西。
    */
   async unmountTarget() {

@@ -754,6 +754,12 @@ cmd_qemu() {
   )
   if [[ -w /dev/kvm ]]; then
     q+=(-enable-kvm)
+    # `-cpu host`：不写的话 QEMU 用默认的 `qemu64`，那是个**没有 AES-NI / AVX2** 的
+    # 老模型 —— 而装机过程满是 CPU 密集的解压与校验（pacman 解包、mkinitcpio 压缩、
+    # pacman-key 签名），实测一轮装机因此慢得肉眼可见。只有 KVM 下才敢这么写：
+    # 纯软件模拟（TCG）里没有 `host` 这个型号，QEMU 会直接拒绝启动。
+    # 想覆盖就在 MIPL_QEMU_EXTRA 里再给一个 -cpu（它在后面，QEMU 取后一个）。
+    q+=(-cpu host)
   else
     warn "没有可用的 /dev/kvm，去掉 -enable-kvm（会慢很多）"
   fi

@@ -1,6 +1,6 @@
-"""「高级安装」那四项的候选名单与校验：语言 / 键盘 / 时区 / 主机名。
+"""「高级安装」那几项的候选名单与校验：语言 / 键盘 / 时区 / 主机名 / 目标挂载点。
 
-这四项都有能用的默认值，改的人是少数 —— 但它们一旦可选，就必须**真的生效**，
+这几项都有能用的默认值，改的人是少数 —— 但它们一旦可选，就必须**真的生效**，
 而且是**后端说了算**：界面上列出来的每一项，都得来自运行系统上真实存在的文件，
 不能由前端另抄一份名单。
 
@@ -12,6 +12,7 @@
 | 键盘 | `/usr/share/kbd/keymaps/**/*.map.gz` | 名字在不在名单里 |
 | 语言 | `/usr/share/i18n/SUPPORTED` | 目标系统的 `locale.gen` 里有没有这一行 |
 | 主机名 | 没有名单，只有规则 | RFC 1123 |
+| 目标挂载点 | 没有名单，只有命名空间 | `/mnt/` 下的规范化绝对路径（见 `validate_target()`） |
 
 **名单读不到就是空的，绝不内建一份兜底名单。** 内建一份，就等于把
 「界面里能选、写进目标却不生效」重新种回去 —— Issue #63 / #64 正是这么长出来的。
@@ -22,10 +23,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone as dt_timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
 
-from .util import EXIT_CONFIGURE, InstallerError
+from .util import DEFAULT_TARGET, EXIT_CONFIGURE, EXIT_USAGE, InstallerError
 
 #: 都在**运行系统**上（Live 里就是出厂设置），路径可注入，测试里搭假目录即可。
 ZONEINFO = "/usr/share/zoneinfo"
@@ -222,5 +223,37 @@ def validate_locale(locale: str, path: str = LOCALE_SUPPORTED) -> None:
             f"语言名不合法：{locale!r}",
             EXIT_CONFIGURE,
             hint="形如 xx_YY.UTF-8，例如 ja_JP.UTF-8；这台机器列不出名单，只能按写法判断",
+            reason="format",
+        )
+
+
+def validate_target(target: str) -> None:
+    """目标挂载点必须落在安装器的保留命名空间 `/mnt/` 下，且是规范写法。
+
+    这条校验挡的是**开工前那次自动清理**（`disk.cleanup_stale_target`）——它按
+    「挂载点在 `target` 之下」判定归属，然后 `umount -R`。归属判据只在 `target`
+    本身可信时才成立：`target` 取 `/` 时，整台机器都算「我们的」，清理会把运行中
+    的系统卸掉；取 `/mnt` 时，用户自己挂在 `/mnt` 的盘会被当成残留。
+
+    而 `--target` 是 CLI 可传的参数，清理又跑在 `preflight()` 与守卫**之前**，
+    所以「传错了」在这里的代价不是报错，是**先卸了再说**。GUI 不发这个字段
+    （走 `DEFAULT_TARGET`），可达路径只有 CLI —— 但校验没有理由因此缺席。
+
+    规范化也一并要求（`/mnt/mipl/`、`/mnt//x`、`/mnt/./x`、含 `..` 的写法全拒）：
+    归属判定拿字符串前缀去比 `/proc/self/mountinfo` 里的挂载点，一个能指向同一
+    位置却长得不一样的写法，会让「是不是我们的」这个判断悄悄失准。`..` 尤其要
+    单独拦：`PurePosixPath` 只做词法规范化、**不解析 `..`**，光靠它会漏掉
+    `/mnt/../etc` 这种「前缀像 `/mnt/`、解析后是 `/etc`」的写法。
+    """
+    components = PurePosixPath(target).parts if target else ()
+    if (
+        not target.startswith("/mnt/")
+        or ".." in components
+        or str(PurePosixPath(target)) != target
+    ):
+        raise InstallerError(
+            f"目标挂载点不合法：{target!r}",
+            EXIT_USAGE,
+            hint=f"/mnt/ 下的规范化绝对路径，例如 {DEFAULT_TARGET}（不要用 /、/mnt 或带 .. 的写法）",
             reason="format",
         )

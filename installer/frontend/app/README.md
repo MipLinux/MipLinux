@@ -151,7 +151,7 @@ MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js  
 
 | 出口名 | 命令行 | 回什么 |
 |---|---|---|
-| `disks` | `--print-disks` | 候选盘（含不能装的，`usable` 标出来） |
+| `disks` | `--print-disks` | 候选盘（含不能装的，`usable` 标出来）；`stale_target` = 占着它的是**我们自己**上一次留下的挂载（照旧算 `usable`，开工前清掉） |
 | `network` | `--print-network` | `{online, wired, wired_interface, wired_ipv4, wifi_interface, wifi_ssid}` |
 | `wifi` | `--print-wifi [--rescan]` | `{wifi:[{ssid, signal(0-100), secured}]}`，按信号降序 |
 | `timezones` | `--print-timezones` | `{timezones:[{id, offset}]}`（偏移**不带** `UTC` 前缀） |
@@ -161,7 +161,7 @@ MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js  
 | `plan` | `--print-plan` | `{filesystem, boot, esp, pacman_conf}` |
 | `checkHostname` / `checkLocale` / `checkKeymap` / `checkTimezone` | `--check-<项>=<值>` | `{ok, reason, message}`；`reason` 是 `format` / `notInList` / `notFound` |
 | `connectWifi` | `--connect-wifi=<SSID>`（密码走 stdin） | `{ok, reason, message}` —— **连不上也是 ok:true 的答案** |
-| `unmountTarget` | `--unmount-target` | `{ok, mounted}` —— 失败页那个「卸载 /mnt」：**只卸挂载，不碰盘**；卸完再看一眼 `/mnt`，所以 `ok` 说的是「真的卸干净了」 |
+| `unmountTarget` | `--unmount-target` | `{ok, mounted}` —— 失败页那个「卸载目标挂载点」：**只卸挂载，不碰盘**；只对安装器自己的目标路径有意义（外来挂载不给按钮），卸完再看一眼目标路径，所以 `ok` 说的是「真的卸干净了」 |
 
 一律用 `--开关=值` 而不是 `--开关 值`：值以 `-` 开头时（`-bad-` 这种主机名是测试用例里就有的），
 分开写会被 argparse 当成另一个开关，然后报一句与事实无关的错。

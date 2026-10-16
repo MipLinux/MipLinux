@@ -20,7 +20,7 @@
 
 每个函数返回一个可直接 `json.dumps` 的 dict，由 `cli.py` 的 `--print-*` 打印。
 三个出口有副作用：`--connect-wifi`（真的会连网）、`--reboot`（真的会重启）、
-`--unmount-target`（真的会卸载 /mnt），其余全是只读、不需要 root。
+`--unmount-target`（真的会卸载目标挂载点），其余全是只读、不需要 root。
 """
 
 from __future__ import annotations
@@ -44,6 +44,9 @@ def candidate_dict(candidate: disk.Candidate) -> dict:
         "size_label": util.human_size(candidate.size),
         "removable": candidate.removable,
         "in_use": candidate.in_use,
+        #: 占着它的是**我们自己**上一次留下的挂载（开工前会清掉）。界面据此说明
+        #: 「为什么这块盘看着被占用却还能选」，而不是默默把盘列出来（#105）。
+        "stale_target": candidate.stale_target,
         "table_type": candidate.table_type,
         "too_small": candidate.too_small,
         "usable": candidate.usable,
@@ -105,16 +108,18 @@ def reboot(runner: Runner) -> dict:
     return {"ok": True}
 
 
-def unmount_target(runner: Runner, target: str = "/mnt") -> dict:
-    """把目标挂载点卸干净 —— 失败页那个「卸载 /mnt」按钮。
+def unmount_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> dict:
+    """把目标挂载点卸干净 —— 失败页那个「卸载目标挂载点」按钮。
 
-    守卫拒绝「`/mnt` 已经是个挂载点」时（`reason="targetMounted"`），用户点一下
-    就能把这条路清出来，不必切到 tty 手敲 `umount`。
+    守卫拒绝「目标路径下还有挂载」时（`reason="targetMounted"`），用户点一下就能
+    把这条路清出来，不必切到 tty 手敲 `umount`。**只管我们自己那个命名空间**：
+    只有在安装器的保留路径下它才有意义，祖先上的外来挂载走 `targetMountedForeign`
+    —— 那条不给按钮，因为卸别人的挂载不是安装器该做的事。
 
     **只卸挂载，不碰盘**：走的是 `disk.unmount_target()` —— 与失败收尾同一个函数
     （`umount -R` 那条路），所以不存在第二种「怎么卸」的实现。
 
-    回 `{ok, mounted}`：卸完**再看一眼** `/mnt` 还在不在挂载表里。说「卸好了」而
+    回 `{ok, mounted}`：卸完**再看一眼**目标路径还在不在挂载表里。说「卸好了」而
     实际还挂着，用户点第二次还是失败，而他会以为是按钮坏了。
     """
     disk.unmount_target(runner, target)

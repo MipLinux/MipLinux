@@ -144,14 +144,15 @@ class TestJsonReporter(unittest.TestCase):
         """失败码是**给界面的**：界面拿它挑自己的句子、并决定给不给补救按钮。
 
         没有它，界面只能去比对中文报错 —— 那是措辞，改一个字就失效
-        （2026-10-06：`/mnt` 被占用那条要能一键卸载，靠的就是这个字段）。
+        （2026-10-06：目标路径被占用那条要能一键卸载，靠的就是这个字段）。
         """
-        self.reporter.error(3, "/mnt 已经是个挂载点，拒绝把系统装上去",
-                            "手动卸载后再跑", "targetMounted")
+        hint = f"手动 `umount -R {util.DEFAULT_TARGET}` 后再跑"
+        self.reporter.error(3, f"{util.DEFAULT_TARGET} 下还挂着上一次留下的挂载",
+                            hint, "targetMounted")
         record = _lines(self.stream.getvalue())[-1]
         self.assertEqual(record["reason"], "targetMounted")
         self.assertEqual(record["code"], 3)
-        self.assertEqual(record["hint"], "手动卸载后再跑")
+        self.assertEqual(record["hint"], hint)
 
     def test_error_without_a_reason_says_null_not_empty(self):
         self.reporter.error(7, "出事了", None)
@@ -305,12 +306,12 @@ class TestRunQuery(unittest.TestCase):
         self.assertEqual(runner.commands(), ["systemctl reboot"])
 
     def test_unmount_target_reports_what_it_actually_saw(self):
-        """卸完**再看一眼** `/mnt` 还在不在挂载表里 —— 说「卸好了」而实际还挂着，
+        """卸完**再看一眼**目标路径还在不在挂载表里 —— 说「卸好了」而实际还挂着，
         用户点第二次还是失败，只会以为按钮坏了。"""
         runner = FakeRunner()
         with mock.patch("mipl_installer.disk.is_mountpoint", return_value=False):
             self.assertEqual(queries.unmount_target(runner), {"ok": True, "mounted": False})
-        self.assertIn("umount -R /mnt", runner.commands())
+        self.assertIn(f"umount -R {util.DEFAULT_TARGET}", runner.commands())
 
         still = FakeRunner()
         with mock.patch("mipl_installer.disk.is_mountpoint", return_value=True):
@@ -411,6 +412,20 @@ class TestQueryShapes(unittest.TestCase):
         self.assertTrue(record["usable"])
         self.assertNotIn("recommended", record)
         self.assertNotIn("badges", record)
+
+    def test_candidate_dict_says_when_the_mount_is_ours(self):
+        """`stale_target` 是给界面的**事实**：这块盘被占着，但占着的是我们自己。
+
+        界面据此说明「开始时自动清理」，而不是默默把一块「被占用」的盘列出来（#105）。
+        """
+        from mipl_installer import disk
+
+        candidate = disk.Candidate(path="/dev/vda", model="", size=40 * disk.GiB,
+                                   removable=False, in_use=True, stale_target=True)
+        record = queries.candidate_dict(candidate)
+        self.assertTrue(record["in_use"])
+        self.assertTrue(record["stale_target"])
+        self.assertTrue(record["usable"])
 
     def test_timezone_offset_drops_the_utc_prefix(self):
         """界面那句 `timezone.display` 已经是 `%1（UTC%2）`，前缀由文案提供 ——

@@ -181,7 +181,7 @@ const QUERY_ARGV = {
   // 完成页的「重启」也走这一层：系统动作在**后端**（`queries.reboot` → `systemctl reboot`），
   // 主进程只把出口名翻成命令行。前端自己 exec 系统命令，就等于多了一处没人记日志的动系统的地方。
   reboot: () => ['--reboot'],
-  // 失败页的「卸载 /mnt」同理（`queries.unmount_target` → `umount -R /mnt`）
+  // 失败页的「卸载目标挂载点」同理（`queries.unmount_target` → `umount -R <目标路径>`）
   unmountTarget: () => ['--unmount-target'],
 };
 

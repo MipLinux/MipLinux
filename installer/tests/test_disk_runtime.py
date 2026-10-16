@@ -13,9 +13,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from mipl_installer import disk
+from mipl_installer import disk, util
 from mipl_installer.util import EXIT_CONFIGURE, EXIT_GUARD, InstallerError
-from tests.support import FakeRunner
+from tests.support import FakeRunner, RecordingReporter
 
 LAYOUT = disk.plan_layout(40 * disk.GiB)
 #: 内核收下的两个分区（测试里不去读真的 sysfs）
@@ -160,8 +160,26 @@ class TestFilesystemAndMount(unittest.TestCase):
         """收尾阶段再抛异常，只会盖掉真正的失败原因。"""
         runner = FakeRunner()
         runner.fail_patterns.add("umount")
-        disk.unmount_target(runner, "/mnt")          # 不该抛
-        self.assertIn("umount -R /mnt", runner.commands())
+        disk.unmount_target(runner, util.DEFAULT_TARGET)          # 不该抛
+        self.assertIn(f"umount -R {util.DEFAULT_TARGET}", runner.commands())
+
+    def test_unmount_says_so_when_the_target_stays_mounted(self):
+        """卸不掉必须留一句话。
+
+        `check=False` 一路静默，于是「卸载目标」这句旁白可以与事实相反 —— 实测里
+        正是这样：用户只看到下一次开工装不了，没有任何解释（#105）。
+        """
+        runner = FakeRunner(reporter=RecordingReporter())
+        with mock.patch("mipl_installer.disk.is_mountpoint", return_value=True):
+            disk.unmount_target(runner, util.DEFAULT_TARGET)
+        self.assertTrue(any("卸载没成功" in note for note in runner.reporter.notes),
+                        runner.reporter.notes)
+
+    def test_unmount_stays_quiet_when_it_worked(self):
+        runner = FakeRunner(reporter=RecordingReporter())
+        with mock.patch("mipl_installer.disk.is_mountpoint", return_value=False):
+            disk.unmount_target(runner, util.DEFAULT_TARGET)
+        self.assertFalse(any("卸载没成功" in note for note in runner.reporter.notes))
 
     def test_settle_udev_triggers_then_settles(self):
         runner = FakeRunner()
@@ -170,6 +188,43 @@ class TestFilesystemAndMount(unittest.TestCase):
             "udevadm trigger --subsystem-match=block",
             "udevadm settle",
         ])
+
+
+class TestCleanupStaleTarget(unittest.TestCase):
+    """开工前清掉**我们自己**上一次留下的挂载（#105）。
+
+    目标挂载点是专用子目录，所以归属是路径事实：`/mnt/mipl` 下面的一定是我们的，
+    用户的盘挂在 `/mnt`、`/run/media/...` 都碰不到。
+    """
+
+    STALE = "\n".join([
+        "40 30 8:2 / /mnt rw,relatime - ext4 /dev/vdb1 rw",
+        "41 30 8:3 / /mnt/mipl rw,relatime - ext4 /dev/vdc1 rw",
+        "42 30 8:4 / /mnt/mipl/boot rw,relatime - vfat /dev/vdc2 rw",
+        "43 30 0:24 / /mnt/mipl/proc rw - proc proc rw",
+    ])
+
+    def test_unmounts_our_namespace_and_leaves_the_users_mount_alone(self):
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.util.read_text", return_value=self.STALE):
+            points = disk.cleanup_stale_target(runner, util.DEFAULT_TARGET)
+        self.assertEqual(points, [util.DEFAULT_TARGET, f"{util.DEFAULT_TARGET}/boot",
+                                  f"{util.DEFAULT_TARGET}/proc"])
+        self.assertIn(f"umount -R {util.DEFAULT_TARGET}", runner.commands())
+        # 用户挂在自己 /mnt 上的那块盘：一条命令都不许碰它
+        self.assertNotIn("umount -R /mnt", runner.commands())
+        self.assertNotIn("umount /mnt", runner.commands())
+
+    def test_no_stale_mounts_means_no_commands(self):
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.util.read_text", return_value=""):
+            self.assertEqual(disk.cleanup_stale_target(runner, util.DEFAULT_TARGET), [])
+        self.assertEqual(runner.commands(), [])
+
+    def test_dry_run_touches_nothing(self):
+        runner = FakeRunner(dry_run=True)
+        self.assertEqual(disk.cleanup_stale_target(runner, util.DEFAULT_TARGET), [])
+        self.assertEqual(runner.commands(), [])
 
 
 class TestUuidGuard(unittest.TestCase):

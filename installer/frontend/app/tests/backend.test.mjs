@@ -76,6 +76,7 @@ function candidate(overrides = {}) {
     size_label: '40.0 GiB',
     removable: false,
     in_use: false,
+    stale_target: false,
     table_type: null,
     too_small: false,
     usable: true,
@@ -86,7 +87,8 @@ function candidate(overrides = {}) {
 
 test('盘的字段名与 Mock 完全一致（页面读的键一个不差）', () => {
   const record = diskRecord(candidate());
-  assert.deepEqual(Object.keys(record).sort(), ['id', 'model', 'partitions', 'recommended', 'sizeBytes', 'sizeLabel']);
+  assert.deepEqual(Object.keys(record).sort(),
+    ['id', 'model', 'partitions', 'recommended', 'sizeBytes', 'sizeLabel', 'staleTarget']);
   assert.equal(record.id, '/dev/vda');
   assert.equal(record.sizeLabel, '40.0 GiB');
   assert.equal(record.partitions, 0);

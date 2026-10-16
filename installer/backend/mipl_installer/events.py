@@ -129,6 +129,18 @@ class FileSinks:
         handle.flush()
         self._extra.append(handle)
 
+    def detach_log_paths(self) -> None:
+        """把后挂的落点（目标盘那份）**关掉**。
+
+        收尾要卸载目标之前必须做这一步：日志句柄开在目标文件系统上，`umount` 会
+        一直报 `目标忙`（EBUSY），于是「卸干净」变成一句谎话 —— 实测里取消与
+        正常装完都会留下挂载，下一次开工被自己的残留拦在门外（#105）。
+        关掉之后本进程只剩 Live 侧那份日志；目标盘上那份停在关掉前的那一行。
+        """
+        for handle in self._extra:
+            handle.close()
+        self._extra = []
+
     def _write_line(self, line: str) -> None:
         self._lines.append(line)
         print(line, file=self.stream, flush=True)

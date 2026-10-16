@@ -48,6 +48,9 @@ function diskCard(disk, selected, onClick, t) {
           h('span', { class: 'option__meta mono', text: disk.id }),
           h('span', { class: 'option__meta', text: t('disk.partitions', disk.partitions) }),
         ]),
+        disk.staleTarget
+          ? h('span', { class: 'option__meta', text: t('disk.staleMount') })
+          : null,
         bars.length ? h('span', { class: 'disk-card__bar' }, bars) : null,
       ]),
       h('span', { class: 'option__tail' }, [selected ? icon('check') : null]),

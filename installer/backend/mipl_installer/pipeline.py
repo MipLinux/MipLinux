@@ -44,6 +44,9 @@ class State:
     root: str = util.DRY
     root_uuid: str = util.DRY
     esp_uuid: str = util.DRY
+    #: root **真的**挂上 target 了没有。由 `disk.mount_target` 在挂上那一刻置位，
+    #: 收尾据此决定要不要卸 —— 不能等 `step_disk` 返回（#105）。
+    mounted: bool = False
     packages: list[str] = field(default_factory=list)
 
 
@@ -57,7 +60,7 @@ class Plan:
     """
 
     disk: str
-    target: str = "/mnt"
+    target: str = util.DEFAULT_TARGET
     hostname: str = "mipl"
     user: str = "mipl"
     locale: str = "zh_CN.UTF-8"
@@ -141,7 +144,10 @@ def parse_steps(raw: str) -> tuple[str, ...]:
 def step_disk(runner: Runner, plan: Plan, cfg: TargetConfig, layout: disk.Layout, state: State) -> None:
     state.esp, state.root = disk.wipe_and_partition(runner, plan.disk, layout)
     disk.make_filesystems(runner, state.esp, state.root)
-    disk.mount_target(runner, state.root, state.esp, cfg.target)
+    # 挂上 root 的那一刻就把 `state.mounted` 立起来：ESP 挂载失败、或下面 UUID
+    # 读不到时 root 已经挂在盘上了，收尾必须知道（#105）。
+    disk.mount_target(runner, state.root, state.esp, cfg.target,
+                      on_root_mounted=lambda: setattr(state, "mounted", True))
     # 两个 UUID 是 fstab 与引导项的原料，读不到会当场报错（见 disk.uuid_of）
     runner.reporter.emit(step_event("disk", "uuids", "读取分区 UUID"))
     state.root_uuid = disk.uuid_of(runner, state.root)
@@ -197,6 +203,21 @@ def attach_target_log(runner: Runner, plan: Plan, reporter: Reporter) -> None:
     # 而且那时它会先看一眼文件到底在不在，不报一个推测出来的路径。
 
 
+def detach_target_log(reporter: Reporter) -> None:
+    """收尾卸载**之前**把目标盘上的日志关掉。
+
+    不关的话，日志句柄开在目标文件系统上，`umount -R` 一律 `目标忙`（EBUSY）——
+    于是「卸载目标」这句旁白与事实相反，挂载留在盘上，下一次开工被自己的残留
+    拦在门外。这是实测出来的：取消与正常装完都会中招（#105）。
+
+    关掉之后目标盘那份日志停在关掉前那一行，Live 侧那份继续写到底。
+    """
+    detach = getattr(reporter, "detach_log_paths", None)
+    if detach is None:
+        return
+    detach()
+
+
 # ── 动盘之前 ──────────────────────────────────────────────────────────
 def preflight(plan: Plan) -> None:
     """**动盘之前**把参数能查的都查掉。
@@ -211,6 +232,10 @@ def preflight(plan: Plan) -> None:
     options.validate_locale(plan.locale)
     options.validate_timezone(plan.timezone)
     options.validate_keymap(plan.keymap)
+    # 目标挂载点也要在这里查：开工前的自动清理拿它当**归属判据**（`target` 之下
+    # 就当成我们自己的残留去卸），而清理跑在守卫之前。`--target /` 放进来的话，
+    # 这一关之前的守卫一次都不会跑（#105 复核）。
+    options.validate_target(plan.target)
 
 
 def resolve_layout(plan: Plan, runner: Runner, reporter: Reporter) -> disk.Layout:
@@ -224,12 +249,14 @@ def resolve_layout(plan: Plan, runner: Runner, reporter: Reporter) -> disk.Layou
             f"dry-run：{plan.disk} 不是块设备，按 {util.human_size(DRY_RUN_ASSUMED_SIZE)} 计算布局"
         )
         return disk.plan_layout(DRY_RUN_ASSUMED_SIZE)
+    mountinfo = util.read_text("/proc/self/mountinfo")
     return disk.assert_usable(
         plan.disk,
         size_bytes=util.size_of_device(plan.disk),
-        sources=disk.mount_sources(util.read_text("/proc/self/mountinfo")),
+        sources=disk.mount_sources(mountinfo),
         target_mountpoint=plan.target,
-        target_is_mountpoint=disk.is_mountpoint(plan.target),
+        target_mounts=disk.mounts_under(mountinfo, plan.target),
+        blocking_ancestors=disk.ancestor_mounts(mountinfo, plan.target),
     )
 
 
@@ -260,12 +287,15 @@ def run(
         util.require_root()
         for step in plan.steps:
             runner.require(util.STEP_TOOLS[step])
+        # 上一次被强杀 / 断电时，我们自己的挂载会留在目标命名空间里。**必须在守卫
+        # 之前清**：否则它先被 `targetMounted` 拦下，而且那块盘还会被 `diskInUse`
+        # 误读成「正在被使用」。只碰目标路径下的东西，祖先上的外来挂载不碰（#105）。
+        disk.cleanup_stale_target(runner, plan.target)
 
     layout = resolve_layout(plan, runner, reporter)
     confirm(plan, layout, reporter)
 
     state = State()
-    mounted = False
     try:
         # `start` 是 `events.PHASES` 的第一段 —— 前端那条六段进度条按它点亮。
         # 以前只有 CLI 时不发这一段（终端里没人画进度条），有了界面就必须发。
@@ -276,8 +306,7 @@ def run(
             reporter.emit(Event(step, PHASE_ACTIONS.get(step, f"阶段：{step}")))
             if step == "disk":
                 step_disk(runner, plan, cfg, layout, state)
-                mounted = not dry_run
-                if mounted:
+                if state.mounted:
                     # 盘挂上了就有了持久化落点：从这一刻起日志并写到目标盘
                     attach_target_log(runner, plan, reporter)
             elif step == "packages":
@@ -289,13 +318,18 @@ def run(
     except BaseException:
         # 失败（或取消）就卸干净：留一堆挂载只会让下一次尝试更难查，
         # 也不许在残骸上接着装。（日志不用抢救：一直在目标盘上并写着）
-        if mounted:
+        # 判据是「root 真的挂上过」，不是「disk 阶段跑完了」—— 后者会漏掉
+        # ESP 挂载失败、UUID 读不到这两条普通失败路径（#105）。
+        if state.mounted:
             reporter.note("失败收尾：卸载目标")
+            # 先关掉目标盘上那份日志：开着它 umount 一定 `目标忙`（#105 实测）
+            detach_target_log(reporter)
             disk.unmount_target(runner, cfg.target)
         raise
     else:
-        if mounted and not plan.keep_mounted:
+        if state.mounted and not plan.keep_mounted:
             reporter.note("卸载目标")
+            detach_target_log(reporter)
             disk.unmount_target(runner, cfg.target)
 
     accounts = f"账号：{plan.user}（密码已设，wheel 组，可 sudo）"

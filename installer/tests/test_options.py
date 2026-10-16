@@ -14,7 +14,7 @@ from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
 from mipl_installer import options
-from mipl_installer.util import EXIT_CONFIGURE, InstallerError
+from mipl_installer.util import EXIT_CONFIGURE, EXIT_USAGE, InstallerError
 
 REAL_ZONEINFO = Path("/usr/share/zoneinfo")
 
@@ -136,6 +136,30 @@ class TestLocales(_RootCase):
 
     def test_missing_file_is_an_empty_list(self):
         self.assertEqual(options.locales(str(self.root / "SUPPORTED")), [])
+
+
+class TestValidateTarget(unittest.TestCase):
+    """目标挂载点的形状校验（`--target` 是 CLI 可传的）。
+
+    它守的不是「装到哪」，是**开工前那次自动清理的归属判据**：清理按「挂载点在
+    `target` 之下」认自己的残留然后 `umount -R`，而它跑在守卫之前。所以这里的
+    反例全是「判宽了就伤机器」的写法，不是风格问题。
+    """
+
+    def test_accepts_the_reserved_namespace(self):
+        for target in ("/mnt/mipl", "/mnt/mipl-2", "/mnt/install-target"):
+            with self.subTest(target=target):
+                options.validate_target(target)                     # 不该抛
+
+    def test_refuses_the_forms_that_widen_ownership(self):
+        for target in ("/", "/mnt", "", "mnt/mipl", "/mnt/../etc", "/mnt/./x",
+                       "/mnt//x", "/mnt/mipl/"):
+            with self.subTest(target=target):
+                with self.assertRaises(InstallerError) as ctx:
+                    options.validate_target(target)
+                # `--target` 传错属于「参数不对，没动手」——不是配置阶段失败。
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+                self.assertEqual(ctx.exception.reason, "format")
 
 
 class TestValidators(_RootCase):

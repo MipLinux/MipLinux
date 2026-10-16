@@ -13,8 +13,7 @@
 * **ESP 挂 `/boot`**（见 disk.py），所以 fstab 里要有第二条。
 * **vconsole 不抄 Live 的字体**：Live 用 `ter-132n`，而目标清单里没有
   `terminus-font`，抄过去就是「开机前几行报缺字体」。M1 只写 KEYMAP。
-* **mirrorlist 的来源是运行系统**（Live），不是代码里的字符串 —— 不在 Python 里
-  再抄一份镜像地址，否则国内源就有了第二份会漂移的真相。
+* **默认镜像源来自构建时保存的 profile 基线**，Live 的临时测速结果只服务 Live。
 """
 
 from __future__ import annotations
@@ -35,6 +34,9 @@ from .util import (
     read_text,
     write_text,
 )
+
+#: 构建脚本从 profile 生成，运行中的 Live 换源不会写这里。
+PACMAN_BASELINE = Path(__file__).parent / "data/pacman-baseline"
 
 #: `Include = /etc/pacman.d/mirrorlist` —— 只认未注释的整行
 INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(\S+)\s*$")
@@ -69,7 +71,7 @@ class TargetConfig:
     #: 控制台键盘映射（`/etc/vconsole.conf` 的 `KEYMAP`）。**以前写死 `us`** ——
     #: 界面里那个键盘页因此是个摆设（Issue #64）。现在它是真参数。
     keymap: str = "us"
-    #: 运行系统上的两份输入（Live 里就是出厂设置）
+    #: 默认路径使用随安装器打包的基线；自定义路径按调用者提供的输入读取。
     pacman_conf: str = "/etc/pacman.conf"
     mirrorlist: str = "/etc/pacman.d/mirrorlist"
     #: 中文字体 fallback 的出厂设置（Live 的 /etc/fonts/local.conf）
@@ -219,20 +221,24 @@ def validate_user(user: str) -> None:
 
 # ── 落到目标系统 ──────────────────────────────────────────────────────
 def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
-    """把运行系统（Live）的 pacman.conf 与它 Include 的文件一起写进目标。
+    """默认从 ISO 内独立基线写入目标；显式自定义 conf 使用调用者的文件。
 
-    写进目标的 conf 不照抄：`target_pacman_conf()` 先去掉了 `Optional Trust`
-    （issue #135）—— 装后系统必须验包签名，Live 的宽松只在在线安装期间有效。
-
-    Include 的目标在**运行系统**上解析（pacman 的语义，不是相对 conf 文件）。
-    少一个文件就硬失败：静默跳过会在装后系统的第一次 `pacman -Syu` 才暴露。
+    基线缺失时硬失败，不回退到 Live 临时状态。目标配置仍按 #135 收紧验签。
     """
-    conf_path = Path(cfg.pacman_conf)
+    baseline = PACMAN_BASELINE if cfg.pacman_conf == "/etc/pacman.conf" else None
+
+    def source_path(path: str) -> Path:
+        return baseline / path.lstrip("/") if baseline is not None else Path(path)
+
+    conf_path = source_path(cfg.pacman_conf)
+    if not conf_path.is_file() and runner.dry_run and baseline is not None:
+        runner.reporter.note(f"[dry-run] ISO 构建时将生成 pacman 基线：{baseline}；未验证内容")
+        return
     if not conf_path.is_file():
         raise InstallerError(
             f"找不到 pacman 配置：{cfg.pacman_conf}",
             EXIT_CONFIGURE,
-            hint="默认读运行系统的 /etc/pacman.conf —— 这个安装器要在 Live 里跑",
+            hint=f"配置来源：{conf_path}；默认安装需要 ISO 打包的 pacman 基线",
         )
     text = target_pacman_conf(read_text(str(conf_path)))
     includes = iter_includes(text)
@@ -242,24 +248,22 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
     if not includes:
         # conf 里没有 Include（构建期那份 profile/pacman.conf 就是这种写法），
         # 那就至少把 mirrorlist 写进去。
-        if not Path(cfg.mirrorlist).is_file():
+        if not source_path(cfg.mirrorlist).is_file():
             raise InstallerError(
                 f"找不到 mirrorlist：{cfg.mirrorlist}",
                 EXIT_CONFIGURE,
                 hint="装后系统要靠它找仓库（检查点 6），不能没有",
             )
-        write_text(runner, f"{cfg.target}/etc/pacman.d/mirrorlist", read_text(cfg.mirrorlist))
+        write_text(runner, f"{cfg.target}/etc/pacman.d/mirrorlist", read_text(str(source_path(cfg.mirrorlist))))
         return
 
     for include in includes:
-        source = Path(include)
-        if not source.is_absolute():
-            source = conf_path.parent / source
+        source = source_path(include) if Path(include).is_absolute() else conf_path.parent / include
         if not source.is_file():
             raise InstallerError(
                 f"pacman.conf 里 Include 的文件不存在：{include}",
                 EXIT_CONFIGURE,
-                hint=f"在运行系统上找不到 {source} —— 那是国内源的 mirrorlist，装后系统缺它就升不了级",
+                hint=f"配置来源中找不到 {source}，装后系统缺少该文件将无法升级",
             )
         write_text(runner, f"{cfg.target}{include}", read_text(str(source)))
 

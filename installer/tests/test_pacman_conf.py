@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from mipl_installer import configure
@@ -83,6 +84,38 @@ class TestTargetPacmanConf(unittest.TestCase):
 
 
 class TestCopyPacmanConfig(unittest.TestCase):
+    def test_default_uses_packaged_baseline_for_both_lists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = root / "baseline"
+            (baseline / "etc/pacman.d").mkdir(parents=True)
+            (baseline / "etc/pacman.conf").write_text(LIVE_CONF.read_text())
+            for name in ("mirrorlist", "mirrorlist-archlinuxcn"):
+                (baseline / "etc/pacman.d" / name).write_text(
+                    f"Server = https://factory.invalid/{name}/$repo/$arch\n")
+            target = root / "target"
+            with patch.object(configure, "PACMAN_BASELINE", baseline):
+                configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target)))
+            for name in ("mirrorlist", "mirrorlist-archlinuxcn"):
+                self.assertEqual((target / "etc/pacman.d" / name).read_bytes(),
+                                 (baseline / "etc/pacman.d" / name).read_bytes())
+            self.assertNotIn("TrustAll", (target / "etc/pacman.conf").read_text())
+
+    def test_missing_baseline_never_falls_back_to_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(configure, "PACMAN_BASELINE", Path(tmp) / "missing"):
+                with self.assertRaises(InstallerError):
+                    configure.copy_pacman_config(FakeRunner(), TargetConfig(target=tmp))
+
+    def test_missing_baseline_include_is_a_hard_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "baseline"
+            (baseline / "etc").mkdir(parents=True)
+            (baseline / "etc/pacman.conf").write_text(LIVE_CONF.read_text())
+            with patch.object(configure, "PACMAN_BASELINE", baseline):
+                with self.assertRaises(InstallerError):
+                    configure.copy_pacman_config(FakeRunner(), TargetConfig(target=tmp))
+
     def test_copies_conf_and_its_includes(self):
         runner = FakeRunner()
         with tempfile.TemporaryDirectory() as tmp:

@@ -42,6 +42,11 @@ HOSTNAME_RE = re.compile(r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
 #: 用它只在**名单读不到**时兜底 —— 见 `validate_locale()` 的说明。
 LOCALE_RE = re.compile(r"[a-z]{2,3}_[A-Z]{2}\.UTF-8")
 
+#: 键盘映射名的形态：`vconsole.conf` 的 `KEYMAP=` 收的是**单段 basename**
+#: （`us`、`be-latin1`、`defkeymap_V1.0`），既不能是空串，也不能带目录或空白。
+#: 与 `LOCALE_RE` 同一个用途：只用在本机列不出名单时兜底（见 `validate_keymap()`）。
+KEYMAP_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
+
 MAX_HOSTNAME = 63
 
 
@@ -73,7 +78,9 @@ def timezones(root: str = ZONEINFO) -> list[str]:
         tab = Path(root) / "zone.tab"
     try:
         text = tab.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # 解码失败与读不出来的后果一样：这台机器列不出名单。硬要读出一份半截
+        # 名单，等于把「界面里能选、写进目标却不生效」重新种回去。
         return []
 
     out: list[str] = []
@@ -117,12 +124,20 @@ def keymaps(root: str = KEYMAP_ROOT) -> list[str]:
     取的是**不带 `.map.gz` 的 basename**：`systemd-vconsole-setup` 与 `localectl`
     用的就是这个写法（`us`、`be-latin1`）。把目录层级写进去（`i386/qwerty/us`）
     在自己这套 `find` 里看着对，但在 `vconsole.conf` 里不保证被认出来。
+
+    只有能原样写进 `KEYMAP=` 的名字才进名单（见 `KEYMAP_RE`）：切成空串的
+    `.map.gz`、带空白或斜杠的 basename 一律不列 —— 列出来就是让人选一个
+    写进去不生效的值。
     """
     base = Path(root)
     if not base.is_dir():
         return []
     suffix = ".map.gz"
-    found = {path.name[: -len(suffix)] for path in base.rglob(f"*{suffix}")}
+    found: set[str] = set()
+    for path in base.rglob(f"*{suffix}"):
+        name = path.name[: -len(suffix)]
+        if KEYMAP_RE.fullmatch(name):
+            found.add(name)
     return sorted(found)
 
 
@@ -133,7 +148,7 @@ def locales(path: str = LOCALE_SUPPORTED) -> list[str]:
     """
     try:
         text = Path(path).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return []
 
     out: list[str] = []
@@ -166,19 +181,27 @@ def validate_timezone(tz: str, root: str = ZONEINFO) -> None:
 def validate_keymap(keymap: str, root: str = KEYMAP_ROOT) -> None:
     """键盘映射必须真的存在。
 
-    `/usr/share/kbd/keymaps` **不存在**时跳过：没装 kbd 的环境里无从判断，
-    而这时 `KEYMAP` 本来就只在 TTY 生效，写个名字进去不会比现在更糟。
+    `/usr/share/kbd/keymaps` **不存在**时退到**形状检查** —— 与 `validate_locale()`
+    同形：没装 kbd 的环境里列不出名单，但「一眼就不像」的名字（空串、带 `/`、
+    带空白）仍然要挡掉，它们写进 `vconsole.conf` 只会得到 systemd 认不出的配置。
     名单在、名字不在 —— 那才是要拦的（Issue #64 的口径）。
     """
     available = keymaps(root)
-    if not available:
+    if available:
+        if keymap not in available:
+            raise InstallerError(
+                f"键盘映射不存在：{keymap}",
+                EXIT_CONFIGURE,
+                hint="用 localectl 的写法，例如 us、be-latin1；可选名单见安装器的键盘页",
+                reason="notInList",
+            )
         return
-    if keymap not in available:
+    if not KEYMAP_RE.fullmatch(keymap):
         raise InstallerError(
-            f"键盘映射不存在：{keymap}",
+            f"键盘映射名不合法：{keymap!r}",
             EXIT_CONFIGURE,
-            hint="用 localectl 的写法，例如 us、be-latin1；可选名单见安装器的键盘页",
-            reason="notInList",
+            hint="用 localectl 的写法，例如 us、be-latin1；这台机器列不出名单，只能按写法判断",
+            reason="format",
         )
 
 

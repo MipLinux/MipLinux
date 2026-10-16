@@ -160,5 +160,51 @@ class TestConnect(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
 
 
+class TestClassifyFailure(unittest.TestCase):
+    """失败码只从 **nmcli 的报错**里读。
+
+    `Runner.run` 的消息第一行是命令本身，而 SSID 是外部输入：一个叫 `password`
+    或 `timeout` 的网络会让「找不到这个网络」被判成密码错 / 超时，界面于是给出
+    一句与事实无关的补救话。
+    """
+
+    def test_plain_error_line_still_classifies(self):
+        self.assertEqual(network.classify_failure("Error: Secrets were required, but not provided."),
+                         "auth")
+        self.assertEqual(network.classify_failure("Error: No network with SSID 'X' found."),
+                         "notFound")
+
+    def test_ssid_in_the_command_line_does_not_pick_the_code(self):
+        message = ("命令失败（退出码 4）：nmcli --ask device wifi connect password：\n"
+                   "    Error: No network with SSID 'password' found.")
+        self.assertEqual(network.classify_failure(message), "notFound")
+
+        timeout_named = ("命令失败（退出码 4）：nmcli --ask device wifi connect timeout：\n"
+                         "    Error: Connection activation failed: (7) Secrets were required, "
+                         "but not provided.")
+        self.assertEqual(network.classify_failure(timeout_named), "auth")
+
+    def test_connect_reports_the_code_from_the_error_not_the_ssid(self):
+        runner = _NmcliErrorRunner("Error: No network with SSID 'password' found.")
+        with self.assertRaises(InstallerError) as ctx:
+            network.connect(runner, "password", "wrong")
+        self.assertEqual(ctx.exception.reason, "notFound")
+
+
+class _NmcliErrorRunner:
+    """抛一条**与 `Runner.run` 同形**的消息：第一行带命令（含 SSID），后面才是 nmcli 的报错。"""
+
+    dry_run = False
+
+    def __init__(self, stderr: str) -> None:
+        self.stderr = stderr
+
+    def run(self, argv, **kwargs):
+        raise InstallerError(
+            f"命令失败（退出码 4）：{' '.join(str(a) for a in argv)}：\n    {self.stderr}",
+            EXIT_USAGE,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

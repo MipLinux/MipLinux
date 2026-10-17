@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "错误：--pr 需要一个编号" >&2; exit 1; }
       MODE=pr
       PR=$2
+      case "$PR" in ''|*[!0-9]*) echo "错误：--pr 必须是纯数字" >&2; exit 1 ;; esac
       shift 2
       ;;
     --dry-run)
@@ -66,11 +67,14 @@ annotate_diff() {
   local diff_file=$1
   awk '
     /^diff --git / {
-      file = $3; sub(/^a\//, "", file);
+      in_hunk = 0;
+      next;
+    }
+    /^\+\+\+ b\// {
+      file = substr($0, 7);
       print "\n========================================================";
       print "文件: " file;
       print "========================================================";
-      in_hunk = 0;
       next;
     }
     /^@@ / {
@@ -82,7 +86,10 @@ annotate_diff() {
       next;
     }
     in_hunk {
-      if ($0 ~ /^\+/) {
+      if ($0 ~ /^\\/) {
+        # 处理类似 \ No newline at end of file，不打行号也不自增
+        print $0;
+      } else if ($0 ~ /^\+/) {
         printf "[L%d] %s\n", new_line, $0;
         new_line++;
       } else if ($0 ~ /^-/) {

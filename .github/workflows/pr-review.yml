@@ -19,7 +19,6 @@ on:
 
 permissions:
   pull-requests: write
-  issues: write
   contents: read
 
 jobs:
@@ -41,13 +40,16 @@ jobs:
 
       - name: 检查 fork 与权限
         id: precheck
+        env:
+          INPUT_PR: ${{ github.event.issue.number || github.event.inputs.pr }}
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           set -euo pipefail
-          PR="${{ github.event.issue.number || github.event.inputs.pr }}"
-          echo "pr=$PR" >>"$GITHUB_OUTPUT"
+          case "$INPUT_PR" in ''|*[!0-9]*) echo "::error::PR 编号必须是纯数字"; exit 1 ;; esac
+          echo "pr=$INPUT_PR" >>"$GITHUB_OUTPUT"
 
           # 检查是否能读取必要 Secret
-          if [ -z "${{ secrets.DEEPSEEK_API_KEY }}" ]; then
+          if [ -z "$DEEPSEEK_KEY" ]; then
             echo "skip=true" >>"$GITHUB_OUTPUT"
             echo "::notice::未配置 DEEPSEEK_API_KEY 或来自外部 fork 无法访问 secrets，跳过本次审查。"
           else
@@ -101,7 +103,7 @@ jobs:
           CLEAN_JSON=$(python3 -c '
           import sys, re, json
           text = sys.stdin.read().strip()
-          m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+          m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
           if m:
               raw = m.group(1)
           else:
@@ -190,7 +192,7 @@ jobs:
           {
             echo "### MipLinux PR 严格型审查结果"
             echo
-            cat .pr-review/payload.json | jq -r '"- **总体评定**: " + .body'
+            jq -r '.body' .pr-review/payload.json
             echo
             echo "- **行级批注数**: $(jq ".comments | length" .pr-review/payload.json)"
           } >>"$GITHUB_STEP_SUMMARY"

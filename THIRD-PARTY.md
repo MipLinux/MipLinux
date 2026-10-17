@@ -66,6 +66,7 @@ Arch 的 `libqalculate` 元数据写 **GPL-2.0-only**；如果按字面理解，
 [docs/archive/2026-10-17-第三方许可核对.md](docs/archive/2026-10-17-第三方许可核对.md)
 留存对应版本、commit、文件路径与 SPDX 判断依据。
 **不能只信 Arch 元数据；也不为了修元数据去维护一份自己的构建。**
+Arch 包的 `pkgver`、`license` 元数据、`source` / `prepare()` 变化，或上游 tag / commit 被替换时，重新核对。
 
 ## 独立专有组件（只聚合）
 
@@ -155,8 +156,9 @@ GPL / LGPL 的义务不因“包来自 Arch 仓库”而消失。发布 ISO 或�
 - [ ] `SOURCE-OFFER` 覆盖所有 GPL / LGPL 组件；`nvidia-open` 有 GPLv2 书面 offer。
 - [ ] 三个 fork 的 `NOTICE` 与 dots 的 `CONTRIBUTING` 许可段一致（GPL-3.0-only）。
 - [ ] `nvidia-utils` 未被合并进 GPL 包；安装器未把 EULA 接受设为使用 Caelestia 的前提。
-- [ ] NVIDIA 二进制未 strip / patch；包版本与许可证文件 sha256 已记录。
+- [ ] NVIDIA 二进制未 strip / patch；包版本、许可证文件与包文件 / 关键库的 sha256 已记录。
 - [ ] EULA 2.8 / 2.9 / 2.11 / 11–12 已由法务确认；正式发布前向 `driver-licensing@nvidia.com` 书面确认。
 - [ ] `libqalculate` / `lm_sensors` 的 or-later 证据已留档（[docs/archive/2026-10-17-第三方许可核对.md](docs/archive/2026-10-17-第三方许可核对.md)）；继续使用 Arch 官方二进制包，不自行重建。
+- [ ] `lm_sensors` 其余 `prog/` 工具逐文件核对。
 - [ ] 可选专有应用（Spotify / Todoist 等）在清单中标注，不与 GPL 包合并。
 - [ ] 对外发布前完成 D10 要求的法务确认（Secure Boot §6、商标）。

@@ -337,10 +337,19 @@ def _busy_sources(device: str, sources: set[str]) -> set[str]:
                     busy.add(source)
         node = Path("/sys/class/block") / Path(os.path.realpath(device)).name
         nodes = [node]
+        try:
+            info = os.stat(device)
+        except FileNotFoundError:
+            info = None
+        real_block = info is not None and stat.S_ISBLK(info.st_mode)
+        if real_block and not node.is_dir():
+            raise OSError("目标块设备缺少 sysfs 目录")
         if node.is_dir():
             nodes.extend(child for child in node.iterdir() if (child / "partition").exists())
         for child in nodes:
             holders = child / "holders"
+            if real_block and not holders.is_dir():
+                raise OSError("无法确认 holders 状态")
             if holders.is_dir():
                 busy.update(f"/dev/{holder.name}" for holder in holders.iterdir())
     except OSError as exc:
@@ -349,6 +358,8 @@ def _busy_sources(device: str, sources: set[str]) -> set[str]:
 
 
 def _assert_not_busy(device: str) -> None:
+    if not util.is_block_device(device):
+        raise InstallerError("目标块设备已不可用，拒绝擦盘", EXIT_GUARD)
     sources = mount_sources(util.read_text("/proc/self/mountinfo"))
     busy = _busy_sources(device, sources)
     if busy:
@@ -695,19 +706,26 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
     结果一致（ROADMAP 的 S1 就是要验这一条）。
     """
     if not runner.dry_run:
+        runner.require(util.STEP_TOOLS["disk"])
         prepared = _prepare_partitioning(device, layout)
         _assert_not_busy(device)
     runner.reporter.emit(step_event("disk", "wait-devices", "让内核与 udev 认全设备"))
     settle_udev(runner)
+    if not runner.dry_run:
+        _assert_not_busy(device)
 
     runner.reporter.emit(step_event("disk", "wipe", "擦除原有分区表与文件系统"))
     # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）。
     # 只擦**内核收下、节点也在**的那些：盘上的表里有名字不代表设备存在。
     for old, _, _ in kernel_partitions(device):
         if runner.dry_run or os.path.exists(old):
+            if not runner.dry_run:
+                _assert_not_busy(device)
             runner.run(["wipefs", "-a", old], exit_code=EXIT_GUARD)
         else:
             runner.reporter.note(f"{old} 还没有设备节点，跳过预擦（整盘 wipefs 会清掉分区表）")
+    if not runner.dry_run:
+        _assert_not_busy(device)
     runner.run(["wipefs", "-a", device], exit_code=EXIT_GUARD)
 
     if runner.dry_run:
@@ -717,6 +735,7 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
         return _partition_path(device, 1), _partition_path(device, 2)
 
     runner.reporter.emit(step_event("disk", "partition", "创建 GPT（ESP + root）"))
+    _assert_not_busy(device)
     _parted_create(device, layout, prepared=prepared)
 
     # 分区表提交后让内核与 udev 跟上，再等节点出现（理由见 wait_for_partition_nodes）

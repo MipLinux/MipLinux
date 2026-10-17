@@ -267,7 +267,7 @@ class TestDiskSafetyRegressions(unittest.TestCase):
 
     def test_new_mount_before_wipe_is_rejected(self):
         runner = FakeRunner()
-        with mock.patch.object(disk, '_prepare_partitioning'), mock.patch.object(
+        with mock.patch.object(disk.util, 'is_block_device', return_value=True), mock.patch.object(disk, '_prepare_partitioning'), mock.patch.object(
             disk.util, 'read_text', side_effect=lambda path: (
                 '31 1 254:2 / /media/data rw - ext4 /dev/vda2 rw' if path.endswith('mountinfo')
                 else 'Filename Type Size Used Priority\n'
@@ -462,6 +462,60 @@ class TestPartitionPreflight(unittest.TestCase):
                 (root / 'vda/vda2/start').write_text('2048')
                 with self.assertRaises(InstallerError):
                     disk._verify_partition_layout('/dev/vda', LAYOUT)
+
+
+class TestLastMomentGuards(unittest.TestCase):
+    def test_mount_appearing_during_udev_settle_blocks_first_wipe(self):
+        runner = FakeRunner()
+        with mock.patch.object(disk, '_prepare_partitioning'), mock.patch.object(
+            disk, '_assert_not_busy', side_effect=[None, InstallerError('new mount', EXIT_GUARD)]
+        ), mock.patch.object(disk, '_parted_create') as create:
+            with self.assertRaises(InstallerError):
+                disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+        self.assertIn('udevadm settle', runner.commands())
+        self.assertFalse(any(argv[0] == 'wipefs' for argv in runner.history))
+        create.assert_not_called()
+
+    def test_new_use_between_partition_wipes_stops_remaining_writes(self):
+        runner = FakeRunner()
+        with mock.patch.object(disk, '_prepare_partitioning'), mock.patch.object(
+            disk, '_assert_not_busy', side_effect=[None, None, None, InstallerError('new swap', EXIT_GUARD)]
+        ), mock.patch.object(disk, 'kernel_partitions', return_value=FAKE_PARTS), mock.patch.object(
+            disk.os.path, 'exists', return_value=True
+        ):
+            with self.assertRaises(InstallerError):
+                disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+        self.assertEqual([argv for argv in runner.history if argv[0] == 'wipefs'],
+                         [['wipefs', '-a', '/dev/vda1']])
+
+    def test_missing_external_tool_blocks_even_direct_call(self):
+        for command in ('wipefs', 'partprobe', 'mkfs.vfat', 'mkfs.ext4'):
+            runner = FakeRunner()
+            def require(programs):
+                self.assertIn(command, programs)
+                raise InstallerError('missing ' + command, 2)
+            with self.subTest(command=command), mock.patch.object(runner, 'require', side_effect=require), mock.patch.object(
+                disk, '_prepare_partitioning'
+            ) as prepare:
+                with self.assertRaises(InstallerError):
+                    disk.wipe_and_partition(runner, '/dev/vda', LAYOUT)
+            prepare.assert_not_called()
+            self.assertEqual(runner.history, [])
+
+    def test_real_block_device_with_missing_sysfs_is_rejected(self):
+        from types import SimpleNamespace
+        import stat
+        original = disk.os.stat
+        def device_stat(path, *args, **kwargs):
+            if str(path) == '/dev/issue152-no-sysfs':
+                return SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=0)
+            return original(path, *args, **kwargs)
+        with mock.patch.object(disk.os, 'stat', side_effect=device_stat), mock.patch.object(
+            disk.util, 'read_text', return_value='Filename Type Size Used Priority\n'
+        ):
+            with self.assertRaises(InstallerError) as ctx:
+                disk._busy_sources('/dev/issue152-no-sysfs', set())
+        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
 
 
 if __name__ == "__main__":

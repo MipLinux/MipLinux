@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -262,6 +263,30 @@ class TestPreflight(_RunCase):
                 with self.assertRaises(InstallerError) as ctx:
                     pipeline.preflight(self.plan(target=target))
                 self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_rejects_a_malformed_step_list_before_touching_anything(self):
+        """**回归测试**：`Plan` 是公开接口，`steps` 不一定经过 `parse_steps()`。
+
+        * 拼错的阶段名原来会在 `STEP_TOOLS[step]` 处冒 `KeyError`（退出码 7）；
+        * 重复的 `disk` 会把盘**擦两遍** —— 这是最坏的那种「安静的错」。
+
+        两条都必须在碰盘之前以 `EXIT_USAGE` 拒绝。
+        """
+        for steps in ((), ("disk", "disk"), ("disk", "teapot"), ("teapot",)):
+            with self.subTest(steps=steps):
+                with self.assertRaises(InstallerError) as ctx:
+                    pipeline.preflight(self.plan(steps=steps))
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_a_duplicated_disk_step_never_reaches_a_command(self):
+        """把重复阶段摆到 `run()` 上：一条命令、一个事件都不许有。"""
+        with self.assertRaises(InstallerError) as ctx:
+            pipeline.run(self.plan(steps=("disk", "disk")), self.reporter,
+                         password="pw", confirm=lambda *a: None)
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(self.runner.history, [])
+        self.assertEqual(self.runner.commands(), [])
+        self.assertEqual(self.phases(), [])
 
 
 class TestConfirmBlocksDiskCommands(unittest.TestCase):
@@ -683,6 +708,89 @@ class TestAttachTargetLog(unittest.TestCase):
         runner = FakeRunner(reporter=RecordingReporter())
         pipeline.attach_target_log(runner, pipeline.Plan(disk="/dev/null"), RecordingReporter())
         self.assertEqual(runner.commands(), [])
+
+    def test_a_failing_mkdir_is_noted_instead_of_aborting(self):
+        """**回归测试**：`ensure_dir` 原来在 try 外面，建目录失败会把安装拖死。
+
+        现场：目标盘满 / 只读 / 路径被别的东西占着 —— `mkdir` 抛 `OSError`，
+        直接从 `attach_target_log` 冒出去，正好把那句「日志写不进去不许把安装
+        拖下水」变成只对一半成立。这里用一个「占着 var 的普通文件」制造必然的
+        `NotADirectoryError`（root 也绕不过去）。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "mnt"
+            target.mkdir()
+            (target / "var").write_text("占位", encoding="utf-8")
+            stream = io.StringIO()
+            reporter = events.TextReporter(stream=stream)
+            pipeline.attach_target_log(
+                FakeRunner(reporter=reporter),
+                pipeline.Plan(disk="/dev/null", target=str(target)),
+                reporter,
+            )
+            reporter.close()
+        self.assertIn("日志写不进目标盘", stream.getvalue())
+        self.assertFalse(hasattr(reporter, "target_log_path"),
+                         "没挂上却记了目标日志路径 —— 失败时会把不存在的日志报给用户")
+
+
+class TestLogSinkFailures(unittest.TestCase):
+    """**回归测试**：日志落点坏了是旁路事故，不许把安装拖死。
+
+    现场是目标盘写满 / 被拔掉 / Live 侧管道被关：`_write_line` 原来直接抛
+    `OSError`，一次快装完的安装会在「写一行日志」处整段作废 —— 收尾都走不到。
+    坏掉的那一份该被摘掉、留一句提示，其余落点与 Installer 本身继续。
+    """
+
+    def _reporter(self, tmp: str):
+        stream = io.StringIO()
+        reporter = events.TextReporter(stream=stream, log_path=str(Path(tmp) / "live.log"))
+        reporter.note("挂目标盘之前的一行")
+        reporter.attach_log_path(str(Path(tmp) / "target.log"))
+        return stream, reporter
+
+    def test_a_broken_target_sink_is_dropped_and_logging_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stream, reporter = self._reporter(tmp)
+            broken = mock.Mock()
+            broken.write.side_effect = OSError("No space left on device")
+            broken.flush.side_effect = OSError("No space left on device")
+            reporter._extra[0].close()
+            reporter._extra[0] = broken
+
+            reporter.note("还在写")       # 旧实现这里抛 OSError
+
+            self.assertEqual(reporter._extra, [], "坏掉的落点还留在列表里")
+            self.assertTrue(broken.close.call_count, "坏掉的落点没被关掉")
+            self.assertIn("还在写", stream.getvalue())
+            self.assertIn("还在写", (Path(tmp) / "live.log").read_text(encoding="utf-8"))
+            self.assertIn("日志落点写入失败", stream.getvalue())
+            reporter.close()
+
+    def test_a_broken_stream_does_not_raise(self):
+        class BrokenStream:
+            def write(self, _text):
+                raise BrokenPipeError("前端没了")
+
+            def flush(self):
+                pass
+
+        reporter = events.TextReporter(stream=BrokenStream())
+        reporter.note("不该炸")           # 旧实现这里抛 BrokenPipeError
+        reporter.close()
+
+    def test_a_failed_replay_closes_the_half_open_handle(self):
+        """补写历史失败时不许留一个开着的句柄（目标盘上就是 EBUSY）。"""
+        reporter = events.TextReporter(stream=io.StringIO())
+        reporter.note("历史一行")
+        handle = mock.Mock()
+        handle.write.side_effect = OSError("disk full")
+        with mock.patch("mipl_installer.events.open", return_value=handle, create=True):
+            with self.assertRaises(OSError):
+                reporter.attach_log_path("/target/log")
+        self.assertEqual(handle.close.call_count, 1)
+        self.assertEqual(reporter._extra, [])
+        reporter.close()
 
 
 if __name__ == "__main__":

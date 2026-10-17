@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from mipl_installer import util
 from mipl_installer.util import EXIT_GUARD, EXIT_USAGE, InstallerError, Runner
@@ -75,6 +78,36 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
         self.assertIn("definitely-not-a-real-program-xyz", str(ctx.exception))
 
+    def test_empty_argv_is_a_usage_error_not_an_index_error(self):
+        for method in (self.runner.run, self.runner.attempt):
+            with self.subTest(method=method.__name__):
+                with self.assertRaises(InstallerError) as ctx:
+                    method([])
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_attempt_does_not_let_the_child_read_the_backend_stdin(self):
+        """**回归测试**：`attempt` 原来是 `subprocess.run(input=None)`，stdin 直接继承。
+
+        后端的 stdin 走着密码（`--password-stdin`），子进程读到就会把密码字节吞掉。
+        这里把父进程的 fd 0 换成一只有内容的管子，再看子进程读不读得到 ——
+        旧实现会读到，新实现只看到 EOF。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            seen = Path(tmp) / "seen-on-stdin"
+            read_fd, write_fd = os.pipe()
+            saved = os.dup(0)
+            try:
+                os.write(write_fd, b"parent-stdin-secret\n")
+                os.close(write_fd)
+                os.dup2(read_fd, 0)
+                os.close(read_fd)
+                self.assertTrue(self.runner.attempt(["sh", "-c", f"cat > {seen}"]))
+            finally:
+                os.dup2(saved, 0)
+                os.close(saved)
+            self.assertEqual(seen.read_text(encoding="utf-8"), "",
+                             "attempt 的子进程读到了后端 stdin —— 那上面走着密码")
+
 
 class TestDryRun(unittest.TestCase):
     def test_run_does_not_execute(self):
@@ -117,6 +150,46 @@ class TestWriteText(unittest.TestCase):
             util.write_text(Runner(reporter, dry_run=True), f"{tmp}/.pw", "mipl:s3cret\n", secret=True)
             self.assertNotIn("s3cret", reporter.text())
             self.assertIn("内容不打印", reporter.text())
+
+    def test_mode_is_applied_before_the_content_is_written(self):
+        """**回归测试**：密码 / sudoers 的权限不许「先写内容、后 chmod」。
+
+        旧实现是 `Path.write_text()` 再 `os.chmod()`：两步之间，文件里已经是
+        明文密码、权限却还是 umask 给的 0644。这里用一个「刚拿到句柄就统计权限、
+        然后停在写内容之前」的 `os.fdopen` 把那一刻按住。
+        """
+        seen: dict[str, int] = {}
+
+        def spy(fd, *_args, **_kwargs):
+            seen["mode"] = os.fstat(fd).st_mode & 0o777
+            raise OSError("停在写内容之前")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("mipl_installer.util.os.fdopen", side_effect=spy):
+            path = Path(tmp) / "shadow"
+            with self.assertRaises(OSError):
+                util.write_text(Runner(RecordingReporter()), str(path), "mipl:s3cret\n",
+                                mode=0o600, secret=True)
+        self.assertEqual(seen["mode"], 0o600,
+                         "内容还没写，权限就已经该是 0600 —— 中间不许有 0644 的窗口")
+
+    def test_a_symlink_is_refused_instead_of_written_through(self):
+        """**回归测试**：root 不许跟着目标盘里的符号链接改写别的文件。
+
+        `<target>/etc/pacman.conf -> /etc/pacman.conf` 这种绝对链接在宿主侧解析到
+        **Live 的** /etc：`Path.write_text` 跟着写，就等于越过目标盘改了正在运行的
+        系统。`--steps configure` 续跑时目标盘内容不一定是安装器刚铺的。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            victim = Path(tmp) / "host-file"
+            victim.write_text("原样\n", encoding="utf-8")
+            link = Path(tmp) / "target-file"
+            link.symlink_to(victim)
+            with self.assertRaises(InstallerError) as ctx:
+                util.write_text(Runner(RecordingReporter()), str(link), "覆盖\n", mode=0o644)
+            self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+            self.assertIn("符号链接", str(ctx.exception))
+            self.assertEqual(victim.read_text(encoding="utf-8"), "原样\n")
 
 
 class TestLineFeeder(unittest.TestCase):
@@ -234,6 +307,15 @@ class TestTimeout(unittest.TestCase):
         self.assertEqual(ctx.exception.reason, "timeout")
         self.assertIn("超时", str(ctx.exception))
 
+    def test_a_sub_second_timeout_is_not_reported_as_zero(self):
+        """**回归测试**：`int(0.1)` 会把 100ms 的超时印成「超时（0s）」。
+
+        那句报错是给复盘的人看的 —— 「0 秒就超时」读起来像时钟坏了。
+        """
+        with self.assertRaises(InstallerError) as ctx:
+            self.runner.run(["sleep", "30"], timeout=0.1)
+        self.assertIn("0.1s", str(ctx.exception))
+
     def test_capture_timeout_raises_with_reason(self):
         with self.assertRaises(InstallerError) as ctx:
             self.runner.run(["sleep", "30"], capture=True, timeout=1)
@@ -250,6 +332,140 @@ class TestTimeout(unittest.TestCase):
         self.assertIn("$ true", self.reporter.text())
 
 
+class TestProcessGroupOnTimeout(unittest.TestCase):
+    """**回归测试**（#152 跨线发现）：超时只杀直接子进程，后代还在跑。
+
+    复现方式与那条发现一致，但不需要 root、不碰盘：包装 shell 里再起一个
+    「过一会儿写标记文件」的后代，`timeout` 到点后 Runner 返回 —— 此时整组都
+    该停，标记文件不许出现。旧实现只 `proc.kill()` 直接子进程，后代照写不误
+    （`arch-chroot` 包装下的 bootctl / efibootmgr 就是这个形态：超时返回后
+    旧的还在碰 NVRAM，新的又开一条）。
+    """
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = Runner(self.reporter)
+
+    @staticmethod
+    def _deferred_write(marker: Path, delay: float = 0.6) -> list[str]:
+        return ["sh", "-c", f"(sleep {delay}; printf late > {marker}) & wait"]
+
+    def _assert_nothing_wrote_late(self, marker: Path) -> None:
+        time.sleep(0.8)      # 比上面的 delay 长：后代活着的话，这期间一定会写
+        self.assertFalse(marker.exists(),
+                         f"超时返回后后代进程还写了 {marker} —— 收的只是包装器，不是整组")
+
+    def test_streamed_timeout_kills_descendants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            with self.assertRaises(InstallerError) as ctx:
+                self.runner.run(self._deferred_write(marker), timeout=0.2)
+            self.assertEqual(ctx.exception.reason, "timeout")
+            self._assert_nothing_wrote_late(marker)
+
+    def test_capture_timeout_kills_descendants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            with self.assertRaises(InstallerError) as ctx:
+                self.runner.run(self._deferred_write(marker), capture=True, timeout=0.2)
+            self.assertEqual(ctx.exception.reason, "timeout")
+            self._assert_nothing_wrote_late(marker)
+
+    def test_attempt_timeout_kills_descendants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            self.assertFalse(self.runner.attempt(self._deferred_write(marker), timeout=0.2))
+            self._assert_nothing_wrote_late(marker)
+
+
+class TestStreamedReader(unittest.TestCase):
+    """读线程自己的边界：后代握着管道不许把安装挂死，回调的异常不许被线程吞掉。"""
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = Runner(self.reporter)
+
+    def test_a_descendant_that_keeps_stdout_open_does_not_hang_the_run(self):
+        """**回归测试**：直接子进程退出后，后代仍握着 stdout 时不许陪它等下去。
+
+        旧实现把 `pump()` 放在主线程里读，读到 EOF 才 `wait()`：`sh -c '… & exit 0'`
+        留下的后台进程只要还开着管道，安装器就停在那一行输出上（本次单测里
+        `(sleep 5) & exit 0` 会让 `run()` 整整等 5 秒）。
+        """
+        started = time.monotonic()
+        self.runner.run(["sh", "-c", "(sleep 5) & exit 0"])
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 3.0,
+                        f"直接子进程早就退了，run() 却在等后代放管道（{elapsed:.1f}s）")
+
+    def test_a_callback_error_is_not_swallowed_by_the_reader_thread(self):
+        """**回归测试**：`on_line` 的异常必须在调用方炸开。
+
+        旧实现只在「带超时」那条路把读输出放进线程；线程里的异常只打印一句
+        traceback，主线程照常等到超时，然后报一个假的 `reason="timeout"` ——
+        调用方的 bug 变成了「固件 NVRAM 卡住」。
+        """
+        def boom(_line: str) -> None:
+            raise RuntimeError("回调坏了")
+
+        with self.assertRaises(RuntimeError):
+            self.runner.run(["sh", "-c", "echo hi; sleep 10"], timeout=5, on_line=boom)
+
+    def test_truncated_multibyte_tail_is_flushed_at_eof(self):
+        """**回归测试**：EOF 时被切开的多字节字符不许悄悄丢掉。"""
+        self.runner.run(["sh", "-c", r"printf '\344\270'"])
+        self.assertEqual(self.reporter.notes, ["\ufffd"])
+
+
+class TestInterruptStopsTheCommand(unittest.TestCase):
+    """**回归测试**：Ctrl-C 之后子进程不许继续跑。
+
+    `start_new_session` 让子进程脱离了终端的进程组 —— 终端上的 SIGINT 只有安装器
+    收到，`pacstrap` / `mkfs` 收不到。不在中断路径上主动收整组的话，收尾卸载目标
+    时它们还在往那块盘上写；比「没装完」更糟。这里用 SIGALRM 在等待中途制造一次
+    `KeyboardInterrupt`（与 Ctrl-C 走同一条 Python 路径）。
+    """
+
+    def setUp(self):
+        self.reporter = RecordingReporter()
+        self.runner = Runner(self.reporter)
+
+    @staticmethod
+    def _deferred_write(marker: Path, delay: float = 1.0) -> list[str]:
+        return ["sh", "-c", f"(sleep {delay}; printf late > {marker}) & wait"]
+
+    @staticmethod
+    def _raise_interrupt(*_args: object) -> None:
+        raise KeyboardInterrupt
+
+    def _run_interrupted(self, argv: list[str], **kwargs) -> None:
+        previous = signal.signal(signal.SIGALRM, self._raise_interrupt)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0.4)
+            with self.assertRaises(KeyboardInterrupt):
+                self.runner.run(argv, **kwargs)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+
+    def _assert_nothing_wrote_late(self, marker: Path) -> None:
+        time.sleep(1.1)
+        self.assertFalse(marker.exists(),
+                         f"中断返回后后代进程还写了 {marker} —— 子进程没跟着停下来")
+
+    def test_streamed_interrupt_takes_the_child_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            self._run_interrupted(self._deferred_write(marker))
+            self._assert_nothing_wrote_late(marker)
+
+    def test_capture_interrupt_takes_the_child_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            self._run_interrupted(self._deferred_write(marker), capture=True)
+            self._assert_nothing_wrote_late(marker)
+
+
 class TestSmallHelpers(unittest.TestCase):
     def test_human_size(self):
         self.assertEqual(util.human_size(1024 ** 3), "1.0 GiB")
@@ -263,6 +479,19 @@ class TestSmallHelpers(unittest.TestCase):
 
     def test_is_partition_rejects_a_whole_device(self):
         self.assertFalse(util.is_partition("/dev/null"))
+
+    def test_size_of_device_reports_a_guard_instead_of_a_raw_oserror(self):
+        """**回归测试**：盘路径打错时原来漏出裸的 `FileNotFoundError`。
+
+        CLI 的兜底把它报成「未预期的异常」（退出码 7 + traceback），可它其实
+        只是「这块盘不存在」—— 要给与 `disk.assert_usable` 同一条守卫
+        （`reason="notBlockDevice"`，界面拿它挑自己的句子）。
+        """
+        with self.assertRaises(InstallerError) as ctx:
+            util.size_of_device("/tmp/definitely-not-a-block-device")
+        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+        self.assertEqual(ctx.exception.reason, "notBlockDevice")
+        self.assertIn("不是块设备", str(ctx.exception))
 
     def test_chroot_argv_prefixes_arch_chroot(self):
         self.assertEqual(util.chroot_argv(util.DEFAULT_TARGET, ["locale-gen"]),

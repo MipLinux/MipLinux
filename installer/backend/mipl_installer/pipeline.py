@@ -190,17 +190,26 @@ def attach_target_log(runner: Runner, plan: Plan, reporter: Reporter) -> None:
     if attach is None or runner.dry_run:
         return
     dest = Path(plan.target) / TARGET_LOG_NAME
-    util.ensure_dir(runner, str(dest.parent))
     try:
+        # 建目录也放进 try：目标盘满 / 只读时 `mkdir` 同样会抛 OSError ——
+        # 它在 try 外面的话，「日志写不进去不许拖累安装」这句就只对了一半。
+        util.ensure_dir(runner, str(dest.parent))
         attach(str(dest))
     except OSError as exc:
         # 日志写不进去不许把安装拖下水：Live 侧那份还在。这一句要说 ——
         # 它意味着「出事后盘上没有证据」，与「日志会写进盘里」正相反。
         reporter.note(f"日志写不进目标盘（{dest}）：{exc}；只保留 Live 侧日志")
         return
+    # 记在 reporter 上：失败收尾会先卸载目标，卸完这个路径就看不见了 ——
+    # `cli.log_locations()` 靠它把「唯一活过重启的那份日志」报出来。
+    try:
+        reporter.target_log_path = str(dest)  # type: ignore[attr-defined]
+    except AttributeError:
+        pass
     # **挂上了不说。** 「我们把日志写到哪儿了」在正常流程里是自我指涉的噪音
-    # （实机反馈）；它只在出事时有用，那时由 `cli.log_locations()` 报出来 ——
-    # 而且那时它会先看一眼文件到底在不在，不报一个推测出来的路径。
+    # （实机反馈）；它只在出事时有用，那时由 `cli.log_locations()` 报出来。
+    # reporter 上留的这条路径就是「确实挂上并写出来过」的凭据 —— 卸载之后
+    # 目录里已经看不到了，但目标盘上那份文件还在。
 
 
 def detach_target_log(reporter: Reporter) -> None:
@@ -226,7 +235,12 @@ def preflight(plan: Plan) -> None:
     擦干净了 —— 一个打错的时区名会让用户停在「盘已清空、系统装了一半」的现场。
     所以往前提：**能不能装、参数对不对，都该在 `confirm` 之前有答案。**
     纯函数，不碰盘，也不需要 root。
+
+    阶段列表也在这里查：`Plan` 是公开接口（CLI 与前端共用），`steps` 不一定
+    经过 `parse_steps()`。一个拼错的阶段名原来会在 `STEP_TOOLS[step]` 处冒
+    `KeyError`；一个重复的 `disk` 会把盘**擦两遍** —— 都必须在碰盘之前拒绝。
     """
+    _validate_steps(plan.steps)
     configure.validate_user(plan.user)
     options.validate_hostname(plan.hostname)
     options.validate_locale(plan.locale)
@@ -236,6 +250,25 @@ def preflight(plan: Plan) -> None:
     # 就当成我们自己的残留去卸），而清理跑在守卫之前。`--target /` 放进来的话，
     # 这一关之前的守卫一次都不会跑（#105 复核）。
     options.validate_target(plan.target)
+
+
+def _validate_steps(steps: tuple[str, ...]) -> None:
+    """`Plan.steps` 必须是 `STEP_ORDER` 的子集、不重复、不为空。"""
+    steps = tuple(steps)
+    if not steps:
+        raise InstallerError("一个阶段都没选", EXIT_USAGE,
+                             hint=f"例如 --steps {','.join(STEP_ORDER)}")
+    unknown = [step for step in steps if step not in STEP_ORDER]
+    if unknown:
+        raise InstallerError(f"不认识的阶段：{'、'.join(unknown)}", EXIT_USAGE,
+                             hint=f"可选：{'、'.join(STEP_ORDER)}")
+    repeated = sorted({step for step in steps if steps.count(step) > 1})
+    if repeated:
+        raise InstallerError(
+            f"阶段重复：{'、'.join(repeated)}",
+            EXIT_USAGE,
+            hint="每个阶段只能跑一次 —— 重复的 disk 会把盘擦两遍，一个字节都还没动",
+        )
 
 
 def resolve_layout(plan: Plan, runner: Runner, reporter: Reporter) -> disk.Layout:

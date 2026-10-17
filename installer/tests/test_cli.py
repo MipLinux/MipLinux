@@ -9,14 +9,17 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from mipl_installer import cli, pipeline, util
-from mipl_installer.util import EXIT_USAGE, InstallerError
+from mipl_installer import cli, disk, events, pipeline, util
+from mipl_installer.util import EXIT_GUARD, EXIT_USAGE, InstallerError
+from tests.support import FakeRunner
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -87,9 +90,22 @@ class TestPasswords(unittest.TestCase):
             self.assertEqual(cli.read_passwords(_args(password_stdin=True)), ("userpw", None))
 
     def test_root_password_needs_password_stdin(self):
-        with self.assertRaises(InstallerError) as ctx:
-            cli.read_passwords(_args(root_password_stdin=True))
+        """**回归测试**（#152 交叉审查）：错的参数组合要在**问密码之前**拒绝。
+
+        旧顺序是先 `read_password()`、再查 `--password-stdin` 在不在：交互式终端下
+        会先弹出 `getpass("给用户 mipl 设密码：")`，输完才被告知参数错了；单测在
+        TTY 下直接挂在这个提示上。这里把 getpass 换成「一被调用就失败」，
+        旧实现会以 AssertionError 炸在这里。
+        """
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        with mock.patch.object(sys, "stdin", stdin), \
+                mock.patch.object(cli.getpass, "getpass",
+                                  side_effect=AssertionError("参数错了，不该先问密码")):
+            with self.assertRaises(InstallerError) as ctx:
+                cli.read_passwords(_args(root_password_stdin=True))
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertIn("--password-stdin", str(ctx.exception))
 
     def test_empty_root_password_is_refused(self):
         fake = mock.Mock()
@@ -170,8 +186,96 @@ class TestDryRun(unittest.TestCase):
         self.assertNotIn("安装日志", output)
 
 
+class TestConfirmHook(unittest.TestCase):
+    """确认那一步只许说在事件流 / stderr 上，stdout 上不许混进非 JSON 的原文。"""
+
+    def _args(self):
+        return cli.build_parser().parse_args(["--disk", "/dev/vda", "--dry-run"])
+
+    def _run(self, typed: str):
+        out = io.StringIO()
+        reporter = events.JsonReporter(stream=out)
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        stdin.readline.return_value = typed
+        stderr = io.StringIO()
+        plan = pipeline.Plan(disk="/dev/vda")
+        layout = disk.plan_layout(40 * disk.GiB)
+        try:
+            with mock.patch.object(sys, "stdin", stdin), contextlib.redirect_stderr(stderr):
+                cli.confirm_hook(self._args())(plan, layout, reporter)
+        finally:
+            reporter.close()
+        return out.getvalue(), stderr.getvalue()
+
+    def test_the_warning_and_prompt_do_not_put_raw_text_on_stdout(self):
+        """**回归测试**：JSON 模式下 stdout 一行只许一个 JSON 对象。
+
+        旧实现用 `print()` + `input()`：警告和提示都落在 stdout 上，前端
+        `JSON.parse` 第一行就炸（实机症状「后端输出无法解析」）。
+        """
+        out, err = self._run("/dev/vda\n")
+        records = [json.loads(line) for line in out.splitlines()]
+        self.assertTrue(records, "事件流上是空的 —— 警告没走 reporter")
+        for record in records:
+            self.assertIn(record["kind"],
+                          ("hello", "event", "note", "command", "error", "end"))
+        notes = [record["message"] for record in records if record["kind"] == "note"]
+        self.assertTrue(any("整盘擦除" in note for note in notes), notes)
+        self.assertIn("确认请原样输入设备路径", err)
+
+    def test_eof_at_the_prompt_is_a_clean_refusal(self):
+        """**回归测试**：旧 `input()` 在 EOF 时抛 `EOFError`，被兜底成退出码 7。
+
+        EOF 就是「没人确认」，该走守卫那条路：`EXIT_GUARD`，盘一个字节都没动。
+        """
+        with self.assertRaises(InstallerError) as ctx:
+            self._run("")
+        self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+
+
+class TestBadLogPath(unittest.TestCase):
+    """**回归测试**：`--log` 打不开时要给退出码与一句话，而不是 traceback。
+
+    旧实现把 reporter 建在 try 外面，`open()` 的 `FileNotFoundError` 一路冒到
+    `__main__`：退出码 1、屏幕上只有栈。这只是「参数打错了」，该是 `EXIT_USAGE`。
+    """
+
+    BAD = "/nonexistent-mipl-dir-151/trace.log"
+
+    def test_install_mode(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--disk", "/dev/vda", "--yes", "--dry-run", "--log", self.BAD])
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("打不开日志文件", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_query_mode(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--print-timezones", "--log", self.BAD])
+        self.assertEqual(code, EXIT_USAGE)
+        self.assertIn("打不开日志文件", err.getvalue())
+        self.assertEqual(out.getvalue(), "", "失败时 stdout 上不该有半份 JSON")
+
+
+class TestQueryInterrupt(unittest.TestCase):
+    def test_ctrl_c_returns_the_cancel_exit_code(self):
+        """Ctrl-C 在只读出口里同样要落到 130，不能是一屏 traceback。"""
+        with mock.patch.object(cli.queries, "timezones", side_effect=KeyboardInterrupt):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                code = cli.main(["--print-timezones"])
+        self.assertEqual(code, pipeline.EXIT_CANCELLED)
+        self.assertIn("已取消", err.getvalue())
+
+
 class TestLogLocations(unittest.TestCase):
-    """失败收尾里那句「日志在哪」：只报**确实存在**的文件，不报推测出来的路径。"""
+    """失败收尾里那句「日志在哪」：只报**确实写出来过**的那几份，不报推测的路径。
+
+    目标盘那份按「挂上过」的记录报 —— 失败收尾会先卸载，卸完 `target/var/log/…`
+    在目录里已经看不见了，但文件确实在目标盘上。
+    """
 
     def _args(self, log=None, target=util.DEFAULT_TARGET):
         return argparse.Namespace(log=log, target=target)
@@ -202,6 +306,31 @@ class TestLogLocations(unittest.TestCase):
             locations = cli.log_locations(self._args(log=None, target=str(target)))
             self.assertEqual(len(locations), 1)
             self.assertIn("重启后仍在", locations[0])
+
+    def test_the_target_copy_survives_the_unmount_that_hides_it(self):
+        """**回归测试**：失败收尾先卸载目标，`target/var/log/…` 就不再是文件了。
+
+        只按「文件在不在」判断，会把唯一活过重启的那份日志漏报 —— 而它正是
+        出事时最该看的那一份。挂上过就在 reporter 上留了路径。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "mnt"
+            target.mkdir()
+            reporter = events.TextReporter(stream=io.StringIO())
+            try:
+                pipeline.attach_target_log(
+                    FakeRunner(reporter=reporter),
+                    pipeline.Plan(disk="/dev/null", target=str(target)),
+                    reporter,
+                )
+                dest = target / pipeline.TARGET_LOG_NAME
+                self.assertTrue(dest.is_file())
+                shutil.rmtree(target)       # 卸载之后：路径记着，文件看不见
+                locations = cli.log_locations(self._args(log=None, target=str(target)), reporter)
+            finally:
+                reporter.close()
+        self.assertEqual(len(locations), 1)
+        self.assertIn("重启后仍在", locations[0])
 
 
 if __name__ == "__main__":

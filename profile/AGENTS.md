@@ -29,8 +29,8 @@ tags: [profile, archiso, build, branding, pacman]
 
 - **`profile/pacman.conf` 里的 `Include` 全部处于注释状态** —— 这是 D3 的落地形态：不使用宿主机 `pacman.conf` 的 `Include` 隐式解析，
   否则会静默引入宿主发行版的软件源。**不要打开它们。**
-- **`airootfs/etc/pacman.conf` 的 `[archlinuxcn]` 写的是 `SigLevel = Optional TrustAll`**（即不校验签名）。
-  内部构建无所谓，但 D10 定了对外发布，而**装后系统的 `pacman.conf` 由安装器写** —— 收紧方案见 [P11](../docs/knowledge/06-待定事项.md)，别自作主张改。
+- **两份 `pacman.conf` 的 `[archlinuxcn]` 段都要求验签**（D19；装后系统见 D16）。
+  D10 定了对外发布，放松等于让构建容器与 Live 从该源拉包时不验签 —— **别自作主张改**。
 
 ## 两个目录的角色
 

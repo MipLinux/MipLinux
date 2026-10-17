@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import codecs
+import errno
 import os
+import signal
 import stat
 import subprocess
 import threading
@@ -73,6 +75,13 @@ class InstallerError(Exception):
 #: 一条命令跑满多少秒就在日志里留一句「耗时 Ns」。这一句是给实机复盘用的：
 #: 「二十分钟花在哪了」该由日志回答，不该由截图猜（Issue #97 实机教训）。
 SLOW_COMMAND_SECONDS = 15
+
+#: 直接子进程退出后，读线程再等多久收尾。正常命令这时候早就 EOF（毫秒级）；
+#: 等不到说明有后代还握着 stdout（`cmd &` 之类）——再等下去就是替它陪葬。
+DRAIN_GRACE_SECONDS = 1.0
+
+#: 停一整组进程时，SIGTERM 与 SIGKILL 之间给多久收尾。
+TERMINATE_GRACE_SECONDS = 0.5
 
 
 class LineFeeder:
@@ -173,6 +182,13 @@ class Runner:
         timeout 给了就超时杀进程并抛 `reason="timeout"` 的 `InstallerError` ——
         给**会去碰固件 NVRAM 的命令**用的：固件变量存储卡住时那些命令能沉默地
         挂几十分钟（实机教训：引导阶段挂 40 分钟），安装器不该陪着等。
+        **超时覆盖整条命令**，包括把 `input` 写进 stdin 的那一段：子进程不读 stdin
+        时，那一写会卡在写满的管道上 —— 写在主线程里的话 `wait(timeout=…)` 根本
+        没机会开始计时（评审指出）。流式路径的写因此交给线程。
+        **杀的是整组进程，不只是直接子进程**：`arch-chroot` / `stdbuf` 这类包装器
+        下面干活的进程、以及它们再生的后代，全在同一个会话里（`start_new_session`）——
+        只杀包装器会留下一群还在写盘 / 还在碰 NVRAM 的孤儿，超时返回后它们与
+        下一条命令重叠执行（#151 跨线发现的那一幕）。
 
         **`input` 与 `stdin=` 不能同时给** `subprocess.run`（它自己会抛
         `ValueError: stdin and input arguments may not both be used.`）。所以这里
@@ -181,6 +197,9 @@ class Runner:
         会把密码字节吞掉（与 `_run_streamed` 同一条纪律）。
         """
         argv = [str(a) for a in argv]
+        if not argv:
+            raise InstallerError("空命令：没有可执行的东西", EXIT_USAGE,
+                                 hint="argv 至少要有程序名")
         self.history.append(argv)
         self.reporter.command(argv)
         if self.dry_run:
@@ -196,26 +215,40 @@ class Runner:
             )
 
         started = time.monotonic()
+        stderr_text = ""
         try:
             if capture:
-                # `input=` 会自己接 PIPE，`:stdin=` 只能在没有 input 时给 ——
-                # 两个同时传是 ValueError，而那条路正是 `nmcli --ask` 连 Wi-Fi 走的路
-                # （实机症状：网络页上点「连接」必报错，命令行手敲 `nmcli d wifi connect`
-                # 反倒一次就成）。
-                pipes = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
+                # 给了 `input` 就接 PIPE（`communicate` 负责写进去），没给才接
+                # `DEVNULL` —— 后端的 stdin 走着密码，子进程自说自话去读 stdin
+                # 会把密码字节吞掉。这条纪律与 `_run_streamed` 一致。
+                proc = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=cwd,
+                    # 自己当会话 / 进程组长，超时才能连后代一起收掉（见 _terminate_process_group）
+                    start_new_session=True,
+                )
                 try:
-                    proc = subprocess.run(
-                        argv,
-                        capture_output=True,
-                        text=True,
-                        cwd=cwd,
-                        check=False,
-                        timeout=timeout,
-                        **pipes,
-                    )
+                    stdout, stderr_text = proc.communicate(input, timeout=timeout)
                 except subprocess.TimeoutExpired as exc:
+                    self._terminate_process_group(proc)
+                    proc.wait()
+                    # 不再 `communicate()` 收尾：真有后代逃出进程组还握着管子时，
+                    # 那一下会一直等 EOF。超时路径本来就不看输出，关掉就是了。
+                    self._close_pipes(proc)
                     raise self._timeout_error(argv, timeout, exit_code) from exc
-                stdout: str | None = (proc.stdout or "").rstrip("\n")
+                except BaseException:
+                    # Ctrl-C / 进程被信号打断：子进程已经脱离终端的进程组
+                    # （`start_new_session`），不会自己收到 SIGINT —— 不在这里
+                    # 收掉的话，收尾卸载时它还在往盘上写。
+                    self._terminate_process_group(proc)
+                    proc.wait()
+                    self._close_pipes(proc)
+                    raise
+                stdout = (stdout or "").rstrip("\n")
             else:
                 proc = self._run_streamed(argv, input=input, cwd=cwd,
                                           timeout=timeout, exit_code=exit_code,
@@ -231,15 +264,68 @@ class Runner:
 
         if check and proc.returncode != 0:
             detail = ""
-            if capture and proc.stderr:
-                detail = "：\n    " + clean_terminal_text(proc.stderr).strip().replace("\n", "\n    ")
+            if capture and stderr_text:
+                detail = "：\n    " + clean_terminal_text(stderr_text).strip().replace("\n", "\n    ")
             raise InstallerError(f"命令失败（退出码 {proc.returncode}）：{' '.join(argv)}{detail}", exit_code)
 
         return stdout
 
+    def _terminate_process_group(self, proc: subprocess.Popen) -> None:
+        """停掉**整组**进程，而不是只停直接子进程。
+
+        子进程一律用 `start_new_session=True` 启动，自己就是会话 / 进程组长：
+        组号 = 组长 pid，所以 `killpg(proc.pid, …)` 能覆盖 `arch-chroot`、`stdbuf`
+        下面的真正工作进程，以及它们再生的后代。只 `proc.kill()` 的话，超时返回时
+        后代还在写标记文件 / 还在碰 NVRAM —— 新旧命令叠在一起，#152 的复现正是
+        这一条（`timeout=0.15s` 返回后标记文件随后出现）。
+
+        先 SIGTERM 给一次收尾机会，过 `TERMINATE_GRACE_SECONDS` 再 SIGKILL 兜底。
+        组长可能已经先退出了，但组号只要还有组员就仍然有效 —— 所以宽限期内看的是
+        **整组还有没有进程**，不是只看组长。`pacstrap` / `arch-chroot` 这类包装器
+        收到 SIGTERM 会立刻退出；只对组长 `wait()` 的话，真正干活的 `pacman` /
+        `bootctl` 会在几毫秒后吃到 SIGKILL —— 来不及释放 `/var/lib/pacman/db.lck`
+        这类东西，续跑就被自己的锁拦在门外。
+
+        组长每轮都要 `wait()` 回收：留着僵尸组长，`killpg(pid, 0)` 会一直报「组还在」，
+        宽限期就变成固定的 `TERMINATE_GRACE_SECONDS` 硬等。
+        """
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            return
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        while True:
+            try:
+                proc.wait(timeout=0.05)      # 回收组长，免得僵尸组长让组一直「存在」
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(proc.pid, 0)       # 组里还有活着的成员吗
+            except ProcessLookupError:
+                return                       # 整组都已退出，不必 SIGKILL
+            except OSError:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+    @staticmethod
+    def _close_pipes(proc: subprocess.Popen) -> None:
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is None:
+                continue
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+
     def _timeout_error(self, argv: list[str], timeout: float | None, exit_code: int) -> InstallerError:
         return InstallerError(
-            f"命令超时（{int(timeout or 0)}s）：{' '.join(argv)}",
+            f"命令超时（{float(timeout or 0):g}s）：{' '.join(argv)}",
             exit_code,
             hint="固件 NVRAM 写入停滞、设备不应是常见原因；现场已保留，先看日志再按该阶段的退路绕行或重跑",
             reason="timeout",
@@ -250,7 +336,7 @@ class Runner:
                       on_line: Callable[[str], None] | None = None):
         """跑一条命令，输出逐行（清洗后）转发给 reporter。
 
-        五条纪律：
+        八条纪律：
 
         * **不继承 stdout**：mke2fs / pacman 的进度条、mkinitcpio 的旁白是给终端看的，
           直接流进本进程的 stdout，在界面下会把 JSON 事件流冲成满屏「后端输出无法解析」，
@@ -266,6 +352,15 @@ class Runner:
         * **`on_line` 先于旁白**：想在输出里认东西的调用方（pacman 的 `(14/345)`）
           拿到的是**同一条清洗过的行**，与日志里那行一字不差；认出来的进度因此不会
           与日志对不上。回调抛异常不吞 —— 那是调用方的 bug，不该在管道里静默。
+        * **读线程先起，再写 stdin**：子进程可能先吐一屏输出才来读 stdin；输出管
+          写满后它就不会来读 stdin，父进程又卡在写 stdin 上 —— 两个方向互相等死。
+          先起读线程，这条路就不存在。
+        * **写 stdin 也交给线程**：子进程根本不读 stdin 时，大段输入会卡在写满的
+          管道上。写在主线程里，超时与中断都要等这一写返回才轮得到 —— 写线程让
+          `wait(timeout=…)` 照常计时，收整组之后写端拿到 EPIPE，线程自己退出。
+        * **整组进程归这里管**：子进程用 `start_new_session=True` 启动。超时、或
+          直接子进程退出后仍有后代握着 stdout（`cmd &`）时，收的是整组，不是只收
+          那一个包装器 —— 后者会留下继续写盘的后代（#151 跨线发现）。
         """
         exec_argv = argv
         if self.have("stdbuf"):
@@ -278,8 +373,12 @@ class Runner:
             text=True,
             errors="replace",
             cwd=cwd,
+            start_new_session=True,
         )
         feeder = LineFeeder()
+        #: 读线程里抛出的异常（`on_line` 的 bug、管道错）：由主线程在收尾时原样抛出。
+        #: 线程里的异常只会打印一句 traceback，调用方看不见 —— 那等于吞掉。
+        errors: list[BaseException] = []
 
         def deliver(line: str) -> None:
             if on_line is not None:
@@ -296,44 +395,121 @@ class Runner:
             stream = getattr(out, "buffer", out)
             read1 = getattr(stream, "read1", None) or stream.read
             decoder = codecs.getincrementaldecoder(getattr(out, "encoding", None) or "utf-8")("replace")
+            binary = False
             try:
                 while True:
                     chunk = read1(4096)
                     if not chunk:
                         break
-                    text = decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
+                    if isinstance(chunk, bytes):
+                        binary = True
+                        text = decoder.decode(chunk)
+                    else:
+                        text = chunk
                     for line in feeder.feed(text):
+                        if line:
+                            deliver(line)
+                if binary:
+                    tail = decoder.decode(b"", final=True)  # 收尾那个被切开的字符
+                    for line in feeder.feed(tail):
                         if line:
                             deliver(line)
                 for line in feeder.flush():
                     if line:
                         deliver(line)
+            except BaseException as exc:  # noqa: BLE001 - 记下来交给主线程原样抛
+                errors.append(exc)
+                # 读端坏了（回调抛异常 / 管道错）：子进程没人收输出了，再等只会卡在
+                # 写满的管子上 —— 停掉整组，让主线程的 wait() 立刻返回。
+                self._terminate_process_group(proc)
             finally:
-                out.close()
+                try:
+                    out.close()
+                except OSError:
+                    pass
 
-        if input is not None and proc.stdin is not None:
-            try:
-                proc.stdin.write(input)
-            except BrokenPipeError:
-                pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
-            proc.stdin.close()
-
-        if timeout is None:
-            pump()
-            proc.wait()
-            return proc
-
-        # 带超时：读输出放到守护线程里，主线程等进程；超时杀进程后线程自然随管道 EOF 收掉
+        # 先起读线程再写 stdin（见 docstring 里「两个方向互相等死」那一条）
         reader = threading.Thread(target=pump, daemon=True)
-        reader.start()
         try:
-            proc.wait(timeout=timeout)
+            reader.start()
+        except BaseException:
+            # 线程起不来（资源耗尽，或中断正好落在 start 上）：子进程已经在跑了，
+            # 不在这里收掉，它就会带着整组命令逃出这次安装。
+            self._terminate_process_group(proc)
+            proc.wait()
+            self._close_pipes(proc)
+            raise
+
+        #: 写 stdin 的线程。写必须离开主线程：子进程不读 stdin 时，写满管道后
+        #: `write()` 会一直阻塞，`wait(timeout=…)` 根本没机会开始计时 —— 那样
+        #: `timeout` 就只覆盖了「等进程」，没覆盖「喂输入」。
+        writer: threading.Thread | None = None
+
+        def feed_stdin(stdin, text: str) -> None:
+            try:
+                stdin.write(text)
+            except (OSError, ValueError):
+                pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
+            finally:
+                try:
+                    stdin.close()
+                except (OSError, ValueError):
+                    pass
+
+        try:
+            if input is not None and proc.stdin is not None:
+                feed = threading.Thread(target=feed_stdin, args=(proc.stdin, input), daemon=True)
+                feed.start()
+                writer = feed
+
+            if timeout is not None:
+                proc.wait(timeout=timeout)
+            else:
+                proc.wait()
+
+            # 直接子进程已经退出。正常命令这时读线程也到 EOF 了（毫秒级）；若某个
+            # 后代还握着 stdout（`cmd &`），它会一直等 —— 再等就是替那个后代陪葬。
+            # 给一小段收尾宽限，之后收掉整组，让读线程随管道 EOF 结束。
+            reader.join(DRAIN_GRACE_SECONDS)
+            if reader.is_alive():
+                self._terminate_process_group(proc)
+                reader.join(5)
+            # 写线程同理：子进程退了但没读完 stdin 的话，写端会拿到 EPIPE 自己
+            # 结束；还活着的唯一原因是某个后代攥着 stdin 读端不肯放 —— 收整组。
+            if writer is not None:
+                writer.join(DRAIN_GRACE_SECONDS)
+                if writer.is_alive():
+                    self._terminate_process_group(proc)
+                    writer.join(5)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            self._terminate_process_group(proc)
             proc.wait()
             reader.join(5)
+            if writer is not None:
+                writer.join(5)      # 整组收掉之后写端拿到 EPIPE，线程自己退出
+            if errors:
+                raise errors[0]
             raise self._timeout_error(argv, timeout, exit_code)
-        reader.join(10)
+        except BaseException:
+            # Ctrl-C / 进程被信号打断 —— 卡在写 stdin 上的那种也在内（写由写线程
+            # 负责，主线程收掉整组之后它拿到 EPIPE 就退）。子进程自己开了新会话，
+            # 终端上的 SIGINT 到不了它 —— 不在这里收掉，收尾卸载目标时
+            # `pacstrap` / `mkfs` 还在往那块盘上写。
+            self._terminate_process_group(proc)
+            proc.wait()
+            reader.join(5)
+            if writer is not None:
+                writer.join(5)
+            elif proc.stdin is not None:
+                # 写线程没起来（`start()` 自己失败）：stdin 还是本进程的句柄，
+                # 子进程已经收掉，这一关不会卡在写满的管子上。
+                try:
+                    proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            raise
+        if errors:
+            raise errors[0]
         return proc
 
     def _note_if_slow(self, argv: list[str], started: float) -> None:
@@ -352,8 +528,13 @@ class Runner:
         用于「失败有退路」的场合（NVRAM 写不进 → 退到可移除介质路径）。
         普通的失败路径别用它 —— 抛异常的 `run()` 才带得上退出码与提示。
         超时算失败（并留一句旁白）：碰固件的命令卡住时，退路才有意义。
+        **和 `run()` 同一条 stdin 纪律**：没给 `input` 就接 `DEVNULL`，子进程读不到
+        后端 stdin 上的密码；超时同样收整组进程（见 `_terminate_process_group`）。
         """
         argv = [str(a) for a in argv]
+        if not argv:
+            raise InstallerError("空命令：没有可执行的东西", EXIT_USAGE,
+                                 hint="argv 至少要有程序名")
         self.history.append(argv)
         self.reporter.command(argv)
         if self.dry_run:
@@ -361,13 +542,32 @@ class Runner:
         started = time.monotonic()
         try:
             # 输出捕获后丢掉：语义是「只报成败」，但输出同样不许漏进本进程 stdout
-            proc = subprocess.run(argv, capture_output=True, text=True, input=input,
-                                  check=False, timeout=timeout)
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
         except FileNotFoundError:
             return False
+        try:
+            proc.communicate(input=input, timeout=timeout)
         except subprocess.TimeoutExpired:
-            self.reporter.note(f"命令超时（{int(timeout or 0)}s）：{' '.join(argv)}（按失败走退路）")
+            self._terminate_process_group(proc)
+            proc.wait()
+            self._close_pipes(proc)        # 有后代逃逸时 communicate() 会等到天荒地老
+            self.reporter.note(
+                f"命令超时（{float(timeout or 0):g}s）：{' '.join(argv)}（按失败走退路）"
+            )
             return False
+        except BaseException:
+            # 同 run()：新会话里的子进程收不到终端的 SIGINT，得这里收掉再抛。
+            self._terminate_process_group(proc)
+            proc.wait()
+            self._close_pipes(proc)
+            raise
         self._note_if_slow(argv, started)
         return proc.returncode == 0
 
@@ -449,6 +649,16 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
 
     `secret=True` 时**连预览都不打**：密码那类内容一旦进了日志，日志就会跟着进仓库、
     进 issue、进别人的终端。要写的路径照旧说出来，内容一个字都不落。
+
+    `mode` 在**写内容之前**就落到文件描述符上（`os.open` + `os.fchmod`），不是写完
+    再 `chmod`：后者会留下一个「密码 / sudoers 已经在文件里、权限还是 umask 给的
+    0644」的窗口。窗口很短，但它是 root 在写密码文件 —— 这种窗口不该有。
+
+    **不跟随符号链接**（`O_NOFOLLOW`）：写的是 `<target>/etc/pacman.conf` 这类
+    目标盘路径，而目标盘内容在 `--steps configure` 这种续跑场景里不一定是安装器
+    自己刚铺的。一个 `pacman.conf -> /etc/pacman.conf` 的链接会让 root 在宿主机
+    （Live）上改文件 —— 越过目标盘的一次根写入。目标系统里这些文件本来就该是
+    普通文件，遇到链接就拒绝并说清楚。
     """
     runner.reporter.note(f"写入 {path}" + (f"（mode {mode:04o}）" if mode is not None else "")
                          + ("（内容不打印）" if secret else ""))
@@ -458,9 +668,27 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
         return
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    if mode is not None:
-        os.chmod(target, mode)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(target, flags, mode if mode is not None else 0o666)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise InstallerError(
+                f"拒绝写入符号链接：{path}",
+                EXIT_GUARD,
+                hint="目标系统里这个路径是符号链接 —— 安装器只写普通文件，不跟着链接改别处",
+            ) from exc
+        raise
+    try:
+        if mode is not None:
+            # 文件已存在时，`os.open` 的 mode 参数不生效；这里补一次，仍然在写内容之前。
+            os.fchmod(fd, mode)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
+        handle.write(text)
 
 
 #: dry-run 里预览内容的最多行数。mirrorlist 那种几十行的文件不值得占满屏幕。
@@ -514,7 +742,20 @@ def require_root() -> None:
 
 
 def size_of_device(path: str) -> int:
-    """块设备的字节数（走 sysfs，不解析 `lsblk` 的文本）。"""
+    """块设备的字节数（走 sysfs，不解析 `lsblk` 的文本）。
+
+    不是块设备就报与 `disk.assert_usable` 同一条守卫（`reason="notBlockDevice"`）。
+    原来这里会漏出一个裸的 `FileNotFoundError` —— CLI 把它当「未预期的异常」
+    （退出码 7）报成 traceback，可它其实只是「这块盘不存在」。
+    """
     name = os.path.basename(os.path.realpath(path))
-    sectors = Path(f"/sys/class/block/{name}/size").read_text(encoding="utf-8").strip()
-    return int(sectors) * 512
+    try:
+        sectors = Path(f"/sys/class/block/{name}/size").read_text(encoding="utf-8").strip()
+        return int(sectors) * 512
+    except (OSError, ValueError) as exc:
+        raise InstallerError(
+            f"不是块设备：{path}",
+            EXIT_GUARD,
+            hint="给整块盘的路径，例如 Live 里挂上来的 /dev/vda（先 lsblk 确认）",
+            reason="notBlockDevice",
+        ) from exc

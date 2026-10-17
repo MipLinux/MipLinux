@@ -954,19 +954,43 @@ fi
 
 # archlinuxcn 的包同样要验签，缺 key 会在 mkarchiso 的 pacstrap 里以 PGP 错误
 # 直接失败 —— 验签用的是**容器**的 keyring（pacstrap -G 不搬 GPGDir）。
-# 所以 key 要在进 mkarchiso 之前进容器：先装 keyring 包，再 populate。
-# 只在挂载了仓库 profile、且它确实带 [archlinuxcn] 时做：--baseline 用容器内
-# 原版 releng，自定义 --profile 也可能没有这个源。
-if [[ "${PROFILE}" == /profile ]] && grep -q '^\[archlinuxcn\]' "${PROFILE}/pacman.conf"; then
+# 所以钥匙环要在进 mkarchiso 之前进容器：先装 keyring 包，再 populate。
+#
+# 为什么「只 populate 了 archlinux 的干净容器」也能装这个包：当前这个包由
+# Felix Yan（Arch 开发者）的 key 签名，那把 key 在 archlinux-keyring 里；
+# pacman-key --populate archlinux 会本地签名 Arch 的 master key，再由它们的
+# 认证让打包者 key 生效。官方钥匙环先建立信任，这个包再把 archlinuxcn 自己的
+# 钥匙环带进来 —— 是一条可查的信任链，不是「先 TrustAll 装上、再收紧」。
+# 哪天这个包换了不在官方钥匙环里的签名 key，这里会以 unknown trust 失败；
+# 那种情况要查新 key 的信任链，不能退回 TrustAll（那正是 D10 / P11 要拆的）。
+#
+# 判据只看 profile 的 conf 里有没有这个源，不绑 /profile 挂载点：挂载点是可变的，
+# --baseline 用容器内原版 releng（没有这个源），自定义 --profile 才可能带它。
+# 文件先判存在：--baseline 时 archiso 还没装，releng 的 pacman.conf 这时还不存在，
+# 直接 grep 会打一行 "No such file or directory" 到构建日志里。
+if [[ -f "${PROFILE}/pacman.conf" ]] && grep -q '^\[archlinuxcn\]' "${PROFILE}/pacman.conf"; then
   echo "==> 导入 archlinuxcn 钥匙串"
   # 用 profile 自己的 conf 取包：仓库地址与 SigLevel 就是构建时 pacstrap 用的
   # 那一份，脚本里不再抄第二份 Server 列表。
   if ! pacman -Sy --needed --noconfirm --config "${PROFILE}/pacman.conf" archlinuxcn-keyring; then
     echo "错误：archlinuxcn-keyring 没装上 —— 构建时从 [archlinuxcn] 拉包会验不过签名。" >&2
-    echo "      先确认容器能访问 profile/pacman.conf 里的那个源。" >&2
+    echo "      按这两条查：" >&2
+    echo "      1) 源不通：上面 pacman 报错里会带失败的 Server；在容器里 curl -sI 那个地址" >&2
+    echo "      2) 信任链断了（unknown trust）：先更新官方钥匙环再试 ——" >&2
+    echo "           pacman -S --needed archlinux-keyring && pacman-key --populate archlinux" >&2
+    echo "         还不行就确认 archlinuxcn-keyring 现在的签名者；不要用 TrustAll 绕过。" >&2
     exit 1
   fi
-  pacman-key --populate archlinuxcn
+  # 这个包的 .INSTALL 里已经会 populate；显式再来一次，是为了覆盖 --needed
+  # 跳过 scriptlet、或 scriptlet 失败但包已落盘的情况 —— 漏了它，后面 pacstrap
+  # 拉 cn 包会以 PGP 错误失败，而错误现场离这里很远。
+  if ! pacman-key --populate archlinuxcn; then
+    echo "错误：archlinuxcn 钥匙串没导入容器 —— pacstrap 拉 cn 包会报 PGP 错误。" >&2
+    echo "      先看钥匙环文件在不在：ls -l /usr/share/pacman/keyrings/archlinuxcn.gpg" >&2
+    echo "      不在：重装这个包 —— pacman -S --config ${PROFILE}/pacman.conf archlinuxcn-keyring" >&2
+    echo "      在：查 /etc/pacman.d/gnupg 的权限；再手动跑一次 pacman-key --populate archlinuxcn 看完整报错。" >&2
+    exit 1
+  fi
 fi
 
 echo "==> 更新包数据库"
@@ -1167,13 +1191,22 @@ step_enter() {
   else
     # 交互模式下容器里到底该敲哪个 profile，取决于这次有没有挂载：
     # repo 模式挂在 /profile，baseline 模式用容器自带的那份。
-    local hint_profile hint_note
+    local hint_profile hint_note hint_cn=""
     if [[ -n "$PROFILE_HOST" ]]; then
       hint_profile="$PROFILE_INNER"
       hint_note="# 构建。仓库的 profile 已经只读挂载在 ${PROFILE_INNER}，
   # 原版 releng 在 ${BASELINE_PROFILE}
   # 想确认这两份是不是一份（A1 的验收）：
   #   diff -r --no-dereference ${PROFILE_INNER} ${BASELINE_PROFILE}"
+      # 手动 mkarchiso 走的是和 --auto 同一条 pacstrap：profile 带 [archlinuxcn]
+      # 又要求验签时，不先把这个钥匙环装进容器就会以 PGP 错误失败。
+      if [[ -f "${PROFILE_HOST}/pacman.conf" ]] && \
+         grep -q '^\[archlinuxcn\]' "${PROFILE_HOST}/pacman.conf"; then
+        hint_cn="# 这个 profile 带 [archlinuxcn]：先把 cn 钥匙环装进容器 ——
+  # 仓库 profile 现在要求验签，缺 key 会让 pacstrap 拉 cn 包时报 PGP 错误
+  pacman -Sy --needed --config ${PROFILE_INNER}/pacman.conf archlinuxcn-keyring
+  pacman-key --populate archlinuxcn"
+      fi
     else
       hint_profile="$BASELINE_PROFILE"
       hint_note="# 构建。这次用容器自带的原版 releng（没有挂载 profile）"
@@ -1193,6 +1226,8 @@ step_enter() {
 
   # 安装构建工具链
   pacman -S archiso
+
+  ${hint_cn}
 
   ${hint_note}
   mkarchiso -v -w ${WORK_DIR} -o /out ${hint_profile}

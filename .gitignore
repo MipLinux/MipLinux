@@ -19,3 +19,6 @@ OVMF_VARS*.fd
 # Python
 __pycache__/
 *.py[cod]
+
+# 生成的许可清单
+docs/licensing/sbom.spdx.json

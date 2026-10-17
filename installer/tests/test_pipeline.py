@@ -268,20 +268,41 @@ class TestPreflight(_RunCase):
         """**回归测试**：`Plan` 是公开接口，`steps` 不一定经过 `parse_steps()`。
 
         * 拼错的阶段名原来会在 `STEP_TOOLS[step]` 处冒 `KeyError`（退出码 7）；
-        * 重复的 `disk` 会把盘**擦两遍** —— 这是最坏的那种「安静的错」。
+        * 重复的 `disk` 会把盘**擦两遍** —— 这是最坏的那种「安静的错」；
+        * 乱序的列表按原样执行：`packages` 装进还没挂上的目录、`boot` 拿到占位
+          UUID，然后 `disk` 再把盘擦一遍。`parse_steps()` 会排序，但 `Plan` 可以
+          被直接构造，这时必须当场拒绝。
 
-        两条都必须在碰盘之前以 `EXIT_USAGE` 拒绝。
+        都在碰盘之前以 `EXIT_USAGE` 拒绝。
         """
-        for steps in ((), ("disk", "disk"), ("disk", "teapot"), ("teapot",)):
+        for steps in ((), ("disk", "disk"), ("disk", "teapot"), ("teapot",),
+                      ("packages", "disk"), ("boot", "disk"),
+                      ("configure", "disk", "packages")):
             with self.subTest(steps=steps):
                 with self.assertRaises(InstallerError) as ctx:
                     pipeline.preflight(self.plan(steps=steps))
                 self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
 
+    def test_accepts_ordered_subsets(self):
+        """反证：合法子集（按依赖顺序）不许被上面那条误伤。"""
+        for steps in (("disk",), ("disk", "boot"), ("packages", "configure", "boot")):
+            with self.subTest(steps=steps):
+                pipeline.preflight(self.plan(steps=steps))
+
     def test_a_duplicated_disk_step_never_reaches_a_command(self):
         """把重复阶段摆到 `run()` 上：一条命令、一个事件都不许有。"""
         with self.assertRaises(InstallerError) as ctx:
             pipeline.run(self.plan(steps=("disk", "disk")), self.reporter,
+                         password="pw", confirm=lambda *a: None)
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(self.runner.history, [])
+        self.assertEqual(self.runner.commands(), [])
+        self.assertEqual(self.phases(), [])
+
+    def test_an_out_of_order_step_list_never_reaches_a_command(self):
+        """乱序同理：`boot` 在 `disk` 之前没东西可引导，但也没有盘可擦。"""
+        with self.assertRaises(InstallerError) as ctx:
+            pipeline.run(self.plan(steps=("boot", "disk")), self.reporter,
                          password="pw", confirm=lambda *a: None)
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
         self.assertEqual(self.runner.history, [])

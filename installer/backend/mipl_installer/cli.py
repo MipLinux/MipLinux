@@ -387,24 +387,24 @@ def report_failure(reporter, exc: InstallerError, *, json_mode: bool) -> None:
     print(f"[失败] {exc.render()}", file=sys.stderr)
 
 
-def log_locations(args: argparse.Namespace, reporter: Reporter | None = None) -> list[str]:
+def log_locations(args: argparse.Namespace) -> list[str]:
     """失败时该去哪儿找日志 —— **只在失败时问**。
 
     日志位置是一句「有用的话」，但只在出事的时候有用：正常流程里把「我们会把过程
     写进哪儿」先说一遍，是自我指涉的噪音（实机反馈：「假惺惺提醒用户我们会输出日志」）。
     所以它从开场白挪到了失败收尾。只报**确实写出来过**的那几份，不报推测出来的路径。
 
-    `reporter` 给的是「这次到底挂上过目标盘日志没有」：失败收尾会先卸载目标，
-    卸完 `Path(args.target)/…` 自然不是文件了 —— 只看文件系统会把**最该报的**
-    那一份（唯一活过重启的）漏掉。挂上过就在 reporter 上留了路径，
-    这里优先信它，不再拿挂载后的目录去赌。
+    `args.target_log_path` 是 `run_install()` 从 reporter 上抄过来的「这次到底挂上过
+    目标盘日志没有」：失败收尾会先卸载目标，卸完 `Path(args.target)/…` 自然不是文件了
+    —— 只看文件系统会把**最该报的**那一份（唯一活过重启的）漏掉。挂上过就优先信它，
+    不再拿挂载后的目录去赌。签名保持原样（#151：不改公开函数签名），记录走 args。
     """
     found: list[str] = []
     if args.log:
         live_copy = Path(args.log)
         if live_copy.is_file():
             found.append(f"{live_copy}（Live 侧，重启即没）")
-    attached = getattr(reporter, "target_log_path", None) if reporter is not None else None
+    attached = getattr(args, "target_log_path", None)
     if attached:
         found.append(f"{attached}（目标盘，重启后仍在）")
     else:
@@ -448,7 +448,11 @@ def run_install(args: argparse.Namespace) -> int:
         # 出事之后才说日志在哪（见 `log_locations`）—— 摆在这一步是因为此时
         # 目标盘挂没挂、日志到底写成了没有，都已经有答案了。
         if code != util.EXIT_OK:
-            locations = log_locations(args, reporter)
+            # 目标盘那份在挂上的时候就记在 reporter 上了；失败收尾会先卸载，
+            # 卸完目录里就看不见文件了 —— 把记录交给 `log_locations()`。
+            # 走 args 而不是加参数：`log_locations` 的签名不改（#151）。
+            args.target_log_path = getattr(reporter, "target_log_path", None)
+            locations = log_locations(args)
             if locations:
                 reporter.note("日志：" + "；".join(locations))
         # `end` 一定要发：界面靠它把「子进程结束了」和「装完了」分开 ——

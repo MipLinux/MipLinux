@@ -22,6 +22,7 @@ PR=""
 DRY_RUN=false
 OUT_DIR=${MIPL_PR_REVIEW_OUT:-/tmp/mipl-pr-review}
 
+# Print the script's usage header to stdout.
 usage() {
   sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -62,7 +63,9 @@ mkdir -p "$OUT_DIR"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# 带行号解析 git diff，便于模型精准输出 line
+# Write an annotated unified diff from the file at $1 to stdout.
+# Added and context lines use new-file line numbers; deletions stay unnumbered.
+# Return awk's exit status, including failures to read the input file.
 annotate_diff() {
   local diff_file=$1
   awk '
@@ -102,7 +105,9 @@ annotate_diff() {
   ' "$diff_file"
 }
 
-# 提取代码中明显的违规特征（机械信号）
+# Scan added lines in the unified diff at $1 for command and quoting warnings.
+# Write matching lines with diff-file line numbers to stdout, or a no-match message.
+# Grep errors are treated as no matches, so the message does not guarantee clean input.
 detect_mechanical_signals() {
   local diff_file=$1
   local signals=()

@@ -43,6 +43,8 @@ jobs:
         env:
           INPUT_PR: ${{ github.event.issue.number || github.event.inputs.pr }}
           DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+          REVIEWER_PRIVATE_KEY: ${{ secrets.REVIEWER_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           case "$INPUT_PR" in ''|*[!0-9]*) echo "::error::PR 编号必须是纯数字"; exit 1 ;; esac
@@ -56,9 +58,17 @@ jobs:
             echo "skip=false" >>"$GITHUB_OUTPUT"
           fi
 
+          # secrets 上下文不允许出现在 if: 表达式里（用了会让整个 workflow 文件失效），
+          # 因此在这里判断密钥是否齐备，再以 step output 的形式供后续 if 使用。
+          if [ -n "$REVIEWER_APP_ID" ] && [ -n "$REVIEWER_PRIVATE_KEY" ]; then
+            echo "use_app=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "use_app=false" >>"$GITHUB_OUTPUT"
+          fi
+
       - name: 获取专属审查者 App Token（可选）
         id: app-token
-        if: steps.precheck.outputs.skip != 'true' && secrets.REVIEWER_APP_ID != '' && secrets.REVIEWER_PRIVATE_KEY != ''
+        if: steps.precheck.outputs.skip != 'true' && steps.precheck.outputs.use_app == 'true'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.REVIEWER_APP_ID }}

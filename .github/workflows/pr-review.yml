@@ -54,15 +54,9 @@ jobs:
             echo "skip=false" >>"$GITHUB_OUTPUT"
           fi
 
-          if [ -n "${{ secrets.REVIEWER_APP_ID }}" ] && [ -n "${{ secrets.REVIEWER_PRIVATE_KEY }}" ]; then
-            echo "use_app=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "use_app=false" >>"$GITHUB_OUTPUT"
-          fi
-
       - name: 获取专属审查者 App Token（可选）
         id: app-token
-        if: steps.precheck.outputs.skip != 'true' && steps.precheck.outputs.use_app == 'true'
+        if: steps.precheck.outputs.skip != 'true' && secrets.REVIEWER_APP_ID != '' && secrets.REVIEWER_PRIVATE_KEY != ''
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.REVIEWER_APP_ID }}
@@ -99,7 +93,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
+          export HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
+          [ -n "$HEAD_SHA" ] || { echo "::error::未能解析到 head sha"; exit 1; }
           echo "Head SHA: $HEAD_SHA"
 
           # 提取纯 JSON 内容（若模型返回带 ```json 代码块则剥离）

@@ -22,8 +22,8 @@ class TestPlanLayout(unittest.TestCase):
     def test_40gib_default(self):
         layout = disk.plan_layout(40 * GiB)
         self.assertEqual(layout.esp_start, 1 * MiB)          # 1 MiB 对齐，不占 0 扇区
-        self.assertEqual(layout.esp_size, 512 * MiB)
-        self.assertEqual(layout.root_start, 513 * MiB)       # ESP 之后重新对齐
+        self.assertEqual(layout.esp_size, 1 * GiB)
+        self.assertEqual(layout.root_start, 1 * GiB + 1 * MiB)       # ESP 之后重新对齐
         self.assertLessEqual(layout.root_start + layout.root_size, 40 * GiB)
 
     def test_root_is_aligned_and_tail_is_left_alone(self):
@@ -140,6 +140,9 @@ class TestSameDevice(unittest.TestCase):
     def test_other_disk_is_not_the_same(self):
         self.assertFalse(disk.same_device("/dev/vdb1", "/dev/vda"))
         self.assertFalse(disk.same_device("/dev/vda", "/dev/vda1"))
+        # 字母结尾的设备分区号为纯数字，不能将 /dev/sdap 误判为 /dev/sda
+        self.assertFalse(disk.same_device("/dev/sdap1", "/dev/sda"))
+        self.assertFalse(disk.same_device("/dev/sdaa1", "/dev/sda"))
 
 
 class TestAssertUsable(unittest.TestCase):
@@ -166,7 +169,7 @@ class TestAssertUsable(unittest.TestCase):
 
     def test_happy_path(self):
         layout = self._call()
-        self.assertEqual(layout.esp_size, 512 * MiB)
+        self.assertEqual(layout.esp_size, 1 * GiB)
 
     def test_refuses_non_block_device(self):
         with mock.patch("mipl_installer.util.is_block_device", return_value=False):

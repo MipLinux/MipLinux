@@ -57,6 +57,13 @@ class TestLocales(unittest.TestCase):
         self.assertIn("#ja_JP.UTF-8 UTF-8", out)
         self.assertTrue(out.endswith("\n"))
 
+    def test_enables_case_insensitive_and_normalized(self):
+        out = configure.enable_locales(self.LOCALE_GEN, ("zh_cn.utf8",))
+        self.assertIn("\nzh_CN.UTF-8 UTF-8", out)
+        self.assertTrue(configure.has_locale(self.LOCALE_GEN, "zh_CN.utf8"))
+        self.assertTrue(configure.has_locale(self.LOCALE_GEN, "ZH_CN.UTF-8"))
+        self.assertFalse(configure.has_locale(self.LOCALE_GEN, "zh_HK.UTF-8"))
+
     def test_locale_conf_matches_live_factory_settings(self):
         self.assertEqual(
             configure.locale_conf("zh_CN.UTF-8"),
@@ -98,6 +105,13 @@ class TestUserAndHost(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(InstallerError):
                     configure.validate_user(bad)
+
+    def test_rejects_control_chars_in_passwords(self):
+        for bad in ("pw\n", "pw\r", "pw\0"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InstallerError) as ctx:
+                    configure._validate_passwords(bad, None)
+                self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
 
 
 class TestStaticFiles(unittest.TestCase):
@@ -198,12 +212,14 @@ class TestFontsConf(unittest.TestCase):
             self.assertEqual((Path(dst) / "etc/fonts/local.conf").read_text(encoding="utf-8"),
                              self.FALLBACK)
 
-    def test_missing_source_is_an_error(self):
+    def test_missing_source_is_gracefully_skipped_with_warning(self):
         with tempfile.TemporaryDirectory() as dst:
-            with self.assertRaises(InstallerError) as ctx:
-                configure.copy_fonts_conf(
-                    FakeRunner(), TargetConfig(target=dst, fonts_conf="/nonexistent/local.conf"))
-            self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+            reporter = RecordingReporter()
+            configure.copy_fonts_conf(
+                FakeRunner(reporter=reporter), TargetConfig(target=dst, fonts_conf="/nonexistent/local.conf")
+            )
+            self.assertFalse((Path(dst) / "etc/fonts/local.conf").exists())
+            self.assertTrue(any("跳过字体 fallback 复制" in note for note in reporter.notes))
 
     def test_missing_source_tolerated_in_dry_run(self):
         with tempfile.TemporaryDirectory() as dst:
@@ -246,6 +262,21 @@ class TestChrootSteps(unittest.TestCase):
         keyring = Path(tmp) / configure.ARCHLINUXCN_KEYRING
         keyring.parent.mkdir(parents=True, exist_ok=True)
         keyring.write_text("", encoding="utf-8")
+
+    def test_colon_passwords_reach_chpasswd_intact_on_stdin(self):
+        runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+        original = runner.run
+        inputs = []
+        def run(argv, **kwargs):
+            if argv[-1] == "chpasswd":
+                inputs.append(kwargs.get("input"))
+            return original(argv, **kwargs)
+        runner.run = run
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), ":user:fixture:", "root:fixture")
+        self.assertEqual(inputs, ["mipl::user:fixture:\n", "root:root:fixture\n"])
+        self.assertFalse(any("fixture" in cmd for cmd in runner.commands()))
 
     def test_invalid_passwords_fail_before_any_command(self):
         for bad in ("", "example\nextra", "example\rextra", "example\x00extra"):

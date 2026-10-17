@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import tempfile
+import shutil
 import struct
 import unittest
 from unittest.mock import patch
@@ -54,6 +55,20 @@ class TestEntryContent(unittest.TestCase):
         text = boot.loader_conf()
         self.assertIn(f"default {boot.ENTRY_NAME}", text)
         self.assertIn("timeout 3", text)
+
+    def test_entry_supports_ucodes_and_fallback(self):
+        main = boot.loader_entry(ROOT_UUID, ucodes=("/amd-ucode.img", "/intel-ucode.img"))
+        self.assertIn("title   MipLinux Boot Manager\n", main)
+        self.assertIn("initrd  /amd-ucode.img\n", main)
+        self.assertIn("initrd  /intel-ucode.img\n", main)
+        self.assertIn("initrd  /initramfs-linux.img\n", main)
+
+        fallback = boot.loader_entry(ROOT_UUID, boot.FALLBACK_TITLE, sort_key="miplinux-fallback",
+                                     initrd="/initramfs-linux-fallback.img", ucodes=("/amd-ucode.img",))
+        self.assertIn("title   MipLinux Boot Manager (fallback initramfs)\n", fallback)
+        self.assertIn("sort-key miplinux-fallback\n", fallback)
+        self.assertIn("initrd  /amd-ucode.img\n", fallback)
+        self.assertIn("initrd  /initramfs-linux-fallback.img\n", fallback)
 
 
 class TestEfiEntryDetection(unittest.TestCase):
@@ -268,18 +283,45 @@ class TestInstallBootloader(EspFixture):
         runner = FakeRunner(outputs={EFIBOOTMGR: firmware_entry()})
         with tempfile.TemporaryDirectory() as tmp:
             cfg = TargetConfig(target=tmp)
+            (Path(tmp) / "boot").mkdir()
+            (Path(tmp) / "boot/initramfs-linux-fallback.img").write_bytes(b"fallback fixture")
             boot.install_bootloader(runner, cfg, ROOT_UUID)
             entry = Path(boot.entry_path(cfg)).read_text(encoding="utf-8")
+            fallback_entry = Path(boot.fallback_entry_path(cfg)).read_text(encoding="utf-8")
             loader = (Path(tmp) / "boot/loader/loader.conf").read_text(encoding="utf-8")
         self.assertIn(f"root=UUID={ROOT_UUID}", entry)
+        self.assertIn("title   MipLinux Boot Manager\n", entry)
+        self.assertIn("title   MipLinux Boot Manager (fallback initramfs)\n", fallback_entry)
+        self.assertIn("/initramfs-linux-fallback.img", fallback_entry)
         self.assertIn(boot.ENTRY_NAME, loader)
+
+    def test_no_fallback_menu_without_nonempty_image_and_stale_entry_is_removed(self):
+        for image in (None, b""):
+            with self.subTest(image=image), tempfile.TemporaryDirectory() as tmp:
+                cfg = TargetConfig(target=tmp)
+                stale = Path(boot.fallback_entry_path(cfg))
+                stale.parent.mkdir(parents=True)
+                stale.write_text("stale entry")
+                if image is not None:
+                    (Path(tmp) / "boot/initramfs-linux-fallback.img").write_bytes(image)
+                boot.write_entries(FakeRunner(), cfg, ROOT_UUID)
+                self.assertFalse(stale.exists())
+
+    def test_dry_run_does_not_remove_existing_fallback_menu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = TargetConfig(target=tmp)
+            stale = Path(boot.fallback_entry_path(cfg))
+            stale.parent.mkdir(parents=True)
+            stale.write_text("keep during preview")
+            boot.write_entries(FakeRunner(dry_run=True), cfg, ROOT_UUID)
+            self.assertEqual(stale.read_text(), "keep during preview")
 
     def test_creates_entry_when_firmware_has_none(self):
         runner = FakeRunner(outputs={EFIBOOTMGR: "BootCurrent: 0001\n"})
         with tempfile.TemporaryDirectory() as tmp:
             boot.install_bootloader(runner, TargetConfig(target=tmp), ROOT_UUID)
         created = runner.assert_ran(self, "efibootmgr --create")
-        self.assertIn("--label MipLinux", created)
+        self.assertIn("--label MipLinux Boot Manager", created)
         self.assertIn("--disk /dev/nvme0n1 --part 1", created)
 
     def test_falls_back_to_removable_path_when_nvram_write_fails(self):
@@ -327,6 +369,53 @@ class TestVerify(EspFixture):
         Path(boot.entry_path(cfg)).write_text(boot.loader_entry(entry_uuid), encoding="utf-8")
         (Path(tmp) / "boot/loader/loader.conf").write_text(boot.loader_conf(), encoding="utf-8")
         return cfg
+
+    def test_rejects_missing_or_empty_referenced_initrds(self):
+        for name in ("initramfs-linux-fallback.img", "amd-ucode.img", "intel-ucode.img"):
+            for contents in (None, b""):
+                with self.subTest(name=name, contents=contents), tempfile.TemporaryDirectory() as tmp:
+                    cfg = self._fake_esp(tmp)
+                    if name.endswith("fallback.img"):
+                        Path(boot.fallback_entry_path(cfg)).write_text(boot.loader_entry(
+                            ROOT_UUID, boot.FALLBACK_TITLE, initrd="/" + name))
+                    else:
+                        Path(boot.entry_path(cfg)).write_text(boot.loader_entry(ROOT_UUID, ucodes=("/" + name,)))
+                    if contents is not None:
+                        (Path(tmp) / "boot" / name).write_bytes(contents)
+                    with self.assertRaises(InstallerError) as ctx:
+                        boot.verify(self.runner(), cfg, ROOT_UUID)
+                    self.assertEqual(ctx.exception.exit_code, EXIT_BOOT)
+
+    def test_valid_fallback_and_microcode_images_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._fake_esp(tmp)
+            for name in ("initramfs-linux-fallback.img", "amd-ucode.img", "intel-ucode.img"):
+                (Path(tmp) / "boot" / name).write_bytes(b"image fixture")
+            boot.write_entries(FakeRunner(), cfg, ROOT_UUID)
+            boot.verify(self.runner(), cfg, ROOT_UUID)
+
+    def test_removable_recovery_restores_both_efi_files_and_passes_verify(self):
+        class CopyRunner(FakeRunner):
+            def run(self, argv, **kwargs):
+                result = super().run(argv, **kwargs)
+                if argv[0] == "cp":
+                    shutil.copyfile(argv[1], argv[2])
+                return result
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._fake_esp(tmp)
+            standard = Path(tmp) / "boot" / boot.ESP_SYSTEMD_BOOT
+            binary = standard.read_bytes()
+            standard.unlink()
+            removable = Path(tmp) / "boot" / boot.ESP_REMOVABLE_PATH
+            removable.unlink()
+            source = Path(tmp) / "usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(binary)
+            runner = CopyRunner(outputs={"blkid": ROOT_UUID})
+            boot.fallback_removable(runner, cfg)
+            self.assertEqual(standard.read_bytes(), binary)
+            self.assertEqual(removable.read_bytes(), binary)
+            boot.verify(runner, cfg, ROOT_UUID)
 
     def test_rejects_missing_wrong_or_duplicate_kernel_directives(self):
         for entry in (

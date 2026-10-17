@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 from pathlib import Path
@@ -34,9 +35,11 @@ from .util import (
     write_text,
 )
 
-#: 引导项标题。用发行版名，不用 "Linux Boot Manager"（那是 bootctl 的默认值）。
-TITLE = "MipLinux"
+#: 引导项标题。用发行版完整引导名，不用 "Linux Boot Manager"（那是 bootctl 的默认值）。
+TITLE = "MipLinux Boot Manager"
 ENTRY_NAME = "miplinux.conf"
+FALLBACK_ENTRY_NAME = "miplinux-fallback.conf"
+FALLBACK_TITLE = "MipLinux Boot Manager (fallback initramfs)"
 LOADER_TIMEOUT = 3
 
 #: 碰固件 NVRAM 的命令的超时（秒）。健康机器上这几条都是秒级；固件变量存储
@@ -50,14 +53,24 @@ ESP_SYSTEMD_BOOT = "EFI/systemd/systemd-bootx64.efi"
 ESP_REMOVABLE_PATH = "EFI/BOOT/BOOTX64.EFI"
 
 
-def loader_entry(root_uuid: str, title: str = TITLE) -> str:
-    return (
-        f"title   {title}\n"
-        f"sort-key miplinux\n"
-        f"linux   /vmlinuz-linux\n"
-        f"initrd  /initramfs-linux.img\n"
-        f"options root=UUID={root_uuid} rw nvidia_drm.modeset=1\n"
-    )
+def loader_entry(
+    root_uuid: str,
+    title: str = TITLE,
+    *,
+    sort_key: str = "miplinux",
+    initrd: str = "/initramfs-linux.img",
+    ucodes: tuple[str, ...] = (),
+) -> str:
+    lines = [
+        f"title   {title}",
+        f"sort-key {sort_key}",
+        "linux   /vmlinuz-linux",
+    ]
+    for ucode in ucodes:
+        lines.append(f"initrd  {ucode}")
+    lines.append(f"initrd  {initrd}")
+    lines.append(f"options root=UUID={root_uuid} rw nvidia_drm.modeset=1")
+    return "\n".join(lines) + "\n"
 
 
 def loader_conf(default: str = ENTRY_NAME, timeout: int = LOADER_TIMEOUT) -> str:
@@ -69,9 +82,32 @@ def entry_path(cfg: TargetConfig) -> str:
     return f"{cfg.target}/boot/loader/entries/{ENTRY_NAME}"
 
 
+def fallback_entry_path(cfg: TargetConfig) -> str:
+    """fallback entry 同样落在 ESP 上。"""
+    return f"{cfg.target}/boot/loader/entries/{FALLBACK_ENTRY_NAME}"
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def write_entries(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
     runner.reporter.emit(step_event("boot", "entry", "写引导项"))
-    write_text(runner, entry_path(cfg), loader_entry(root_uuid))
+    esp_dir = Path(f"{cfg.target}/boot")
+    ucodes = tuple(f"/{name}" for name in ("amd-ucode.img", "intel-ucode.img") if (esp_dir / name).is_file())
+    write_text(runner, entry_path(cfg), loader_entry(root_uuid, TITLE, sort_key="miplinux", initrd="/initramfs-linux.img", ucodes=ucodes))
+    if _nonempty_file(esp_dir / "initramfs-linux-fallback.img"):
+        write_text(
+            runner,
+            fallback_entry_path(cfg),
+            loader_entry(root_uuid, FALLBACK_TITLE, sort_key="miplinux-fallback", initrd="/initramfs-linux-fallback.img", ucodes=ucodes),
+        )
+    elif not runner.dry_run:
+        # 重试时 preset 可能已关闭 fallback，不能留下指向旧镜像的菜单项。
+        Path(fallback_entry_path(cfg)).unlink(missing_ok=True)
     write_text(runner, f"{cfg.target}/boot/loader/loader.conf", loader_conf())
 
 
@@ -221,8 +257,15 @@ def fallback_removable(runner: Runner, cfg: TargetConfig) -> None:
     """
     source = f"{cfg.target}/boot/{ESP_SYSTEMD_BOOT}"
     destination = f"{cfg.target}/boot/{ESP_REMOVABLE_PATH}"
-    runner.reporter.note(f"退到可移除介质路径：/{ESP_REMOVABLE_PATH}")
     ensure_dir(runner, f"{cfg.target}/boot/EFI/BOOT")
+    if not runner.dry_run and not os.path.exists(source):
+        system_boot_efi = f"{cfg.target}/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+        if os.path.exists(system_boot_efi):
+            runner.reporter.note(f"ESP 上未找到 {ESP_SYSTEMD_BOOT}，从目标系统原始路径回退：{system_boot_efi}")
+            _verify_efi(Path(system_boot_efi))
+            ensure_dir(runner, str(Path(source).parent))
+            runner.run(["cp", system_boot_efi, source], exit_code=EXIT_BOOT)
+    runner.reporter.note(f"退到可移除介质路径：/{ESP_REMOVABLE_PATH}")
     runner.run(["cp", source, destination], exit_code=EXIT_BOOT)
 
 
@@ -274,9 +317,40 @@ def verify(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
         return [parts[1].strip() for line in contents.splitlines()
                 if (parts := line.split(None, 1)) and parts[0] == key and len(parts) == 2]
 
+    initrds = values(text, "initrd")
     if (values(text, "linux") != ["/vmlinuz-linux"]
-            or values(text, "initrd") != ["/initramfs-linux.img"]):
+            or not initrds
+            or initrds[-1] != "/initramfs-linux.img"
+            or not all(item in ("/amd-ucode.img", "/intel-ucode.img") for item in initrds[:-1])):
         raise InstallerError("loader entry 的内核或 initrd 路径不符合安装布局", EXIT_BOOT)
+
+    def require_initrds(paths: list[str]) -> None:
+        missing = [name for name in paths
+                   if not _nonempty_file(Path(cfg.target) / "boot" / name.lstrip("/"))]
+        if missing:
+            raise InstallerError("引导项引用的 initrd 缺失或为空：" + "、".join(missing), EXIT_BOOT)
+
+    require_initrds(initrds)
+
+    fb_path = fallback_entry_path(cfg)
+    if Path(fb_path).is_file():
+        try:
+            fb_text = util.read_text(fb_path)
+        except OSError as exc:
+            raise InstallerError("无法读取 fallback loader entry", EXIT_BOOT) from exc
+        fb_roots = [token for line in fb_text.splitlines()
+                    if line.split() and line.split()[0] == "options"
+                    for token in line.split()[1:] if token.startswith("root=")]
+        if fb_roots != [f"root=UUID={root_uuid}"]:
+            raise InstallerError(f"fallback entry 里的 root UUID 与根分区不一致（{fb_path}）", EXIT_BOOT)
+        fb_initrds = values(fb_text, "initrd")
+        if (values(fb_text, "linux") != ["/vmlinuz-linux"]
+                or not fb_initrds
+                or fb_initrds[-1] != "/initramfs-linux-fallback.img"
+                or not all(item in ("/amd-ucode.img", "/intel-ucode.img") for item in fb_initrds[:-1])):
+            raise InstallerError("fallback entry 的内核或 initrd 路径不符合安装布局", EXIT_BOOT)
+        require_initrds(fb_initrds)
+
     try:
         loader = util.read_text(f"{cfg.target}/boot/loader/loader.conf")
     except OSError as exc:

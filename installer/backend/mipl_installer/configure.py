@@ -168,15 +168,21 @@ def locales_to_enable(cfg: TargetConfig) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _norm_locale(s: str) -> str:
+    """规范化 locale 字符串：忽略大小写、短横线与下划线差异，如 zh_CN.utf8 -> zhcnutf8。"""
+    return re.sub(r"[^a-zA-Z0-9]", "", s).lower()
+
+
 def has_locale(locale_gen_text: str, locale: str) -> bool:
     """`locale.gen` 里有没有可放开的那一行（注释或未注释都算）。
 
-    带字符集比较（表里写的是 `zh_CN.UTF-8 UTF-8`），所以按整名匹配 ——
+    带字符集比较（表里写的是 `zh_CN.UTF-8 UTF-8`），规范化后按整名匹配 ——
     `zh_CN.UTF-8` 与 `zh_CN.GB18030` 是两行，不能只看前半个名字。
     """
+    target = _norm_locale(locale)
     for line in locale_gen_text.splitlines():
         body = line.strip().lstrip("#").strip()
-        if body and body.split()[0] == locale:
+        if body and _norm_locale(body.split()[0]) == target:
             return True
     return False
 
@@ -184,16 +190,16 @@ def has_locale(locale_gen_text: str, locale: str) -> bool:
 def enable_locales(locale_gen_text: str, locales: tuple[str, ...]) -> str:
     """把 `/etc/locale.gen` 里指定的行放开（其余原样）。
 
-    locale.gen 里的写法是 `zh_CN.UTF-8 UTF-8`，带字符集，所以直接按整名比。
+    locale.gen 里的写法是 `zh_CN.UTF-8 UTF-8`，带字符集，规范化比对以兼容大小写差异。
     """
-    wanted = {loc for loc in locales}
+    wanted = {_norm_locale(loc) for loc in locales}
     out: list[str] = []
     for line in locale_gen_text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
             body = stripped.lstrip("#").strip()
             parts = body.split()
-            if parts and parts[0] in wanted:
+            if parts and _norm_locale(parts[0]) in wanted:
                 out.append(body)
                 continue
         out.append(line)
@@ -364,21 +370,19 @@ def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
 
     与 pacman.conf / mirrorlist 同一个哲学：出厂设置在 Live（airootfs），安装器
     不复制第二份字符串 —— 中文 fallback 只该有一份真相。字体包由装后系统清单提供。
+    若非 Live 环境缺少该出厂文件，降级提示并跳过，不阻断主安装流程。
     """
     source = Path(cfg.fonts_conf)
     if not source.is_file():
         if runner.dry_run:
-            # 宿主排练机上没有这份 Live 出厂设置 —— dry-run 只预览命令序列，
-            # 照 write_static_files 对 locale.gen 的同一口径：容忍并说出来。
             runner.reporter.note(
                 f"dry-run：找不到字体配置 {cfg.fonts_conf}（Live 的出厂设置）—— 跳过复制预览"
             )
             return
-        raise InstallerError(
-            f"找不到字体配置：{cfg.fonts_conf}",
-            EXIT_CONFIGURE,
-            hint="默认读运行系统的 /etc/fonts/local.conf —— 这个安装器要在 Live 里跑",
+        runner.reporter.note(
+            f"找不到字体配置：{cfg.fonts_conf}，跳过字体 fallback 复制（装后系统需自行配置或依赖默认字体规则）"
         )
+        return
     _ensure_config_dir(runner, f"{cfg.target}/etc/fonts", announce=True)
     _write_config(runner, f"{cfg.target}/etc/fonts/local.conf", read_text(str(source)))
 

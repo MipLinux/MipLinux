@@ -13,7 +13,7 @@
 
 布局（roadmap §M1）：
 
-    | 1 MiB | ESP 512 MiB (vfat, esp 标志) | root 剩余 (ext4) |
+    | 1 MiB | ESP 1 GiB (vfat, esp 标志) | root 剩余 (ext4) |
 
 **ESP 挂 `/boot`**，不是 `/efi`：systemd-boot 只读 FAT，内核与 initramfs 必须
 落在 ESP 上，否则重启时它找不到 `/vmlinuz-linux`。
@@ -45,7 +45,7 @@ GiB = 1024 ** 3
 #: 1 MiB 对齐。512 字节扇区的盘上是 2048 扇区，4K 盘上是 256 —— 都是整数，
 #: 顺带把 4Kn 盘的对齐要求一起满足了。
 ALIGN = 1 * MiB
-ESP_SIZE = 512 * MiB
+ESP_SIZE = 1 * GiB
 #: **盘尾要留给 GPT 的备份表头**（最后 33 个扇区，按 1 MiB 对齐留）。
 #: 不留会怎样：分区压上去之后，内核要么把它裁短、要么干脆不收下 ——
 #: 表现为 `/proc/partitions` 里少一个分区、`/dev` 里没有节点，

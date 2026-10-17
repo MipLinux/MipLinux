@@ -1,6 +1,6 @@
 # 第三方组件与许可
 
-> 合规总入口。逐包许可证不在这里手工维护：构建时由 `scripts/gen-sbom.py` 从包元数据生成 SPDX SBOM。
+> 合规总入口。逐包许可证不在这里手工维护：由 `scripts/gen-sbom.py` 从包元数据生成 SPDX SBOM。
 > 本文只回答：哪些组件在分发、哪些是计划、专有组件在哪里、源码怎么交付。
 
 ## 范围与状态
@@ -25,7 +25,7 @@
 | [docs/licensing/NVIDIA.md](docs/licensing/NVIDIA.md) | EULA 与分发限制 |
 | [docs/licensing/SOURCE-OFFER.md](docs/licensing/SOURCE-OFFER.md) | GPLv2 / GPLv3 / LGPL 的源码交付 |
 | [docs/licensing/README.md](docs/licensing/README.md) | SBOM 生成、Arch 许可证路径、分发状态 |
-| `docs/licensing/sbom.spdx.json` | 构建时生成；不手工维护 |
+| `docs/licensing/sbom.spdx.json` | 逐版本生成；不手工维护 |
 | [docs/archive/2026-10-17-第三方许可核对.md](docs/archive/2026-10-17-第三方许可核对.md) | `libqalculate` / `lm_sensors` 的版本、commit 与 SPDX 证据 |
 
 ## 生成

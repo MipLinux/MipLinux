@@ -85,4 +85,6 @@ sudo ./scripts/mipl.sh qemu --disk target.qcow2 --boot c
 
 - **代码与配置**：**GPL-3.0-or-later**，全文见 [LICENSE](LICENSE)。
 - **品牌素材**（logo 及派生尺寸）：单独按 **CC BY-SA 4.0** 授权；名称与商标不随素材授权，见 [assets/README.md](assets/README.md)。
-- **第三方组件**：随仓库或随产物分发的第三方东西，各自保留原许可；清单与我们做过的改动见 [THIRD-PARTY.md](THIRD-PARTY.md)。
+- **Caelestia 桌面配置**：来自 MipLinux 维护的 [Caelestia-dotfiles](https://github.com/MipLinux/Caelestia-dotfiles)、[Caelestia-shell](https://github.com/MipLinux/Caelestia-shell)、[Caelestia-cli](https://github.com/MipLinux/Caelestia-cli) 三个 fork，以 **GPL-3.0-only** 分发（上游 Caelestia 的 LICENSE 为 GPLv3）；版权与修改声明见各仓库的 `NOTICE.md`。
+- **第三方组件**：随仓库或随产物分发的第三方东西，各自保留原许可；许可分层、NVIDIA 专有组件与源码提供方式见 [THIRD-PARTY.md](THIRD-PARTY.md)。
+- **专有组件**：发行版预装 NVIDIA 用户态驱动（`nvidia-utils`，NVIDIA Driver License Agreement）。它是独立专有组件，按聚合方式分发，再分发依据 EULA 1.1(d)：二进制不修改、EULA 随附；详见 [THIRD-PARTY.md](THIRD-PARTY.md)。它不是 GPL 代码，MipLinux 因此是“开源核心 + 专有驱动”，不是 100% 自由软件发行版。需要完全自由软件的用户不要安装 NVIDIA 组件。

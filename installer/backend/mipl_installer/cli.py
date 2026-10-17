@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 from . import disk, packages, pipeline, queries, util, __version__
-from .events import JsonReporter, TextReporter
+from .events import JsonReporter, Reporter, TextReporter
 from .pipeline import STEP_ORDER, Plan, parse_steps
 from .util import EXIT_GUARD, EXIT_USAGE, InstallerError, Runner
 
@@ -146,18 +146,24 @@ def read_passwords(args: argparse.Namespace) -> tuple[str, str | None]:
     """读用户密码，以及（可选）root 密码。两行都从 stdin 读，**顺序固定**：用户在前。
 
     密码只走 stdin，绝不进 argv —— argv 会留在进程列表与日志里。
+
+    **参数组合先查、再问密码。** 反过来的话，`--root-password-stdin` 漏了
+    `--password-stdin` 时，程序会先弹 `getpass` 让人输用户密码、输完才发现参数
+    是错的；交互式终端下这还会把单测挂在密码提示上（#152 交叉审查）。
+    组合检查放在任何读 stdin 的动作之前，错的参数当场拒绝。
     """
-    password = read_password(args)
-    if not args.root_password_stdin:
-        return password, None
     if args.dry_run:
-        return password, util.DRY
-    if not args.password_stdin:
+        # dry-run 不动盘、也不建用户，没必要先让人输密码
+        return util.DRY, (util.DRY if args.root_password_stdin else None)
+    if args.root_password_stdin and not args.password_stdin:
         raise InstallerError(
             "--root-password-stdin 要和 --password-stdin 一起用",
             EXIT_USAGE,
             hint="两行密码按「用户在前、root 在后」的顺序从 stdin 读",
         )
+    password = read_password(args)
+    if not args.root_password_stdin:
+        return password, None
     line = sys.stdin.readline().rstrip("\n")
     if not line:
         raise InstallerError("从标准输入读到的 root 密码是空的", EXIT_USAGE,
@@ -208,7 +214,7 @@ def confirm_hook(args: argparse.Namespace) -> pipeline.ConfirmHook:
     带 `--yes` 时照样先把计划打出来，只是不再等人敲设备路径。
     """
 
-    def hook(plan: Plan, layout: disk.Layout, reporter: TextReporter) -> None:
+    def hook(plan: Plan, layout: disk.Layout, reporter: Reporter) -> None:
         reporter.note(describe(plan, layout))
         if args.yes:
             reporter.note("--yes：跳过二次确认")
@@ -219,8 +225,12 @@ def confirm_hook(args: argparse.Namespace) -> pipeline.ConfirmHook:
                 EXIT_USAGE,
                 hint="先不加 --yes 跑一次看计划，确认无误再带上它",
             )
-        print(f"\n这会**整盘擦除** {plan.disk}，盘上现有数据全部丢弃。")
-        typed = input(f"确认请原样输入设备路径（{plan.disk}）：").strip()
+        # 提示走**事件流**、问题走 **stderr**：stdout 在 JSON 模式下一行只许有一个
+        # JSON 对象，一句 `print` / `input()` 就能把事件流冲成「后端输出无法解析」。
+        reporter.note(f"这会**整盘擦除** {plan.disk}，盘上现有数据全部丢弃。")
+        sys.stderr.write(f"确认请原样输入设备路径（{plan.disk}）：")
+        sys.stderr.flush()
+        typed = sys.stdin.readline().strip()
         if typed != plan.disk:
             raise InstallerError("确认不匹配，已放弃", EXIT_GUARD, hint="盘一个字节都没动")
 
@@ -292,7 +302,12 @@ def run_query(args: argparse.Namespace) -> int:
     `dry_run`，`--dry-run` 就成了一句空话：2026-10-06 就是这条漏传让
     `--reboot --dry-run` 在开发机上真的重启了一次（当时以为 dry-run 拦得住）。
     """
-    narration = TextReporter(stream=sys.stderr, log_path=args.log)
+    try:
+        narration = TextReporter(stream=sys.stderr, log_path=args.log)
+    except OSError as exc:
+        # stdout 上还没有任何东西 —— 报在哪都不会污染「恰好一份 JSON」的契约
+        print(f"[失败] 打不开日志文件 {args.log}：{exc}", file=sys.stderr)
+        return EXIT_USAGE
     runner = Runner(narration, dry_run=args.dry_run)
     try:
         if args.print_disks:
@@ -334,11 +349,30 @@ def run_query(args: argparse.Namespace) -> int:
     except InstallerError as exc:
         print(f"[失败] {exc.render()}", file=sys.stderr)
         return exc.exit_code
+    except KeyboardInterrupt:
+        print("[失败] 已取消", file=sys.stderr)
+        return pipeline.EXIT_CANCELLED
     finally:
         narration.close()
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return util.EXIT_OK
+
+
+def open_reporter(args: argparse.Namespace, *, stream=None) -> TextReporter | JsonReporter | None:
+    """按 `--json-events` 造 reporter；日志文件打不开就报一句、返回 `None`。
+
+    不接住这个 `OSError` 的话，`--log` 指向一个不存在的目录会直接甩 traceback
+    （退出码 1，还什么都没解释）—— 而这只是「参数打错了」，应该是 `EXIT_USAGE`
+    与一句「日志文件打不开」。
+    """
+    try:
+        if args.json_events:
+            return JsonReporter(stream=stream, log_path=args.log)
+        return TextReporter(stream=stream, log_path=args.log)
+    except OSError as exc:
+        print(f"[失败] 打不开日志文件 {args.log}：{exc}", file=sys.stderr)
+        return None
 
 
 # ── 安装 ──────────────────────────────────────────────────────────────
@@ -353,27 +387,38 @@ def report_failure(reporter, exc: InstallerError, *, json_mode: bool) -> None:
     print(f"[失败] {exc.render()}", file=sys.stderr)
 
 
-def log_locations(args: argparse.Namespace) -> list[str]:
+def log_locations(args: argparse.Namespace, reporter: Reporter | None = None) -> list[str]:
     """失败时该去哪儿找日志 —— **只在失败时问**。
 
     日志位置是一句「有用的话」，但只在出事的时候有用：正常流程里把「我们会把过程
     写进哪儿」先说一遍，是自我指涉的噪音（实机反馈：「假惺惺提醒用户我们会输出日志」）。
-    所以它从开场白挪到了失败收尾。只报**确实存在**的那几份，不报一个推测出来的路径。
+    所以它从开场白挪到了失败收尾。只报**确实写出来过**的那几份，不报推测出来的路径。
+
+    `reporter` 给的是「这次到底挂上过目标盘日志没有」：失败收尾会先卸载目标，
+    卸完 `Path(args.target)/…` 自然不是文件了 —— 只看文件系统会把**最该报的**
+    那一份（唯一活过重启的）漏掉。挂上过就在 reporter 上留了路径，
+    这里优先信它，不再拿挂载后的目录去赌。
     """
     found: list[str] = []
     if args.log:
         live_copy = Path(args.log)
         if live_copy.is_file():
             found.append(f"{live_copy}（Live 侧，重启即没）")
-    target_log = Path(args.target) / pipeline.TARGET_LOG_NAME
-    if target_log.is_file():
-        found.append(f"{target_log}（目标盘，重启后仍在）")
+    attached = getattr(reporter, "target_log_path", None) if reporter is not None else None
+    if attached:
+        found.append(f"{attached}（目标盘，重启后仍在）")
+    else:
+        target_log = Path(args.target) / pipeline.TARGET_LOG_NAME
+        if target_log.is_file():
+            found.append(f"{target_log}（目标盘，重启后仍在）")
     return found
 
 
 def run_install(args: argparse.Namespace) -> int:
     json_mode = bool(args.json_events)
-    reporter = JsonReporter(log_path=args.log) if json_mode else TextReporter(log_path=args.log)
+    reporter = open_reporter(args)
+    if reporter is None:
+        return EXIT_USAGE
     cancel = CancelFlag()
     previous = signal.signal(signal.SIGUSR1, cancel.request)
     code = util.EXIT_OK
@@ -403,7 +448,7 @@ def run_install(args: argparse.Namespace) -> int:
         # 出事之后才说日志在哪（见 `log_locations`）—— 摆在这一步是因为此时
         # 目标盘挂没挂、日志到底写成了没有，都已经有答案了。
         if code != util.EXIT_OK:
-            locations = log_locations(args)
+            locations = log_locations(args, reporter)
             if locations:
                 reporter.note("日志：" + "；".join(locations))
         # `end` 一定要发：界面靠它把「子进程结束了」和「装完了」分开 ——

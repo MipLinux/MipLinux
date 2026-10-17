@@ -1,0 +1,28 @@
+# CodeRabbit 配置文件（MipLinux PR 审查 - 第一轨：通用工程质量宽松层）
+# 规范与说明：https://docs.coderabbit.ai/guides/configure-coderabbit
+
+language: "zh-CN"
+
+reviews:
+  # CHILL 模式：专注高置信度缺陷与潜在逻辑 Bug，避免对琐碎风格吹毛求疵
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+  path_filters:
+    - "!out/**"
+    - "!docs/archive/**"
+    - "!**/*.fd"
+    - "!**/*.qcow2"
+    - "!**/*.iso"
+    - "!.idea/**"
+
+chat:
+  auto_reply: true

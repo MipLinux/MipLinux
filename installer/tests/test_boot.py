@@ -325,7 +325,33 @@ class TestVerify(EspFixture):
                 struct.pack_into("<H", header, offset, value)
             path.write_bytes(header)
         Path(boot.entry_path(cfg)).write_text(boot.loader_entry(entry_uuid), encoding="utf-8")
+        (Path(tmp) / "boot/loader/loader.conf").write_text(boot.loader_conf(), encoding="utf-8")
         return cfg
+
+    def test_rejects_missing_wrong_or_duplicate_kernel_directives(self):
+        for entry in (
+            f"options root=UUID={ROOT_UUID}\n",
+            boot.loader_entry(ROOT_UUID).replace("/vmlinuz-linux", "/missing-kernel"),
+            boot.loader_entry(ROOT_UUID).replace("/initramfs-linux.img", "/missing-initrd"),
+            boot.loader_entry(ROOT_UUID) + "linux /vmlinuz-linux\n",
+        ):
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as tmp:
+                cfg = self._fake_esp(tmp)
+                Path(boot.entry_path(cfg)).write_text(entry)
+                with self.assertRaises(InstallerError):
+                    boot.verify(self.runner(), cfg, ROOT_UUID)
+
+    def test_rejects_missing_wrong_or_duplicate_loader_default(self):
+        for contents in (None, "", "default other.conf\n", boot.loader_conf() + "default other.conf\n"):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as tmp:
+                cfg = self._fake_esp(tmp)
+                loader = Path(tmp) / "boot/loader/loader.conf"
+                if contents is None:
+                    loader.unlink()
+                else:
+                    loader.write_text(contents)
+                with self.assertRaises(InstallerError):
+                    boot.verify(self.runner(), cfg, ROOT_UUID)
 
     def test_rejects_actual_root_uuid_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:

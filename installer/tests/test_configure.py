@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import tempfile
 import subprocess
+import os
+import stat
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 from mipl_installer import configure
@@ -70,6 +74,12 @@ class TestLocales(unittest.TestCase):
 
 
 class TestUserAndHost(unittest.TestCase):
+    def test_reserved_accounts_fail_in_disk_preflight(self):
+        from mipl_installer.pipeline import Plan, preflight
+        for user in ("root", "nobody", "daemon", "dbus", "alpm"):
+            with self.subTest(user=user), self.assertRaises(InstallerError):
+                preflight(Plan(disk="/dev/FAKE", user=user))
+
     def test_sudoers_dropin_unlocks_wheel(self):
         # sudo 包自带的 /etc/sudoers 里 %wheel 是注释掉的
         self.assertEqual(configure.sudoers_dropin(), "%wheel ALL=(ALL:ALL) ALL\n")
@@ -91,6 +101,26 @@ class TestUserAndHost(unittest.TestCase):
 
 
 class TestStaticFiles(unittest.TestCase):
+    def test_config_modes_do_not_depend_on_inherited_umask(self):
+        for mask in (0o077, 0o000):
+            with self.subTest(mask=mask), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "etc").mkdir()
+                (root / "etc/locale.gen").write_text("#zh_CN.UTF-8 UTF-8\n")
+                old = os.umask(mask)
+                try:
+                    configure.write_static_files(FakeRunner(), TargetConfig(target=tmp), ROOT_UUID, ESP_UUID)
+                    source = root / "font-source"
+                    source.write_text("<fontconfig/>\n")
+                    configure.copy_fonts_conf(FakeRunner(), TargetConfig(target=tmp, fonts_conf=str(source)))
+                finally:
+                    os.umask(old)
+                for name in ("fstab", "locale.conf", "environment", "hostname", "hosts", "locale.gen", "fonts/local.conf"):
+                    self.assertEqual((root / "etc" / name).stat().st_mode & 0o777, 0o644)
+                self.assertEqual((root / "etc/sudoers.d/10-wheel").stat().st_mode & 0o777, 0o440)
+                self.assertEqual((root / "etc/fonts").stat().st_mode & 0o777, 0o755)
+                self.assertEqual((root / "etc/sudoers.d").stat().st_mode & 0o777, 0o755)
+
     def test_writes_into_target(self):
         runner = FakeRunner()
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,10 +288,31 @@ class TestChrootSteps(unittest.TestCase):
             with self.assertRaises(InstallerError):
                 configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
             runner.fail_patterns.clear()
-            configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
+            home_info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1000, st_gid=1000)
+            with patch.object(configure.os, "lstat", return_value=home_info):
+                configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
             self.assertEqual(len(runner.find("useradd")), 1)
             self.assertEqual(len(runner.find("usermod -a -G wheel")), 1)
             self.assertEqual(len(runner.find("mkinitcpio -P")), 2)
+
+    def test_missing_or_unsafe_home_is_not_silently_reused(self):
+        cases = (
+            FileNotFoundError("missing home"),
+            SimpleNamespace(st_mode=stat.S_IFLNK, st_uid=1000, st_gid=1000),
+            SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=0, st_gid=1000),
+            SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=1000, st_gid=0),
+        )
+        for home in cases:
+            with self.subTest(home=home), tempfile.TemporaryDirectory() as tmp:
+                self.plant_keyring(tmp)
+                (Path(tmp) / "etc").mkdir()
+                (Path(tmp) / "etc/passwd").write_text("mipl:x:1000:1000::/home/mipl:/bin/bash\n")
+                parent = SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=0, st_gid=0)
+                runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+                with patch.object(configure.os, "lstat", side_effect=[parent, home]):
+                    with self.assertRaises(InstallerError):
+                        configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
+                self.assertEqual(runner.history, [])
 
     def test_existing_system_account_is_not_reused(self):
         with tempfile.TemporaryDirectory() as tmp:

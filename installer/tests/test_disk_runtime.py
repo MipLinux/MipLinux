@@ -150,7 +150,7 @@ class TestWaitForPartitionNodes(unittest.TestCase):
 
 class TestFilesystemAndMount(unittest.TestCase):
     def test_make_filesystems_labels_both(self):
-        runner = FakeRunner()
+        runner = FakeRunner(dry_run=True)
         disk.make_filesystems(runner, "/dev/vda1", "/dev/vda2")
         self.assertEqual(runner.commands(), [
             "mkfs.vfat -F 32 -n MIPLINUX /dev/vda1",
@@ -258,6 +258,67 @@ class TestUuidGuard(unittest.TestCase):
 
 
 class TestDiskSafetyRegressions(unittest.TestCase):
+    def test_unmount_read_failures_do_not_escape_cleanup(self):
+        for failure_on_read in (0, 1, 2):
+            runner = FakeRunner(reporter=RecordingReporter())
+            reads = ["1 0 8:2 / /mnt/mipl rw - ext4 /dev/vda2 rw\n", "", ""]
+            reads[failure_on_read] = OSError("synthetic read failure")
+            with self.subTest(failure_on_read=failure_on_read), mock.patch.object(
+                util, "read_text", side_effect=reads
+            ), mock.patch.object(disk.os.path, "ismount", return_value=False):
+                disk.unmount_target(runner)
+            self.assertTrue(any("无法确认卸载状态" in note for note in runner.reporter.notes))
+
+    def test_busy_root_blocks_formatting_before_esp_is_modified(self):
+        import stat
+        from types import SimpleNamespace
+        runner = FakeRunner()
+        with mock.patch.object(disk, "_assert_not_busy", side_effect=[None, InstallerError("busy", EXIT_GUARD)]), \
+             mock.patch.object(disk.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=1)), \
+             mock.patch.object(util, "is_partition", return_value=True):
+            with self.assertRaises(InstallerError):
+                disk.make_filesystems(runner, "/dev/FAKE1", "/dev/FAKE2")
+        self.assertEqual(runner.history, [])
+
+    def test_changed_root_identity_blocks_second_format(self):
+        import stat
+        from types import SimpleNamespace
+        def node(number):
+            return SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=number)
+        runner = FakeRunner()
+        with mock.patch.object(disk, "_assert_not_busy"), \
+             mock.patch.object(disk.os, "stat", side_effect=[node(1), node(2), node(1), node(3)]), \
+             mock.patch.object(util, "is_partition", return_value=True):
+            with self.assertRaises(InstallerError):
+                disk.make_filesystems(runner, "/dev/FAKE1", "/dev/FAKE2")
+        self.assertEqual(len(runner.find("mkfs.vfat")), 1)
+        self.assertFalse(runner.find("mkfs.ext4"))
+
+    def test_formatting_checks_both_partitions_and_rechecks_before_each_write(self):
+        import stat
+        from types import SimpleNamespace
+        nodes = [SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=n) for n in (1, 2, 1, 2)]
+        runner = FakeRunner()
+        with mock.patch.object(disk, "_assert_not_busy") as guard, \
+             mock.patch.object(disk.os, "stat", side_effect=nodes), \
+             mock.patch.object(util, "is_partition", return_value=True):
+            disk.make_filesystems(runner, "/dev/FAKE1", "/dev/FAKE2")
+        self.assertEqual(guard.call_args_list, [mock.call(p) for p in
+                         ("/dev/FAKE1", "/dev/FAKE2", "/dev/FAKE1", "/dev/FAKE2")])
+        self.assertEqual(len(runner.find("mkfs")), 2)
+
+    def test_same_device_or_nonpartition_is_rejected_before_formatting(self):
+        import stat
+        from types import SimpleNamespace
+        for partition in (True, False):
+            runner = FakeRunner()
+            with self.subTest(partition=partition), mock.patch.object(disk, "_assert_not_busy"), \
+                 mock.patch.object(disk.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=1)), \
+                 mock.patch.object(util, "is_partition", return_value=partition):
+                with self.assertRaises(InstallerError):
+                    disk.make_filesystems(runner, "/dev/FAKE1", "/dev/FAKE2")
+            self.assertEqual(runner.history, [])
+
     def test_dependency_failure_precedes_all_disk_commands(self):
         runner = FakeRunner()
         with mock.patch.object(disk, '_prepare_partitioning', side_effect=InstallerError('missing parted', 2)):

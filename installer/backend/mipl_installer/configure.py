@@ -18,9 +18,11 @@
 
 from __future__ import annotations
 
-import re
 import glob
+import os
 import posixpath
+import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +34,6 @@ from .util import (
     InstallerError,
     Runner,
     chroot_argv,
-    ensure_dir,
     read_text,
     write_text,
 )
@@ -41,7 +42,7 @@ from .util import (
 PACMAN_BASELINE = Path(__file__).parent / "data/pacman-baseline"
 
 #: `Include = /etc/pacman.d/mirrorlist` —— 只认未注释的整行
-INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(\S+)\s*$")
+INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(\S(?:.*\S)?)\s*$")
 
 FSTAB_HEADER = """\
 # /etc/fstab: static file system information.
@@ -214,6 +215,12 @@ def sudoers_dropin() -> str:
 
 
 def validate_user(user: str) -> None:
+    # 与基础系统及默认目标包中的服务账号冲突，会在擦盘后才让 useradd 失败。
+    if user in {"root", "bin", "daemon", "mail", "ftp", "http", "nobody",
+                "dbus", "polkitd", "systemd-network", "systemd-resolve", "uuidd",
+                "systemd-coredump", "systemd-timesync", "systemd-oom", "systemd-journal-remote",
+                "alpm", "avahi", "tss", "dnsmasq", "nvidia-persistenced"}:
+        raise InstallerError("用户名是系统保留账号，请换一个用户名", EXIT_CONFIGURE)
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
         raise InstallerError(
             f"用户名不合法：{user!r}",
@@ -229,6 +236,27 @@ def _validate_passwords(password: str, root_password: str | None) -> None:
 
 
 # ── 落到目标系统 ──────────────────────────────────────────────────────
+def _ensure_config_dir(runner: Runner, path: str, *, announce: bool = False) -> None:
+    if announce:
+        runner.reporter.note(f"建目录 {path}")
+    if runner.dry_run:
+        return
+    missing: list[Path] = []
+    directory = Path(path)
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+
+
+def _write_config(runner: Runner, path: str, text: str, *, mode: int | None = None) -> None:
+    # 配置的可读性不能随启动安装器的 umask 改变。
+    _ensure_config_dir(runner, str(Path(path).parent))
+    write_text(runner, path, text, mode=mode if runner.dry_run else (0o644 if mode is None else mode))
+
+
 def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
     """默认从 ISO 内独立基线写入目标；显式自定义 conf 使用调用者的文件。
 
@@ -252,8 +280,9 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
     # 先展开并读取整个 Include 图，再写目标，缺文件或循环不留下半份配置。
     pending: dict[str, str] = {}
     active: set[Path] = set()
+    destinations: dict[str, Path] = {}
 
-    def collect(source: Path, destination: str) -> None:
+    def collect(source: Path, destination: str) -> str:
         destination = posixpath.normpath("/" + destination.lstrip("/"))
         identity = source.resolve()
         if baseline is not None and not identity.is_relative_to(baseline.resolve()):
@@ -262,8 +291,15 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
             raise InstallerError("pacman Include 嵌套过深", EXIT_CONFIGURE)
         if identity in active:
             raise InstallerError("pacman Include 存在循环引用", EXIT_CONFIGURE)
+        if destination in destinations and destinations[destination] != identity:
+            # 自定义入口名可能不是 pacman.conf；它包含的同名文件不能覆盖入口。
+            index = len(destinations)
+            while destination in destinations:
+                destination = f"/etc/pacman.d/mipl-includes/{index}.conf"
+                index += 1
+        destinations[destination] = identity
         if destination in pending:
-            return
+            return destination
         active.add(identity)
         lines: list[str] = []
         source_text = target_pacman_conf(read_text(str(source)))
@@ -288,10 +324,11 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
                 else:
                     relative = posixpath.relpath(str(child), str(source.parent))
                     child_destination = posixpath.normpath(posixpath.join(posixpath.dirname(destination), relative))
+                child_destination = collect(child, child_destination)
                 lines.append(f"Include = {child_destination}")
-                collect(child, child_destination)
         active.remove(identity)
         pending[destination] = "\n".join(lines) + "\n"
+        return destination
 
     collect(conf_path, "/etc/pacman.conf")
     if not iter_includes(pending["/etc/pacman.conf"]):
@@ -300,7 +337,7 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
             raise InstallerError(f"找不到 mirrorlist：{cfg.mirrorlist}", EXIT_CONFIGURE)
         pending["/etc/pacman.d/mirrorlist"] = read_text(str(mirror))
     for destination, text in pending.items():
-        write_text(runner, str(Path(cfg.target) / destination.lstrip("/")), text)
+        _write_config(runner, str(Path(cfg.target) / destination.lstrip("/")), text)
 
 
 def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
@@ -318,7 +355,7 @@ def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
             continue
         if not source.is_file():
             raise InstallerError(f"缺少网络换源文件：{source}", EXIT_CONFIGURE)
-        write_text(runner, cfg.target + destination, read_text(str(source)),
+        _write_config(runner, cfg.target + destination, read_text(str(source)),
                    mode=0o644 if destination.endswith(".service") else 0o755)
 
 
@@ -342,8 +379,8 @@ def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
             EXIT_CONFIGURE,
             hint="默认读运行系统的 /etc/fonts/local.conf —— 这个安装器要在 Live 里跑",
         )
-    ensure_dir(runner, f"{cfg.target}/etc/fonts")
-    write_text(runner, f"{cfg.target}/etc/fonts/local.conf", read_text(str(source)))
+    _ensure_config_dir(runner, f"{cfg.target}/etc/fonts", announce=True)
+    _write_config(runner, f"{cfg.target}/etc/fonts/local.conf", read_text(str(source)))
 
 
 def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uuid: str) -> None:
@@ -372,21 +409,21 @@ def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uu
             hint="pacstrap 装完后再跑 configure；清单里要有 base",
         )
 
-    write_text(runner, f"{cfg.target}/etc/fstab", fstab_text(root_uuid, esp_uuid))
-    write_text(runner, f"{cfg.target}/etc/locale.conf", locale_conf(cfg.locale))
-    write_text(runner, f"{cfg.target}/etc/environment", environment_text())
-    write_text(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf(cfg.keymap))
-    write_text(runner, f"{cfg.target}/etc/hostname", cfg.hostname + "\n")
-    write_text(runner, f"{cfg.target}/etc/hosts", hosts(cfg.hostname))
-    write_text(runner, f"{cfg.target}/etc/sudoers.d/10-wheel", sudoers_dropin(), mode=0o440)
+    _write_config(runner, f"{cfg.target}/etc/fstab", fstab_text(root_uuid, esp_uuid))
+    _write_config(runner, f"{cfg.target}/etc/locale.conf", locale_conf(cfg.locale))
+    _write_config(runner, f"{cfg.target}/etc/environment", environment_text())
+    _write_config(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf(cfg.keymap))
+    _write_config(runner, f"{cfg.target}/etc/hostname", cfg.hostname + "\n")
+    _write_config(runner, f"{cfg.target}/etc/hosts", hosts(cfg.hostname))
+    _write_config(runner, f"{cfg.target}/etc/sudoers.d/10-wheel", sudoers_dropin(), mode=0o440)
 
     if locale_gen_text is not None:
-        write_text(runner, str(locale_gen), locale_gen_text)
+        _write_config(runner, str(locale_gen), locale_gen_text)
 
     # 时区用符号链接，不用复制文件：/usr/share/zoneinfo 是 tzdata 提供的，
     # 复制一份出来就成了第二份会漂移的真相。
     tz_target = f"{cfg.target}/etc/localtime"
-    ensure_dir(runner, f"{cfg.target}/etc")
+    _ensure_config_dir(runner, f"{cfg.target}/etc", announce=True)
     runner.run(["ln", "-sfnT", f"/usr/share/zoneinfo/{cfg.timezone}", tz_target], exit_code=EXIT_CONFIGURE)
 
 
@@ -473,8 +510,18 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     if existing:
         entry = existing[0]
         if (len(existing) != 1 or len(entry) != 7 or not entry[2].isdigit()
-                or int(entry[2]) < 1000 or entry[5] != f"/home/{cfg.user}"):
+                or not entry[3].isdigit() or int(entry[2]) < 1000
+                or entry[5] != f"/home/{cfg.user}"):
             raise InstallerError("目标中已有同名账号，不能作为安装用户重用", EXIT_CONFIGURE)
+        try:
+            parent = os.lstat(Path(target) / "home")
+            home = os.lstat(Path(target) / entry[5].lstrip("/"))
+            if (not stat.S_ISDIR(parent.st_mode) or not stat.S_ISDIR(home.st_mode)
+                    or (home.st_uid, home.st_gid) != (int(entry[2]), int(entry[3]))):
+                raise ValueError("家目录类型或属主不匹配")
+        except (OSError, ValueError) as exc:
+            raise InstallerError("已有安装用户的家目录缺失或属主不正确，不能直接重用",
+                                 EXIT_CONFIGURE, hint="先检查并修复目标系统的家目录，再重试配置") from exc
         runner.run(chroot_argv(target, ["usermod", "-a", "-G", "wheel", "-s", "/bin/bash", cfg.user]),
                    exit_code=EXIT_CONFIGURE)
     else:

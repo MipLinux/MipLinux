@@ -270,6 +270,20 @@ def verify(runner: Runner, cfg: TargetConfig, root_uuid: str) -> None:
             hint="entry 是我们自己写的，出现这种不一致说明中间有人改过盘或改过文件",
         )
 
+    def values(contents: str, key: str) -> list[str]:
+        return [parts[1].strip() for line in contents.splitlines()
+                if (parts := line.split(None, 1)) and parts[0] == key and len(parts) == 2]
+
+    if (values(text, "linux") != ["/vmlinuz-linux"]
+            or values(text, "initrd") != ["/initramfs-linux.img"]):
+        raise InstallerError("loader entry 的内核或 initrd 路径不符合安装布局", EXIT_BOOT)
+    try:
+        loader = util.read_text(f"{cfg.target}/boot/loader/loader.conf")
+    except OSError as exc:
+        raise InstallerError("无法读取 loader.conf", EXIT_BOOT) from exc
+    if values(loader, "default") != [ENTRY_NAME]:
+        raise InstallerError("loader.conf 默认项不是安装器写入的引导项", EXIT_BOOT)
+
 
 def _verify_efi(path: Path) -> None:
     """检查 x86_64 EFI 应用头；这不等于验证 Secure Boot 签名或实际可执行性。"""

@@ -95,6 +95,37 @@ class TestTargetPacmanConf(unittest.TestCase):
 
 
 class TestCopyPacmanConfig(unittest.TestCase):
+    def test_include_named_pacman_conf_does_not_overwrite_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            conf = source / "custom.conf"
+            conf.write_text("Include = pacman.conf\n")
+            included = source / "pacman.conf"
+            included.write_text("[core]\nInclude = mirrors\n")
+            (source / "mirrors").write_text("Server = https://example.invalid/$repo\n")
+            target = root / "target"
+            configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            child = configure.iter_includes((target / "etc/pacman.conf").read_text())[0]
+            self.assertNotEqual(child, "/etc/pacman.conf")
+            child_text = (target / child.lstrip("/")).read_text()
+            self.assertIn("[core]", child_text)
+            mirrors = configure.iter_includes(child_text)[0]
+            self.assertIn("Server =", (target / mirrors.lstrip("/")).read_text())
+
+    def test_include_paths_with_spaces_are_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = root / "custom.conf"
+            included = root / "mirror list"
+            included.write_text("Server = https://example.invalid/$repo\n")
+            conf.write_text(f"[core]\nInclude = {included}\n")
+            target = root / "target"
+            configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            self.assertEqual((target / str(included).lstrip("/")).read_text(), included.read_text())
+            self.assertEqual(configure.iter_includes((target / "etc/pacman.conf").read_text()), [str(included)])
+
     def test_glob_and_nested_relative_includes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

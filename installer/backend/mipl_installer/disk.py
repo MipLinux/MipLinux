@@ -883,8 +883,35 @@ def _parted_create(device: str, layout: Layout, *, prepared=None) -> None:
 
 
 def make_filesystems(runner: Runner, esp: str, root: str) -> None:
+    identities: dict[str, int] = {}
+    if not runner.dry_run:
+        for path in (esp, root):
+            _assert_not_busy(path)
+            try:
+                info = os.stat(path)
+            except OSError as exc:
+                raise InstallerError("格式化前无法读取分区身份", EXIT_GUARD) from exc
+            if not stat.S_ISBLK(info.st_mode) or not util.is_partition(path):
+                raise InstallerError("格式化目标不是块设备分区", EXIT_GUARD)
+            identities[path] = info.st_rdev
+        if identities[esp] == identities[root]:
+            raise InstallerError("ESP 与根分区指向同一设备，拒绝格式化", EXIT_GUARD)
+
+    def recheck(path: str) -> None:
+        if runner.dry_run:
+            return
+        _assert_not_busy(path)
+        try:
+            info = os.stat(path)
+        except OSError as exc:
+            raise InstallerError("格式化目标已不可用", EXIT_GUARD) from exc
+        if not stat.S_ISBLK(info.st_mode) or info.st_rdev != identities[path]:
+            raise InstallerError("格式化前分区身份发生变化", EXIT_GUARD)
+
+    recheck(esp)
     runner.reporter.emit(step_event("disk", "mkfs-esp", "格式化 ESP（vfat）"))
     runner.run(["mkfs.vfat", "-F", "32", "-n", FAT_LABEL, esp], exit_code=EXIT_GUARD)
+    recheck(root)
     runner.reporter.emit(step_event("disk", "mkfs-root", "格式化 root（ext4）"))
     runner.run(["mkfs.ext4", "-F", "-L", EXT4_LABEL, root], exit_code=EXIT_GUARD)
 
@@ -921,18 +948,27 @@ def unmount_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> None:
     runner.reporter.note("卸载目标：等磁盘写缓存落盘，写入量大时这一步可能看似停住几分钟")
     try:
         runner.run(["umount", "-R", target], check=False)
-    except InstallerError as exc:
+    except (InstallerError, OSError) as exc:
         runner.reporter.note(f"卸载命令失败：{target}（{exc}）")
-    entries = mounts_under(util.read_text("/proc/self/mountinfo"), target)
+    try:
+        entries = mounts_under(util.read_text("/proc/self/mountinfo"), target)
+    except (InstallerError, OSError) as exc:
+        runner.reporter.note(f"无法确认卸载状态：{target}（{exc}）")
+        return
     points = sorted({entry.mountpoint for entry in entries},
                     key=lambda value: (value.count("/"), len(value)), reverse=True)
     for point in points:
         try:
             runner.run(["umount", point], check=False)
-        except InstallerError as exc:
+        except (InstallerError, OSError) as exc:
             runner.reporter.note(f"卸载命令失败：{point}（{exc}）")
-    remaining = mounts_under(util.read_text("/proc/self/mountinfo"), target)
-    if remaining or is_mountpoint(target):
+    try:
+        remaining = mounts_under(util.read_text("/proc/self/mountinfo"), target)
+        still_mounted = bool(remaining) or is_mountpoint(target)
+    except (InstallerError, OSError) as exc:
+        runner.reporter.note(f"无法确认卸载状态：{target}（{exc}）")
+        return
+    if still_mounted:
         runner.reporter.note("卸载没成功，仍有残留挂载：" +
                              "、".join(entry.mountpoint for entry in remaining or [MountEntry(target, "", "")]))
 

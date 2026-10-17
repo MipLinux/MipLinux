@@ -101,7 +101,7 @@ jobs:
 
           # 提取纯 JSON 内容（若模型返回带 ```json 代码块则剥离）
           CLEAN_JSON=$(python3 -c '
-          import sys, re, json
+          import sys, re, json, os
           text = sys.stdin.read().strip()
           m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
           if m:
@@ -112,9 +112,12 @@ jobs:
               data = json.loads(raw)
               print(json.dumps(data))
           except Exception as e:
-              # 兜底格式
+              # 解析失败：保留原始响应到文件，方便排查
+              with open(".pr-review/raw-response.txt", "w") as rf:
+                  rf.write(text)
+              sys.stderr.write(f"::warning::AI 响应 JSON 解析失败（{e}），原始内容已写入 .pr-review/raw-response.txt\n")
               fallback = {
-                  "summary": "审查结果解析异常，请查看原始日志。",
+                  "summary": "审查结果解析异常，请查看原始日志（raw-response.txt）。",
                   "verdict": "NEEDS_ATTENTION",
                   "comments": []
               }
@@ -124,11 +127,32 @@ jobs:
           echo "$CLEAN_JSON" > .pr-review/result.json
 
           # 构造 GitHub Review API 请求负载
+          # 注意：GitHub Review API 要求 inline comment 的行号必须在该文件的 diff hunk 内；
+          # 行号越界会导致整条 Review 以 422 失败。对无效行号的批注降级为 body 文本。
           python3 -c '
           import json, os, sys
 
           with open(".pr-review/result.json", "r") as f:
               data = json.load(f)
+
+          # 从 context.md 的 [L行号] 标记中提取各文件的合法行号集合
+          valid_lines: dict[str, set[int]] = {}
+          try:
+              with open(".pr-review/context.md", "r") as cf:
+                  cur_file = None
+                  for ln in cf:
+                      ln = ln.rstrip("\n")
+                      if ln.startswith("文件: "):
+                          cur_file = ln[4:].strip()
+                          valid_lines.setdefault(cur_file, set())
+                      elif cur_file and ln.startswith("[L"):
+                          bracket = ln.index("]")
+                          try:
+                              valid_lines[cur_file].add(int(ln[2:bracket]))
+                          except ValueError:
+                              pass
+          except FileNotFoundError:
+              pass  # context.md 缺失时跳过校验，让 API 自行处理
 
           head_sha = os.environ.get("HEAD_SHA")
           summary = data.get("summary", "审查已完成。")
@@ -144,14 +168,15 @@ jobs:
               "",
               "<!-- mipl-review: head=" + head_sha[:7] + " -->"
           ]
-          body = "\n".join(body_lines)
 
           review_payload = {
               "commit_id": head_sha,
-              "body": body,
+              "body": "",  # 先占位，最后填入
               "event": "COMMENT",
               "comments": []
           }
+
+          fallback_notes = []  # 行号越界的批注降级到 body
 
           for c in comments:
               path = c.get("path")
@@ -160,23 +185,34 @@ jobs:
               msg = c.get("message", "")
               cat = c.get("category", "ENGINEERING")
               sev = c.get("severity", "WARNING")
-              if path and line:
-                  comment_body = f"**[{cat} / {sev}]** {msg}"
-                  item = {
-                      "path": path,
-                      "line": int(line),
-                      "side": "RIGHT",
-                      "body": comment_body
-                  }
-                  if start_line is not None:
-                      try:
-                          sl = int(start_line)
-                          if sl < int(line):
-                              item["start_line"] = sl
-                              item["start_side"] = "RIGHT"
-                      except (ValueError, TypeError):
-                          pass
-                  review_payload["comments"].append(item)
+              if not (path and line):
+                  continue
+              line_int = int(line)
+              # 校验行号是否在 diff 内；valid_lines 为空时跳过校验（context.md 缺失场景）
+              if valid_lines and path in valid_lines and line_int not in valid_lines[path]:
+                  fallback_notes.append(f"- **[{cat}/{sev}]** `{path}:{line_int}` {msg}")
+                  continue
+              comment_body = f"**[{cat} / {sev}]** {msg}"
+              item = {
+                  "path": path,
+                  "line": line_int,
+                  "side": "RIGHT",
+                  "body": comment_body
+              }
+              if start_line is not None:
+                  try:
+                      sl = int(start_line)
+                      if sl < line_int:
+                          item["start_line"] = sl
+                          item["start_side"] = "RIGHT"
+                  except (ValueError, TypeError):
+                      pass
+              review_payload["comments"].append(item)
+
+          if fallback_notes:
+              body_lines += ["", "---", "**⚠️ 以下批注因行号超出 diff 范围，无法贴到具体行：**", ""] + fallback_notes
+
+          review_payload["body"] = "\n".join(body_lines)
 
           with open(".pr-review/payload.json", "w") as f:
               json.dump(review_payload, f, indent=2)

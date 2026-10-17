@@ -1,0 +1,24 @@
+language: "zh-CN"
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+  path_filters:
+    - "!out/**"
+    - "!docs/archive/**"
+    - "!**/*.fd"
+    - "!**/*.qcow2"
+    - "!**/*.iso"
+    - "!.idea/**"
+
+chat:
+  auto_reply: true

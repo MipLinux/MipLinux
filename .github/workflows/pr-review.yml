@@ -1,0 +1,234 @@
+name: PR review（严格型代码与红线审查）
+
+# 本工作流实现 PR 审查的第二轨（严格型审查）：
+#   CodeRabbit 负责日常通用工程质量与摘要（宽松型），
+#   DeepSeek 专攻 MipLinux 架构红线与严格型系统级工程质量（严格型）。
+#
+# 判据的唯一源：docs/work/ai-code-review-rubric.md
+# 上下文提取脚本：scripts/pr-review-context.sh
+# 触发机制：仅当核心维护者在 PR 评论中输入 /mipl-review 时按需唤醒，或通过 workflow_dispatch 手动触发。
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR 编号'
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  review:
+    # 严格门禁：
+    # 1. 仅限针对 PR 的评论（issue.pull_request 存在）或手动 dispatch；
+    # 2. 评论必须包含 /mipl-review 指令；
+    # 3. 严格限制触发者身份：仅项目核心维护者（OWNER / MEMBER）有权触发，防止非受信任用户消耗 Token 或注入。
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/mipl-review') &&
+       contains(fromJSON('["OWNER","MEMBER"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 检查 fork 与权限
+        id: precheck
+        env:
+          INPUT_PR: ${{ github.event.issue.number || github.event.inputs.pr }}
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_PR" in ''|*[!0-9]*) echo "::error::PR 编号必须是纯数字"; exit 1 ;; esac
+          echo "pr=$INPUT_PR" >>"$GITHUB_OUTPUT"
+
+          # 检查是否能读取必要 Secret
+          if [ -z "$DEEPSEEK_KEY" ]; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::未配置 DEEPSEEK_API_KEY 或来自外部 fork 无法访问 secrets，跳过本次审查。"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 获取专属审查者 App Token（可选）
+        id: app-token
+        if: steps.precheck.outputs.skip != 'true' && secrets.REVIEWER_APP_ID != '' && secrets.REVIEWER_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_PRIVATE_KEY }}
+
+      - name: 生成审查上下文（脚本算 diff 与机械信号）
+        id: ctx
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.precheck.outputs.pr }}
+        run: |
+          set -euo pipefail
+          ./scripts/pr-review-context.sh --pr "$PR" --out "$GITHUB_WORKSPACE/.pr-review"
+
+      - name: 严格型审查（AI 判红线与工程质量）
+        id: ai
+        if: steps.precheck.outputs.skip != 'true'
+        uses: appleboy/LLM-action@v1.4.0
+        with:
+          base_url: 'https://api.deepseek.com'
+          api_key: ${{ secrets.DEEPSEEK_API_KEY }}
+          model: 'deepseek-flash'
+          max_tokens: '65536'
+          system_prompt: 'file:///github/workspace/docs/work/ai-code-review-rubric.md'
+          input_prompt: 'file:///github/workspace/.pr-review/context.md'
+
+      - name: 回传行级 Review 批注
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.precheck.outputs.pr }}
+          RAW_RESPONSE: ${{ steps.ai.outputs.response }}
+        run: |
+          set -euo pipefail
+
+          export HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
+          [ -n "$HEAD_SHA" ] || { echo "::error::未能解析到 head sha"; exit 1; }
+          echo "Head SHA: $HEAD_SHA"
+
+          # 提取纯 JSON 内容（若模型返回带 ```json 代码块则剥离）
+          CLEAN_JSON=$(python3 -c '
+          import sys, re, json, os
+          text = sys.stdin.read().strip()
+          m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+          if m:
+              raw = m.group(1)
+          else:
+              raw = text
+          try:
+              data = json.loads(raw)
+              print(json.dumps(data))
+          except Exception as e:
+              # 解析失败：保留原始响应到文件，方便排查
+              with open(".pr-review/raw-response.txt", "w") as rf:
+                  rf.write(text)
+              sys.stderr.write(f"::warning::AI 响应 JSON 解析失败（{e}），原始内容已写入 .pr-review/raw-response.txt\n")
+              fallback = {
+                  "summary": "审查结果解析异常，请查看原始日志（raw-response.txt）。",
+                  "verdict": "NEEDS_ATTENTION",
+                  "comments": []
+              }
+              print(json.dumps(fallback))
+          ' <<< "$RAW_RESPONSE")
+
+          echo "$CLEAN_JSON" > .pr-review/result.json
+
+          # 构造 GitHub Review API 请求负载
+          # 注意：GitHub Review API 要求 inline comment 的行号必须在该文件的 diff hunk 内；
+          # 行号越界会导致整条 Review 以 422 失败。对无效行号的批注降级为 body 文本。
+          python3 -c '
+          import json, os, sys
+
+          with open(".pr-review/result.json", "r") as f:
+              data = json.load(f)
+
+          # 从 context.md 的 [L行号] 标记中提取各文件的合法行号集合
+          valid_lines: dict[str, set[int]] = {}
+          try:
+              with open(".pr-review/context.md", "r") as cf:
+                  cur_file = None
+                  for ln in cf:
+                      ln = ln.rstrip("\n")
+                      if ln.startswith("文件: "):
+                          cur_file = ln[4:].strip()
+                          valid_lines.setdefault(cur_file, set())
+                      elif cur_file and ln.startswith("[L"):
+                          bracket = ln.index("]")
+                          try:
+                              valid_lines[cur_file].add(int(ln[2:bracket]))
+                          except ValueError:
+                              pass
+          except FileNotFoundError:
+              pass  # context.md 缺失时跳过校验，让 API 自行处理
+
+          head_sha = os.environ.get("HEAD_SHA")
+          summary = data.get("summary", "审查已完成。")
+          verdict = data.get("verdict", "PASS")
+          comments = data.get("comments", [])
+
+          body_lines = [
+              "### MipLinux PR 严格型审查结论",
+              "",
+              f"- **结论**: {verdict}",
+              f"- **概括**: {summary}",
+              f"- **Commit**: `{head_sha[:7]}`",
+              "",
+              "<!-- mipl-review: head=" + head_sha[:7] + " -->"
+          ]
+
+          review_payload = {
+              "commit_id": head_sha,
+              "body": "",  # 先占位，最后填入
+              "event": "COMMENT",
+              "comments": []
+          }
+
+          fallback_notes = []  # 行号越界的批注降级到 body
+
+          for c in comments:
+              path = c.get("path")
+              line = c.get("line")
+              start_line = c.get("start_line")
+              msg = c.get("message", "")
+              cat = c.get("category", "ENGINEERING")
+              sev = c.get("severity", "WARNING")
+              if not (path and line):
+                  continue
+              line_int = int(line)
+              # 校验行号是否在 diff 内；valid_lines 为空时跳过校验（context.md 缺失场景）
+              if valid_lines and path in valid_lines and line_int not in valid_lines[path]:
+                  fallback_notes.append(f"- **[{cat}/{sev}]** `{path}:{line_int}` {msg}")
+                  continue
+              comment_body = f"**[{cat} / {sev}]** {msg}"
+              item = {
+                  "path": path,
+                  "line": line_int,
+                  "side": "RIGHT",
+                  "body": comment_body
+              }
+              if start_line is not None:
+                  try:
+                      sl = int(start_line)
+                      if sl < line_int:
+                          item["start_line"] = sl
+                          item["start_side"] = "RIGHT"
+                  except (ValueError, TypeError):
+                      pass
+              review_payload["comments"].append(item)
+
+          if fallback_notes:
+              body_lines += ["", "---", "**⚠️ 以下批注因行号超出 diff 范围，无法贴到具体行：**", ""] + fallback_notes
+
+          review_payload["body"] = "\n".join(body_lines)
+
+          with open(".pr-review/payload.json", "w") as f:
+              json.dump(review_payload, f, indent=2)
+          '
+
+          # 提交 GitHub Review
+          gh api -X POST "repos/{owner}/{repo}/pulls/$PR/reviews" \
+            --input .pr-review/payload.json >/dev/null
+
+          echo "Review 已成功回传至 PR #$PR"
+
+          # 写入 Step Summary
+          {
+            echo "### MipLinux PR 严格型审查结果"
+            echo
+            jq -r '.body' .pr-review/payload.json
+            echo
+            echo "- **行级批注数**: $(jq ".comments | length" .pr-review/payload.json)"
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -153,7 +153,7 @@ GPL / LGPL 的义务不因“包来自 Arch 仓库”而消失。发布 ISO 或�
 
 - [ ] ISO 与装后系统都保留 `/usr/share/licenses/`（尤其 `nvidia-utils`、`nvidia-open`）。
 - [ ] `SOURCE-OFFER` 覆盖所有 GPL / LGPL 组件；`nvidia-open` 有 GPLv2 书面 offer。
-- [ ] Caelestia fork 的 `NOTICE` 与 `CONTRIBUTING` 许可段一致（GPL-3.0-only）。
+- [ ] 三个 fork 的 `NOTICE` 与 dots 的 `CONTRIBUTING` 许可段一致（GPL-3.0-only）。
 - [ ] `nvidia-utils` 未被合并进 GPL 包；安装器未把 EULA 接受设为使用 Caelestia 的前提。
 - [ ] NVIDIA 二进制未 strip / patch；包版本与许可证文件 sha256 已记录。
 - [ ] EULA 2.8 / 2.9 / 2.11 / 11–12 已由法务确认；正式发布前向 `driver-licensing@nvidia.com` 书面确认。

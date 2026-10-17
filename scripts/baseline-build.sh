@@ -962,13 +962,14 @@ fi
 # 认证让打包者 key 生效。官方钥匙环先建立信任，这个包再把 archlinuxcn 自己的
 # 钥匙环带进来 —— 是一条可查的信任链，不是「先 TrustAll 装上、再收紧」。
 # 哪天这个包换了不在官方钥匙环里的签名 key，这里会以 unknown trust 失败；
-# 那种情况要查新 key 的信任链，不能退回 TrustAll（那正是 D10 / P11 要拆的）。
+# 那种情况要查新 key 的信任链，不能退回 TrustAll（那正是 D10 / D19 要拆的）。
 #
-# 判据只看 profile 的 conf 里有没有这个源，不绑 /profile 挂载点：挂载点是可变的，
-# --baseline 用容器内原版 releng（没有这个源），自定义 --profile 才可能带它。
-# 文件先判存在：--baseline 时 archiso 还没装，releng 的 pacman.conf 这时还不存在，
-# 直接 grep 会打一行 "No such file or directory" 到构建日志里。
-if [[ -f "${PROFILE}/pacman.conf" ]] && grep -q '^\[archlinuxcn\]' "${PROFILE}/pacman.conf"; then
+# 判据用 pacman 自己解析出来的仓库列表，不能只 grep 顶层 conf：自定义 profile
+# 可以把 [archlinuxcn] 放进被 Include 的文件里。也不绑 /profile 挂载点：
+# 挂载点是可变的，--baseline 用容器内原版 releng（没有这个源）。
+# 文件先判存在：--baseline 时 archiso 还没装，releng 的 pacman.conf 这时还不存在。
+if [[ -f "${PROFILE}/pacman.conf" ]] && \
+   pacman-conf --config "${PROFILE}/pacman.conf" --repo-list | grep -qx 'archlinuxcn'; then
   echo "==> 导入 archlinuxcn 钥匙串"
   # 用 profile 自己的 conf 取包：仓库地址与 SigLevel 就是构建时 pacstrap 用的
   # 那一份，脚本里不再抄第二份 Server 列表。
@@ -1200,13 +1201,14 @@ step_enter() {
   #   diff -r --no-dereference ${PROFILE_INNER} ${BASELINE_PROFILE}"
       # 手动 mkarchiso 走的是和 --auto 同一条 pacstrap：profile 带 [archlinuxcn]
       # 又要求验签时，不先把这个钥匙环装进容器就会以 PGP 错误失败。
-      if [[ -f "${PROFILE_HOST}/pacman.conf" ]] && \
-         grep -q '^\[archlinuxcn\]' "${PROFILE_HOST}/pacman.conf"; then
-        hint_cn="# 这个 profile 带 [archlinuxcn]：先把 cn 钥匙环装进容器 ——
-  # 仓库 profile 现在要求验签，缺 key 会让 pacstrap 拉 cn 包时报 PGP 错误
-  pacman -Sy --needed --config ${PROFILE_INNER}/pacman.conf archlinuxcn-keyring
-  pacman-key --populate archlinuxcn"
-      fi
+      # 探测放到容器里做：pacman-conf 会解析 Include，而宿主机不一定是 Arch，
+      # 也不一定解析得了 profile 里的容器路径。
+      hint_cn="# 这个 profile 带 [archlinuxcn] 时（含 Include 进来的），先把 cn 钥匙环装进容器：
+  # 仓库 profile 要求验签，缺 key 会让 pacstrap 拉 cn 包时报 PGP 错误
+  if pacman-conf --config ${PROFILE_INNER}/pacman.conf --repo-list | grep -qx archlinuxcn; then
+    pacman -Sy --needed --config ${PROFILE_INNER}/pacman.conf archlinuxcn-keyring
+    pacman-key --populate archlinuxcn
+  fi"
     else
       hint_profile="$BASELINE_PROFILE"
       hint_note="# 构建。这次用容器自带的原版 releng（没有挂载 profile）"

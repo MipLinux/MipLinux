@@ -105,7 +105,7 @@ Arch 的 `libqalculate` 元数据写 **GPL-2.0-only**；如果按字面理解，
 Caelestia 由三部分组成：MipLinux/Caelestia-dotfiles 的 dotfiles fork、MipLinux/Caelestia-shell、MipLinux/Caelestia-cli。
 三个 fork 均以 GPL-3.0-only 分发；Quickshell 是 LGPL-3.0；Qt6 是 LGPL-3.0。它们与 GPL 兼容，但仍有源码与通知义务：
 
-- 三个 fork 的 `main` 跟踪上游；MipLinux 改动放 `mip` 分支 / tag，发布时记录上游 base commit。
+- 三个 fork 的 `main` 跟踪上游，只保留最小的 MipLinux 文档 / 许可声明；功能改动放 `mip` 分支 / tag，发布时记录上游 base commit。
   dots / shell / cli 与 Quickshell 的 pin 一起对齐，不单独升级其中一个。
 - 保留各仓库的 `LICENSE`、版权声明与 `NOTICE`；修改过的文件标明 MipLinux 的改动。
 - 发布 ISO / 二进制包时，提供对应 commit / tag 的源码与构建脚本（CMake、PKGBUILD、QML 资源）。

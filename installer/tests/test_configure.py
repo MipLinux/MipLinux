@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -119,6 +120,42 @@ class TestStaticFiles(unittest.TestCase):
                 configure.write_static_files(runner, TargetConfig(target=tmp), ROOT_UUID, ESP_UUID)
             self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
 
+    def test_locale_failure_does_not_write_static_files(self):
+        for content in (None, "#en_US.UTF-8 UTF-8\n"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
+                etc = Path(tmp) / "etc"
+                etc.mkdir()
+                hostname = etc / "hostname"
+                hostname.write_text("keep-me\n")
+                if content is not None:
+                    (etc / "locale.gen").write_text(content)
+                runner = FakeRunner()
+                with self.assertRaises(InstallerError) as ctx:
+                    configure.write_static_files(runner, TargetConfig(target=tmp), ROOT_UUID, ESP_UUID)
+                self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+                self.assertEqual(hostname.read_text(), "keep-me\n")
+                self.assertFalse((etc / "fstab").exists())
+                self.assertFalse(runner.history)
+
+    def test_localtime_replaces_directory_symlink(self):
+        class LinkRunner(FakeRunner):
+            def run(self, argv, **kwargs):
+                super().run(argv, **kwargs)
+                if argv[0] == "ln":
+                    subprocess.run(argv, check=True, capture_output=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "etc").mkdir()
+            (root / "etc/locale.gen").write_text("#zh_CN.UTF-8 UTF-8\n")
+            old = root / "old-zoneinfo"
+            old.mkdir()
+            localtime = root / "etc/localtime"
+            localtime.symlink_to(old, target_is_directory=True)
+            configure.write_static_files(LinkRunner(), TargetConfig(target=tmp), ROOT_UUID, ESP_UUID)
+            self.assertEqual(str(localtime.readlink()), "/usr/share/zoneinfo/Asia/Shanghai")
+            self.assertEqual(list(old.iterdir()), [])
+
 
 class TestFontsConf(unittest.TestCase):
     FALLBACK = """<?xml version="1.0"?>\n<fontconfig>\n</fontconfig>\n"""
@@ -179,6 +216,62 @@ class TestChrootSteps(unittest.TestCase):
         keyring = Path(tmp) / configure.ARCHLINUXCN_KEYRING
         keyring.parent.mkdir(parents=True, exist_ok=True)
         keyring.write_text("", encoding="utf-8")
+
+    def test_invalid_passwords_fail_before_any_command(self):
+        for bad in ("", "example\nextra", "example\rextra", "example\x00extra"):
+            for root in (False, True):
+                with self.subTest(root=root, bad=repr(bad)):
+                    runner = FakeRunner()
+                    with self.assertRaises(InstallerError) as ctx:
+                        configure.run_in_chroot(runner, TargetConfig(), "valid" if root else bad,
+                                                bad if root else None)
+                    self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+                    self.assertEqual(runner.history, [])
+                    if bad:
+                        self.assertNotIn(bad, str(ctx.exception))
+
+    def test_configure_entry_rejects_invalid_password_before_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeRunner()
+            with self.assertRaises(InstallerError):
+                configure.configure_system(runner, TargetConfig(target=tmp), root_uuid=ROOT_UUID,
+                                           esp_uuid=ESP_UUID, password="bad\nvalue")
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+            self.assertEqual(runner.history, [])
+
+    def test_retry_after_late_failure_reuses_install_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            passwd = Path(tmp) / "etc/passwd"
+            passwd.parent.mkdir()
+            runner = FakeRunner(outputs=dict(self.PASSWD_OK))
+            original_run = runner.run
+
+            def run(argv, **kwargs):
+                result = original_run(argv, **kwargs)
+                if "useradd" in argv:
+                    passwd.write_text("mipl:x:1000:1000::/home/mipl:/bin/bash\n")
+                return result
+
+            runner.run = run
+            runner.fail_patterns.add("mkinitcpio -P")
+            with self.assertRaises(InstallerError):
+                configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
+            runner.fail_patterns.clear()
+            configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
+            self.assertEqual(len(runner.find("useradd")), 1)
+            self.assertEqual(len(runner.find("usermod -a -G wheel")), 1)
+            self.assertEqual(len(runner.find("mkinitcpio -P")), 2)
+
+    def test_existing_system_account_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.plant_keyring(tmp)
+            (Path(tmp) / "etc").mkdir()
+            (Path(tmp) / "etc/passwd").write_text("mipl:x:0:0::/root:/bin/bash\n")
+            runner = FakeRunner()
+            with self.assertRaises(InstallerError):
+                configure.run_in_chroot(runner, TargetConfig(target=tmp), "valid")
+            self.assertEqual(runner.history, [])
 
     def test_order_and_password_on_stdin(self):
         runner = FakeRunner(outputs=dict(self.PASSWD_OK))
@@ -241,6 +334,7 @@ class TestChrootSteps(unittest.TestCase):
             self.plant_keyring(tmp)
             configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
         self.assertNotIn("passwd -S root", "\n".join(runner.commands()))
+        runner.assert_ran(self, "passwd -l root")
         self.assertIn("root", reporter.text())
         self.assertIn("锁定", reporter.text())
 
@@ -253,6 +347,7 @@ class TestChrootSteps(unittest.TestCase):
                 configure.run_in_chroot(runner, TargetConfig(target=tmp), "s3cret")
             self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
             self.assertIn("archlinuxcn", str(ctx.exception))
+            self.assertEqual(runner.history, [])
 
     def test_dry_run_previews_populate_without_the_keyring_file(self):
         # dry-run 的目标是「预览命令序列」，盘上自然没有 pacstrap 的产物

@@ -311,7 +311,8 @@ class TestLogLocations(unittest.TestCase):
         """**回归测试**：失败收尾先卸载目标，`target/var/log/…` 就不再是文件了。
 
         只按「文件在不在」判断，会把唯一活过重启的那份日志漏报 —— 而它正是
-        出事时最该看的那一份。挂上过就在 reporter 上留了路径。
+        出事时最该看的那一份。挂上过就在 reporter 上留了路径，`run_install()`
+        再把它抄到 args 上传给 `log_locations()`（签名不改，#151）。
         """
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "mnt"
@@ -326,11 +327,33 @@ class TestLogLocations(unittest.TestCase):
                 dest = target / pipeline.TARGET_LOG_NAME
                 self.assertTrue(dest.is_file())
                 shutil.rmtree(target)       # 卸载之后：路径记着，文件看不见
-                locations = cli.log_locations(self._args(log=None, target=str(target)), reporter)
+                args = self._args(log=None, target=str(target))
+                args.target_log_path = reporter.target_log_path
+                locations = cli.log_locations(args)
             finally:
                 reporter.close()
         self.assertEqual(len(locations), 1)
         self.assertIn("重启后仍在", locations[0])
+
+    def test_run_install_hands_the_attached_path_to_log_locations(self):
+        """**回归测试**：`run_install()` 要把 reporter 上那条记录交给 args。
+
+        这条钉的是那一层交接 —— 只改 `log_locations()` 自己的话，失败收尾里
+        「目标盘那份」照样会漏报（`args.target_log_path` 永远不存在）。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "var" / "log" / "mipl-installer-install.log"
+
+            def fake_run(plan, reporter, **kwargs):
+                reporter.target_log_path = str(dest)
+                raise InstallerError("装包失败", util.EXIT_PACKAGES)
+
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(cli.pipeline, "run", side_effect=fake_run), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--disk", "/dev/vda", "--yes", "--dry-run"])
+        self.assertEqual(code, util.EXIT_PACKAGES)
+        self.assertIn(str(dest), out.getvalue() + err.getvalue())
 
 
 if __name__ == "__main__":

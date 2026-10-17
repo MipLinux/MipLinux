@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -293,6 +296,33 @@ class TestStreamedOutput(unittest.TestCase):
         self.runner.run(["cat"], input="pw\n")
         self.assertEqual(self.reporter.notes, ["pw"])
 
+    def test_a_large_stdin_does_not_deadlock_against_the_output(self):
+        """**回归测试**（A5）：读线程必须先起，再写 stdin。
+
+        子进程边读边回显、两个方向都超过管道缓冲区时，旧实现先
+        `proc.stdin.write()` 再起读线程：父进程卡在写 stdin，子进程卡在写 stdout，
+        两边互相等死 —— 而且 `timeout` 管不到这一步（它包着的是 `wait()`），
+        实机上就是安装永久停在一行输出上。这里一次运 1 MiB（远超默认管道缓冲）。
+
+        外层 SIGALRM 只是兜底：实现退回去的话，这条用例**失败**而不是挂住整个套件。
+        """
+        payload = ("x" * 1023 + "\n") * 1024         # 1 MiB
+        lines: list[str] = []
+
+        def deadlocked(*_args: object) -> None:
+            raise TimeoutError("写 stdin 与读 stdout 互相等死了")
+
+        previous = signal.signal(signal.SIGALRM, deadlocked)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 30)
+            self.runner.run(["sh", "-c", "cat"], input=payload,
+                            on_line=lines.append, timeout=30)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertEqual(len(lines), 1024)
+        self.assertEqual(sum(len(line) for line in lines), 1024 * 1023)
+
 
 class TestTimeout(unittest.TestCase):
     """碰固件 NVRAM 的命令能沉默地挂几十分钟：超时必须有，且带着 reason 走退路。"""
@@ -377,6 +407,34 @@ class TestProcessGroupOnTimeout(unittest.TestCase):
             self.assertFalse(self.runner.attempt(self._deferred_write(marker), timeout=0.2))
             self._assert_nothing_wrote_late(marker)
 
+    def test_the_terminate_grace_covers_the_whole_group_not_just_the_leader(self):
+        """**回归测试**：SIGTERM 的宽限要给整组，不是只看组长。
+
+        包装器（`pacstrap` / `arch-chroot`）收到 SIGTERM 会立刻退出；旧实现等的是
+        `proc.wait()`（只等组长），组长一退就马上 `SIGKILL` 整组 —— 真正干活的
+        `pacman` 拿不到 docstring 承诺的收尾时间，释放 `/var/lib/pacman/db.lck`
+        正是在收尾里。这里让组长秒退、后代忽略 SIGTERM 再用 0.4s 写标记：宽限只看
+        组长的话，标记永远写不出来（旧实现会在几毫秒内把它杀掉）。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "cleaned"
+            helper = Path(tmp) / "slow_cleanup.py"
+            helper.write_text(
+                "import signal, sys, time, pathlib\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "time.sleep(0.4)\n"
+                "pathlib.Path(sys.argv[1]).write_text('cleaned')\n",
+                encoding="utf-8",
+            )
+            argv = ["sh", "-c",
+                    f"( {shlex.quote(sys.executable)} {shlex.quote(str(helper))} "
+                    f"{shlex.quote(str(marker))} ) & wait"]
+            with self.assertRaises(InstallerError) as ctx:
+                self.runner.run(argv, timeout=0.25)
+            self.assertEqual(ctx.exception.reason, "timeout")
+            self.assertTrue(marker.exists(),
+                            "组长一退就 SIGKILL 了整组 —— 真正干活的进程没拿到那 0.5s 收尾")
+
 
 class TestStreamedReader(unittest.TestCase):
     """读线程自己的边界：后代握着管道不许把安装挂死，回调的异常不许被线程吞掉。"""
@@ -415,6 +473,23 @@ class TestStreamedReader(unittest.TestCase):
         """**回归测试**：EOF 时被切开的多字节字符不许悄悄丢掉。"""
         self.runner.run(["sh", "-c", r"printf '\344\270'"])
         self.assertEqual(self.reporter.notes, ["\ufffd"])
+
+    def test_a_reader_that_cannot_start_still_takes_the_child_down(self):
+        """**回归测试**（安全评审）：读线程起不来时，子进程也不许留在那儿跑。
+
+        线程创建失败（资源耗尽），或中断正好落在 `start()` 上时，子进程已经
+        spawn 出来了 —— 收尾必须从这一步就开始，否则它带着整组命令逃出这次安装。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            argv = ["sh", "-c", f"(sleep 1; printf late > {marker}) & sleep 30"]
+            with mock.patch.object(threading.Thread, "start",
+                                   side_effect=RuntimeError("起不了线程")):
+                with self.assertRaises(RuntimeError):
+                    self.runner.run(argv)
+            time.sleep(1.1)
+            self.assertFalse(marker.exists(),
+                             f"读线程起不来，子进程却活着写了 {marker}")
 
 
 class TestInterruptStopsTheCommand(unittest.TestCase):
@@ -463,6 +538,19 @@ class TestInterruptStopsTheCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "late"
             self._run_interrupted(self._deferred_write(marker), capture=True)
+            self._assert_nothing_wrote_late(marker)
+
+    def test_interrupt_during_stdin_delivery_takes_the_child_down(self):
+        """**回归测试**：卡在写 stdin 上的中断也要收整组。
+
+        子进程不读 stdin 时，`proc.stdin.write()` 写到管道满就阻塞 —— 旧实现的
+        收尾从 `wait()` 才开始，中断落在这一句上时子进程留在自己的会话里继续跑；
+        收尾卸载目标时它还在往盘上写。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            argv = ["sh", "-c", f"(sleep 1; printf late > {marker}) & sleep 30"]
+            self._run_interrupted(argv, input="x" * (1024 * 1024))   # 远大于管道缓冲
             self._assert_nothing_wrote_late(marker)
 
 

@@ -238,7 +238,8 @@ def preflight(plan: Plan) -> None:
 
     阶段列表也在这里查：`Plan` 是公开接口（CLI 与前端共用），`steps` 不一定
     经过 `parse_steps()`。一个拼错的阶段名原来会在 `STEP_TOOLS[step]` 处冒
-    `KeyError`；一个重复的 `disk` 会把盘**擦两遍** —— 都必须在碰盘之前拒绝。
+    `KeyError`；一个重复的 `disk` 会把盘**擦两遍**；一个乱序的列表会让
+    `packages` 装进还没挂载的目录 —— 都必须在碰盘之前拒绝。
     """
     _validate_steps(plan.steps)
     configure.validate_user(plan.user)
@@ -253,7 +254,13 @@ def preflight(plan: Plan) -> None:
 
 
 def _validate_steps(steps: tuple[str, ...]) -> None:
-    """`Plan.steps` 必须是 `STEP_ORDER` 的子集、不重复、不为空。"""
+    """`Plan.steps` 必须是 `STEP_ORDER` 的子集、不重复、不为空、按依赖顺序。
+
+    顺序也在这里查，不是多余：`parse_steps()` 会排好序，但 `Plan` 是公开接口，
+    `steps` 不一定经过它。`("packages", "disk")` 这种列表在 `run()` 里就按原样执行 ——
+    `pacstrap` 会装进还没挂上的 Live 侧空目录，`boot` 拿到的是占位 UUID，然后
+    `disk` 再把盘擦一遍。拒绝乱序比在 `run()` 里悄悄重排好：调用方的错要当场看见。
+    """
     steps = tuple(steps)
     if not steps:
         raise InstallerError("一个阶段都没选", EXIT_USAGE,
@@ -268,6 +275,13 @@ def _validate_steps(steps: tuple[str, ...]) -> None:
             f"阶段重复：{'、'.join(repeated)}",
             EXIT_USAGE,
             hint="每个阶段只能跑一次 —— 重复的 disk 会把盘擦两遍，一个字节都还没动",
+        )
+    expected = tuple(step for step in STEP_ORDER if step in steps)
+    if steps != expected:
+        raise InstallerError(
+            f"阶段顺序不对：{'、'.join(steps)}",
+            EXIT_USAGE,
+            hint=f"必须按依赖顺序：{'、'.join(expected)}",
         )
 
 

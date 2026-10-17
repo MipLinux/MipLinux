@@ -277,16 +277,34 @@ class Runner:
         这一条（`timeout=0.15s` 返回后标记文件随后出现）。
 
         先 SIGTERM 给一次收尾机会，过 `TERMINATE_GRACE_SECONDS` 再 SIGKILL 兜底。
-        组长可能已经先退出了，但组号只要还有组员就仍然有效。
+        组长可能已经先退出了，但组号只要还有组员就仍然有效 —— 所以宽限期内看的是
+        **整组还有没有进程**，不是只看组长。`pacstrap` / `arch-chroot` 这类包装器
+        收到 SIGTERM 会立刻退出；只对组长 `wait()` 的话，真正干活的 `pacman` /
+        `bootctl` 会在几毫秒后吃到 SIGKILL —— 来不及释放 `/var/lib/pacman/db.lck`
+        这类东西，续跑就被自己的锁拦在门外。
+
+        组长每轮都要 `wait()` 回收：留着僵尸组长，`killpg(pid, 0)` 会一直报「组还在」，
+        宽限期就变成固定的 `TERMINATE_GRACE_SECONDS` 硬等。
         """
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except (ProcessLookupError, OSError):
             return
-        try:
-            proc.wait(timeout=TERMINATE_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        while True:
+            try:
+                proc.wait(timeout=0.05)      # 回收组长，免得僵尸组长让组一直「存在」
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(proc.pid, 0)       # 组里还有活着的成员吗
+            except ProcessLookupError:
+                return                       # 整组都已退出，不必 SIGKILL
+            except OSError:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, OSError):
@@ -406,23 +424,39 @@ class Runner:
 
         # 先起读线程再写 stdin（见 docstring 里「两个方向互相等死」那一条）
         reader = threading.Thread(target=pump, daemon=True)
-        reader.start()
-
-        if input is not None and proc.stdin is not None:
-            try:
-                proc.stdin.write(input)
-            except OSError:
-                pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
-            try:
-                proc.stdin.close()
-            except OSError:
-                pass
+        try:
+            reader.start()
+        except BaseException:
+            # 线程起不来（资源耗尽，或中断正好落在 start 上）：子进程已经在跑了，
+            # 不在这里收掉，它就会带着整组命令逃出这次安装。
+            self._terminate_process_group(proc)
+            proc.wait()
+            self._close_pipes(proc)
+            raise
 
         try:
+            if input is not None and proc.stdin is not None:
+                try:
+                    proc.stdin.write(input)
+                except OSError:
+                    pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
             if timeout is not None:
                 proc.wait(timeout=timeout)
             else:
                 proc.wait()
+
+            # 直接子进程已经退出。正常命令这时读线程也到 EOF 了（毫秒级）；若某个
+            # 后代还握着 stdout（`cmd &`），它会一直等 —— 再等就是替那个后代陪葬。
+            # 给一小段收尾宽限，之后收掉整组，让读线程随管道 EOF 结束。
+            reader.join(DRAIN_GRACE_SECONDS)
+            if reader.is_alive():
+                self._terminate_process_group(proc)
+                reader.join(5)
         except subprocess.TimeoutExpired:
             self._terminate_process_group(proc)
             proc.wait()
@@ -431,21 +465,21 @@ class Runner:
                 raise errors[0]
             raise self._timeout_error(argv, timeout, exit_code)
         except BaseException:
-            # Ctrl-C / 进程被信号打断：子进程自己开了新会话，终端上的 SIGINT
-            # 到不了它 —— 不在这里收掉，收尾卸载目标时 `pacstrap` / `mkfs`
-            # 还在往那块盘上写。
+            # Ctrl-C / 进程被信号打断 —— **包括卡在写 stdin 的时候**（`input` 比
+            # 管道缓冲大、子进程又不读 stdin 时，那一写会一直阻塞）。子进程自己
+            # 开了新会话，终端上的 SIGINT 到不了它 —— 不在这里收掉，收尾卸载目标
+            # 时 `pacstrap` / `mkfs` 还在往那块盘上写。
             self._terminate_process_group(proc)
             proc.wait()
+            # 写到一半被打断时 stdin 还开着。子进程已经收掉，这一关不会卡在写满
+            # 的管子上（读端没了，flush 直接 EPIPE）；不关就漏一个描述符。
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
             reader.join(5)
             raise
-
-        # 直接子进程已经退出。正常命令这时读线程也到 EOF 了（毫秒级）；若某个后代
-        # 还握着 stdout（`cmd &`），它会一直等 —— 再等就是替那个后代陪葬。给一小段
-        # 收尾宽限，之后收掉整组，让读线程随管道 EOF 结束。
-        reader.join(DRAIN_GRACE_SECONDS)
-        if reader.is_alive():
-            self._terminate_process_group(proc)
-            reader.join(5)
         if errors:
             raise errors[0]
         return proc

@@ -145,17 +145,27 @@ jobs:
           for c in comments:
               path = c.get("path")
               line = c.get("line")
+              start_line = c.get("start_line")
               msg = c.get("message", "")
               cat = c.get("category", "ENGINEERING")
               sev = c.get("severity", "WARNING")
               if path and line:
                   comment_body = f"**[{cat} / {sev}]** {msg}"
-                  review_payload["comments"].append({
+                  item = {
                       "path": path,
                       "line": int(line),
                       "side": "RIGHT",
                       "body": comment_body
-                  })
+                  }
+                  if start_line is not None:
+                      try:
+                          sl = int(start_line)
+                          if sl < int(line):
+                              item["start_line"] = sl
+                              item["start_side"] = "RIGHT"
+                      except (ValueError, TypeError):
+                          pass
+                  review_payload["comments"].append(item)
 
           with open(".pr-review/payload.json", "w") as f:
               json.dump(review_payload, f, indent=2)

@@ -52,7 +52,8 @@ tags: [work, review, rubric, code, deepseek]
   "comments": [
     {
       "path": "相对仓库根目录的文件路径",
-      "line": 42,
+      "line": 130,
+      "start_line": 129,
       "category": "REDLINE | ENGINEERING",
       "severity": "ERROR | WARNING | INFO",
       "message": "问题描述及修复建议（≤ 80 字）"
@@ -61,5 +62,7 @@ tags: [work, review, rubric, code, deepseek]
 }
 ```
 
+- `line`：目标行号，或多行代码圈选区间的结束行号（必填，整数）。
+- `start_line`：多行代码圈选区间的起始行号（可选，整数；当问题涉及多行连续代码段时填写，必须满足 `start_line < line`；单行问题省略）。
 - 若代码完全合规，`verdict` 为 `"PASS"`，`comments` 必须为 `[]`（空数组）。
 - 仅当发现实际违规或潜在隐患时，`comments` 才添加对象。

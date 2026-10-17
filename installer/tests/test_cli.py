@@ -295,7 +295,8 @@ class TestLogLocations(unittest.TestCase):
             locations = cli.log_locations(self._args(log=str(live), target=str(target)))
             self.assertEqual(len(locations), 2)
             self.assertTrue(any("重启即没" in item for item in locations))
-            self.assertTrue(any("重启后仍在" in item for item in locations))
+            self.assertTrue(any("装好的系统里是 /var/log/mipl-installer-install.log" in item
+                                for item in locations))
 
     def test_target_copy_alone_is_enough(self):
         """没给 `--log`（JSON 事件流也行）时，目标盘那份照样要报出来。"""
@@ -305,7 +306,8 @@ class TestLogLocations(unittest.TestCase):
             (target / pipeline.TARGET_LOG_NAME).write_text("x", encoding="utf-8")
             locations = cli.log_locations(self._args(log=None, target=str(target)))
             self.assertEqual(len(locations), 1)
-            self.assertIn("重启后仍在", locations[0])
+            self.assertIn("现在可读", locations[0])
+            self.assertIn("/var/log/mipl-installer-install.log", locations[0])
 
     def test_the_target_copy_survives_the_unmount_that_hides_it(self):
         """**回归测试**：失败收尾先卸载目标，`target/var/log/…` 就不再是文件了。
@@ -333,7 +335,8 @@ class TestLogLocations(unittest.TestCase):
             finally:
                 reporter.close()
         self.assertEqual(len(locations), 1)
-        self.assertIn("重启后仍在", locations[0])
+        self.assertIn("重新挂载目标盘后可读", locations[0])
+        self.assertIn("/var/log/mipl-installer-install.log", locations[0])
 
     def test_run_install_hands_the_attached_path_to_log_locations(self):
         """**回归测试**：`run_install()` 要把 reporter 上那条记录交给 args。

@@ -182,6 +182,9 @@ class Runner:
         timeout 给了就超时杀进程并抛 `reason="timeout"` 的 `InstallerError` ——
         给**会去碰固件 NVRAM 的命令**用的：固件变量存储卡住时那些命令能沉默地
         挂几十分钟（实机教训：引导阶段挂 40 分钟），安装器不该陪着等。
+        **超时覆盖整条命令**，包括把 `input` 写进 stdin 的那一段：子进程不读 stdin
+        时，那一写会卡在写满的管道上 —— 写在主线程里的话 `wait(timeout=…)` 根本
+        没机会开始计时（评审指出）。流式路径的写因此交给线程。
         **杀的是整组进程，不只是直接子进程**：`arch-chroot` / `stdbuf` 这类包装器
         下面干活的进程、以及它们再生的后代，全在同一个会话里（`start_new_session`）——
         只杀包装器会留下一群还在写盘 / 还在碰 NVRAM 的孤儿，超时返回后它们与
@@ -333,7 +336,7 @@ class Runner:
                       on_line: Callable[[str], None] | None = None):
         """跑一条命令，输出逐行（清洗后）转发给 reporter。
 
-        七条纪律：
+        八条纪律：
 
         * **不继承 stdout**：mke2fs / pacman 的进度条、mkinitcpio 的旁白是给终端看的，
           直接流进本进程的 stdout，在界面下会把 JSON 事件流冲成满屏「后端输出无法解析」，
@@ -352,6 +355,9 @@ class Runner:
         * **读线程先起，再写 stdin**：子进程可能先吐一屏输出才来读 stdin；输出管
           写满后它就不会来读 stdin，父进程又卡在写 stdin 上 —— 两个方向互相等死。
           先起读线程，这条路就不存在。
+        * **写 stdin 也交给线程**：子进程根本不读 stdin 时，大段输入会卡在写满的
+          管道上。写在主线程里，超时与中断都要等这一写返回才轮得到 —— 写线程让
+          `wait(timeout=…)` 照常计时，收整组之后写端拿到 EPIPE，线程自己退出。
         * **整组进程归这里管**：子进程用 `start_new_session=True` 启动。超时、或
           直接子进程退出后仍有后代握着 stdout（`cmd &`）时，收的是整组，不是只收
           那一个包装器 —— 后者会留下继续写盘的后代（#151 跨线发现）。
@@ -434,16 +440,27 @@ class Runner:
             self._close_pipes(proc)
             raise
 
+        #: 写 stdin 的线程。写必须离开主线程：子进程不读 stdin 时，写满管道后
+        #: `write()` 会一直阻塞，`wait(timeout=…)` 根本没机会开始计时 —— 那样
+        #: `timeout` 就只覆盖了「等进程」，没覆盖「喂输入」。
+        writer: threading.Thread | None = None
+
+        def feed_stdin(stdin, text: str) -> None:
+            try:
+                stdin.write(text)
+            except (OSError, ValueError):
+                pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
+            finally:
+                try:
+                    stdin.close()
+                except (OSError, ValueError):
+                    pass
+
         try:
             if input is not None and proc.stdin is not None:
-                try:
-                    proc.stdin.write(input)
-                except OSError:
-                    pass  # 子进程没读完就退了：退出码自会说话，别在这儿炸
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
+                feed = threading.Thread(target=feed_stdin, args=(proc.stdin, input), daemon=True)
+                feed.start()
+                writer = feed
 
             if timeout is not None:
                 proc.wait(timeout=timeout)
@@ -457,28 +474,39 @@ class Runner:
             if reader.is_alive():
                 self._terminate_process_group(proc)
                 reader.join(5)
+            # 写线程同理：子进程退了但没读完 stdin 的话，写端会拿到 EPIPE 自己
+            # 结束；还活着的唯一原因是某个后代攥着 stdin 读端不肯放 —— 收整组。
+            if writer is not None:
+                writer.join(DRAIN_GRACE_SECONDS)
+                if writer.is_alive():
+                    self._terminate_process_group(proc)
+                    writer.join(5)
         except subprocess.TimeoutExpired:
             self._terminate_process_group(proc)
             proc.wait()
             reader.join(5)
+            if writer is not None:
+                writer.join(5)      # 整组收掉之后写端拿到 EPIPE，线程自己退出
             if errors:
                 raise errors[0]
             raise self._timeout_error(argv, timeout, exit_code)
         except BaseException:
-            # Ctrl-C / 进程被信号打断 —— **包括卡在写 stdin 的时候**（`input` 比
-            # 管道缓冲大、子进程又不读 stdin 时，那一写会一直阻塞）。子进程自己
-            # 开了新会话，终端上的 SIGINT 到不了它 —— 不在这里收掉，收尾卸载目标
-            # 时 `pacstrap` / `mkfs` 还在往那块盘上写。
+            # Ctrl-C / 进程被信号打断 —— 卡在写 stdin 上的那种也在内（写由写线程
+            # 负责，主线程收掉整组之后它拿到 EPIPE 就退）。子进程自己开了新会话，
+            # 终端上的 SIGINT 到不了它 —— 不在这里收掉，收尾卸载目标时
+            # `pacstrap` / `mkfs` 还在往那块盘上写。
             self._terminate_process_group(proc)
             proc.wait()
-            # 写到一半被打断时 stdin 还开着。子进程已经收掉，这一关不会卡在写满
-            # 的管子上（读端没了，flush 直接 EPIPE）；不关就漏一个描述符。
-            if proc.stdin is not None:
+            reader.join(5)
+            if writer is not None:
+                writer.join(5)
+            elif proc.stdin is not None:
+                # 写线程没起来（`start()` 自己失败）：stdin 还是本进程的句柄，
+                # 子进程已经收掉，这一关不会卡在写满的管子上。
                 try:
                     proc.stdin.close()
-                except OSError:
+                except (OSError, ValueError):
                     pass
-            reader.join(5)
             raise
         if errors:
             raise errors[0]

@@ -134,7 +134,15 @@ jobs:
           # 判断类任务压温度：同一份正文跑三次，档位不该变
           temperature: '0.2'
           # 默认 1000 会把复核意见截断；篇幅上限在 rubric 第十节，这里只是别在写成之前被截断。
-          max_tokens: '10000'
+          #
+          # 取官方 thinking 模式的默认值 64K，**不自造数字**（上下限 1..384K，见
+          # https://api-docs.deepseek.com/api/create-chat-completion 的 max_tokens）。
+          # 原来的 10000 比官方默认还低，而推理与正文**共用**这个预算：
+          # 2026-10-16 PR #160 实测——completion=10000 全是 reasoning_tokens，
+          # `--- LLM Response ---` 与 `--- End Response ---` 之间是空的，
+          # 随后被 [ -n "$SEMANTIC" ] 判红；重任务（8 条判据、5 条未命中）第一次就撞上。
+          # 上限仍由 API 兜底（超上限会被拒），不是「写得越长越好」。
+          max_tokens: '65536'
           # 必须是**容器内**的工作区挂载点（Docker action 的 WORKDIR 是 /app）
           system_prompt: 'file:///github/workspace/docs/work/ai-review-rubric.md'
           input_prompt: 'file:///github/workspace/.pr-acceptance/context.md'

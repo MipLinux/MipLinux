@@ -121,7 +121,12 @@ def unmount_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> dict:
 
     回 `{ok, mounted}`：卸完**再看一眼**目标路径还在不在挂载表里。说「卸好了」而
     实际还挂着，用户点第二次还是失败，而他会以为是按钮坏了。
+
+    动手前照样过 `options.validate_target()`：`target` 最终会变成 `umount -R <target>`
+    的实参，一个 `/` 或 `/mnt` 会让这一下卸掉整台机器 —— 校验在安装路径上有
+    `preflight()` 兜着，这个出口得自己兜（与 `--target` 的校验同一条规则）。
     """
+    options.validate_target(target)
     disk.unmount_target(runner, target)
     if runner.dry_run:
         return {"ok": True, "mounted": True}

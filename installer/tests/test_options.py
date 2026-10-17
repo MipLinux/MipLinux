@@ -73,6 +73,15 @@ class TestTimezones(_RootCase):
         """读不到就空着 —— 内建一份名单会掩盖「这个环境列不出来」。"""
         self.assertEqual(options.timezones(str(self.root)), [])
 
+    def test_undecodable_tab_is_empty_not_a_traceback(self):
+        """表在、但解不出 UTF-8：与读不到同一种结果。
+
+        外面只接得住 `InstallerError`；让 `UnicodeDecodeError` 冒出去，
+        `--print-timezones` 就会摔一个 traceback 而不是空名单 + 一句人话。
+        """
+        (self.root / "zone1970.tab").write_bytes(b"\xff\xfe\x00garbage")
+        self.assertEqual(options.timezones(str(self.root)), [])
+
 
 class TestZoneOffset(_RootCase):
     JANUARY = datetime(2024, 1, 15, 12, 0, tzinfo=dt_timezone.utc)
@@ -122,6 +131,17 @@ class TestKeymaps(_RootCase):
     def test_missing_root_is_an_empty_list(self):
         self.assertEqual(options.keymaps(str(self.root / "nope")), [])
 
+    def test_only_names_that_can_go_into_vconsole_conf_are_listed(self):
+        """名单里的每个名字都会被原样写进 `KEYMAP=`。
+
+        `.map.gz`（切出空串）与带空白的 basename 都不是 `vconsole.conf` 收的值：
+        列出来就是让人选一个写进去不生效的名字。
+        """
+        self._map("us.map.gz")
+        self._map(".map.gz")
+        self._map("weird name.map.gz")
+        self.assertEqual(options.keymaps(str(self.root)), ["us"])
+
 
 class TestLocales(_RootCase):
     def test_takes_field_one_of_each_non_comment_line(self):
@@ -136,6 +156,12 @@ class TestLocales(_RootCase):
 
     def test_missing_file_is_an_empty_list(self):
         self.assertEqual(options.locales(str(self.root / "SUPPORTED")), [])
+
+    def test_undecodable_file_is_empty_not_a_traceback(self):
+        """与 `timezones()` 同一条：解不出来 = 列不出名单，不能把异常漏出去。"""
+        path = self.root / "SUPPORTED"
+        path.write_bytes(b"zh_CN.UTF-8 UTF-8\n\xff\xfe\x00")
+        self.assertEqual(options.locales(str(path)), [])
 
 
 class TestValidateTarget(unittest.TestCase):
@@ -188,8 +214,22 @@ class TestValidators(_RootCase):
         options.validate_keymap("us", str(self.root))                  # 名单里有，不该抛
 
     def test_keymap_skips_when_the_root_is_missing(self):
-        """**故意的**：没装 kbd 的环境里无从判断，名单在、名字不在才要拦（Issue #64）。"""
+        """**故意的**：没装 kbd 的环境里列不出名单，形状对的名字照旧放行（Issue #64）。"""
         options.validate_keymap("teapot", str(self.root / "nope"))
+
+    def test_keymap_falls_back_to_shape_when_the_list_is_unreadable(self):
+        """名单读不到时不装作能判断，但也不放垃圾过去（与 `validate_locale` 同形）。
+
+        漏了这一关，空串 / 带斜杠的名字会一路写进 `vconsole.conf` ——
+        systemd-vconsole-setup 认不出来，而那时盘已经擦了。
+        """
+        missing = str(self.root / "nope")
+        for bad in ("", "../etc/passwd", "us,de", "a b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InstallerError) as ctx:
+                    options.validate_keymap(bad, missing)
+                self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+                self.assertEqual(ctx.exception.reason, "format")
 
     def test_hostname_accepts_rfc1123_names(self):
         for hostname in ("mipl", "my-host", "a", "a" * 63):

@@ -193,12 +193,18 @@ def wifi_networks(runner: Runner, *, rescan: bool = False) -> list[dict]:
 
 
 #: 连接失败的分类。界面按它查 `network.err.*` 的句子（**错误码是数据，句子是文案**）。
-#: 顺序即优先级 —— nmcli 一句报错里可能同时出现「密码」和「超时」，先认更具体的那条。
+#:
+#: **顺序即优先级，而且先认没有歧义的措辞。** nmcli 会把 SSID 原样回显进报错，而
+#: SSID 是外部输入：一个叫 `password` 的网络能让「找不到这个网络」被判成密码错，
+#: 界面就给出一句与事实无关的补救话。所以 `no network with SSID`、
+#: `secrets were required` 这类**明确措辞**排在 `password` / `psk` / `timeout`
+#: 这些**普通词**前面（同一个码出现两次是允许的：那只是把它的判据分成两档）。
 FAILURE_PATTERNS = (
-    ("auth", ("secrets were required", "no secrets", "802-11-wireless-security",
-              "password", "psk", "802.1x", "authentication")),
-    ("notFound", ("no network with ssid", "not found", "no such")),
+    ("notFound", ("no network with ssid",)),
+    ("auth", ("secrets were required", "no secrets", "802-11-wireless-security", "802.1x")),
     ("timeout", ("timeout", "timed out", "time out")),
+    ("auth", ("password", "psk", "authentication")),
+    ("notFound", ("not found", "no such")),
 )
 
 
@@ -208,8 +214,16 @@ def classify_failure(text: str) -> str:
     为什么不让界面自己读 nmcli 的英文报错：那是**外部工具**的措辞，换一版 NM
     就可能变，而界面要按它选中英两套句子。在这里收敛成四个码，界面的分支就固定了。
     认不出来的一律 `other` —— 编一个具体的失败原因比说「连接失败」更糟。
+
+    `Runner.run` 拼出来的消息**第一行是命令本身**，nmcli 的报错在后面：SSID 是
+    外部输入，一个叫 `password` / `timeout` 的网络会让「找不到这个网络」被判成
+    密码错或超时。所以有换行时只认报错那一段；直接传一行报错（本函数的原始用法）
+    时仍是全文匹配。判据内部的优先级见 `FAILURE_PATTERNS`。
     """
     lowered = (text or "").lower()
+    _, separator, detail = lowered.partition("\n")
+    if separator:
+        lowered = detail
     for code, needles in FAILURE_PATTERNS:
         if any(needle in lowered for needle in needles):
             return code

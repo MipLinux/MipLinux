@@ -28,6 +28,29 @@ class TestParsePackageList(unittest.TestCase):
     def test_multi_token_line(self):
         self.assertEqual(packages.parse_package_list("base linux"), ["base", "linux"])
 
+    def test_refuses_tokens_that_could_be_read_as_options(self):
+        """**输入面**：清单里的 token 会被原样拼进 `pacstrap` 的 argv。
+
+        `-U /tmp/x.pkg.tar.zst` 这种写法会被 pacman 当选项 + 包文件读 ——
+        等于让一份数据文件决定命令行。不合法就当场停，绝不交给 pacstrap。
+        """
+        for line in ("-U /tmp/evil.pkg.tar.zst\nbase\n", "--config=/tmp/evil.conf\n",
+                     "-Sy\n"):
+            with self.subTest(line=line):
+                with self.assertRaises(InstallerError) as ctx:
+                    packages.parse_package_list(line)
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_refuses_path_like_and_malformed_names(self):
+        for token in ("/tmp/evil.pkg.tar.zst", "foo/bar", "base;linux", "base=1.2", ".hidden"):
+            with self.subTest(token=token):
+                with self.assertRaises(InstallerError) as ctx:
+                    packages.parse_package_list(f"{token}\n")
+                self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        # 合法字符全都在：`@ . _ + -`，且首字符不是 `-` / `.`
+        self.assertEqual(packages.parse_package_list("gcc-libs\npython-pytest\nzlib@ng\n_foo\n"),
+                         ["gcc-libs", "python-pytest", "zlib@ng", "_foo"])
+
 
 class TestReadPackageList(unittest.TestCase):
     def test_default_file_is_the_installed_system_list(self):
@@ -63,6 +86,16 @@ class TestReadPackageList(unittest.TestCase):
         self.assertIn("Live", str(ctx.exception))
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
 
+    def test_undecodable_file_is_a_clean_error(self):
+        """解不出 UTF-8 的清单要给 `InstallerError`，不能把 `UnicodeDecodeError`
+        摔进装盘流程（外面只接得住前者）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "packages.x86_64"
+            path.write_bytes(b"base\n\xff\xfe\x00\n")
+            with self.assertRaises(InstallerError) as ctx:
+                packages.read_package_list(str(path))
+            self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
 
 class TestInstallOrder(unittest.TestCase):
     """`FakeRunner` 只在「跑命令」这一层是替身：`ensure_dir` / `write_text` 仍会
@@ -91,6 +124,15 @@ class TestInstallOrder(unittest.TestCase):
         self.assertEqual(command, f"pacstrap -C /etc/pacman.conf -G -M {tmp} base linux")
         # -K 会把 keyring 重置成空的，后面 pacman -S 就装不动了
         self.assertNotIn(" -K", command)
+
+    def test_pacstrap_refuses_option_like_names_before_running_anything(self):
+        """第二道校验：argv 在这里成型，坏名字一个都不许进去（连命令都不许起）。"""
+        runner = FakeRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(InstallerError) as ctx:
+                packages.pacstrap(runner, tmp, ["base", "-U"], "/etc/pacman.conf")
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(runner.history, [], "坏包名时一条命令都不该跑")
 
 
 class TestPackageCounter(unittest.TestCase):

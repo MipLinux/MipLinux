@@ -122,7 +122,6 @@ GPL / LGPL 的义务不因“包来自 Arch 仓库”而消失。发布 ISO 或�
 |---|---|---|
 | MipLinux 自有代码 / 配置 | 本仓库对应 commit / tag | 随发布页提供；ISO 构建脚本在 `scripts/`、`profile/`、`installer/` |
 | Caelestia forks | [Caelestia-dotfiles](https://github.com/MipLinux/Caelestia-dotfiles)、[Caelestia-shell](https://github.com/MipLinux/Caelestia-shell)、[Caelestia-cli](https://github.com/MipLinux/Caelestia-cli) 对应 commit | 发布页链接 + 构建时记录 commit / 上游 base |
-| Caelestia shell / CLI | 上游 release / source tarball 或对应 commit | 与打包版本一致 |
 | Quickshell / Qt6 | 上游 / Arch 源码 | 动态链接；LGPL 源码与可重链接条件 |
 | `nvidia-open` | NVIDIA 上游对应 tag / commit | GPLv2 §3(b) 书面 offer，有效期 3 年；或随附源码 |
 | `nvidia-utils` | 无（专有部分） | 不提供专有部分源码；提供 EULA；包内其他许可组件按各自许可 |

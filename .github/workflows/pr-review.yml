@@ -54,11 +54,25 @@ jobs:
             echo "skip=false" >>"$GITHUB_OUTPUT"
           fi
 
+          if [ -n "${{ secrets.REVIEWER_APP_ID }}" ] && [ -n "${{ secrets.REVIEWER_PRIVATE_KEY }}" ]; then
+            echo "use_app=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "use_app=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 获取专属审查者 App Token（可选）
+        id: app-token
+        if: steps.precheck.outputs.skip != 'true' && steps.precheck.outputs.use_app == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_PRIVATE_KEY }}
+
       - name: 生成审查上下文（脚本算 diff 与机械信号）
         id: ctx
         if: steps.precheck.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           PR: ${{ steps.precheck.outputs.pr }}
         run: |
           set -euo pipefail
@@ -79,7 +93,7 @@ jobs:
       - name: 回传行级 Review 批注
         if: steps.precheck.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           PR: ${{ steps.precheck.outputs.pr }}
           RAW_RESPONSE: ${{ steps.ai.outputs.response }}
         run: |

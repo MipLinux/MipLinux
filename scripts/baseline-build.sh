@@ -952,6 +952,23 @@ else
   echo "    已初始化，跳过"
 fi
 
+# archlinuxcn 的包同样要验签，缺 key 会在 mkarchiso 的 pacstrap 里以 PGP 错误
+# 直接失败 —— 验签用的是**容器**的 keyring（pacstrap -G 不搬 GPGDir）。
+# 所以 key 要在进 mkarchiso 之前进容器：先装 keyring 包，再 populate。
+# 只在挂载了仓库 profile、且它确实带 [archlinuxcn] 时做：--baseline 用容器内
+# 原版 releng，自定义 --profile 也可能没有这个源。
+if [[ "${PROFILE}" == /profile ]] && grep -q '^\[archlinuxcn\]' "${PROFILE}/pacman.conf"; then
+  echo "==> 导入 archlinuxcn 钥匙串"
+  # 用 profile 自己的 conf 取包：仓库地址与 SigLevel 就是构建时 pacstrap 用的
+  # 那一份，脚本里不再抄第二份 Server 列表。
+  if ! pacman -Sy --needed --noconfirm --config "${PROFILE}/pacman.conf" archlinuxcn-keyring; then
+    echo "错误：archlinuxcn-keyring 没装上 —— 构建时从 [archlinuxcn] 拉包会验不过签名。" >&2
+    echo "      先确认容器能访问 profile/pacman.conf 里的那个源。" >&2
+    exit 1
+  fi
+  pacman-key --populate archlinuxcn
+fi
+
 echo "==> 更新包数据库"
 # 单独一步：pacman -Sy 失败是「源不通」，和「装包失败」是两回事，
 # 分开报才说得清是哪一头的问题。

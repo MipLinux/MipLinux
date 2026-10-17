@@ -398,19 +398,26 @@ def log_locations(args: argparse.Namespace) -> list[str]:
     目标盘日志没有」：失败收尾会先卸载目标，卸完 `Path(args.target)/…` 自然不是文件了
     —— 只看文件系统会把**最该报的**那一份（唯一活过重启的）漏掉。挂上过就优先信它，
     不再拿挂载后的目录去赌。签名保持原样（#151：不改公开函数签名），记录走 args。
+
+    **两个路径要分开说**（评审指出）：`target_log_path` 是目标盘**挂载期间**的路径，
+    卸载之后直接打不开；而重启进装好的系统后，同一份文件在 `/var/log/…`。所以目标盘
+    那份一律把「怎么拿到」与「装好后在哪」一起报出来。
     """
     found: list[str] = []
     if args.log:
         live_copy = Path(args.log)
         if live_copy.is_file():
             found.append(f"{live_copy}（Live 侧，重启即没）")
+    in_system = "/" + pipeline.TARGET_LOG_NAME
     attached = getattr(args, "target_log_path", None)
     if attached:
-        found.append(f"{attached}（目标盘，重启后仍在）")
+        found.append(
+            f"{attached}（目标盘；重新挂载目标盘后可读，装好的系统里是 {in_system}）"
+        )
     else:
         target_log = Path(args.target) / pipeline.TARGET_LOG_NAME
         if target_log.is_file():
-            found.append(f"{target_log}（目标盘，重启后仍在）")
+            found.append(f"{target_log}（目标盘，现在可读；装好的系统里是 {in_system}）")
     return found
 
 

@@ -355,6 +355,38 @@ class TestTimeout(unittest.TestCase):
         self.assertFalse(self.runner.attempt(["sleep", "30"], timeout=1))
         self.assertTrue(any("超时" in note for note in self.reporter.notes))
 
+    def test_the_timeout_covers_writing_stdin(self):
+        """**回归测试**（评审指出）：`timeout` 要覆盖「喂输入」那一段。
+
+        子进程不读 stdin 时，1 MiB 输入会卡在写满的管道上；写在主线程里的话
+        `wait(timeout=…)` 根本没开始计时 —— 命令与整组进程一直留着，超时不生效。
+        外层 SIGALRM 兜底：实现退回去时用例失败而不是挂住套件。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "late"
+            argv = ["sh", "-c", f"(sleep 1; printf late > {marker}) & sleep 30"]
+
+            def stuck(*_args: object) -> None:
+                # 用 RuntimeError 而不是 TimeoutError：后者是 OSError 的子类，
+                # 实现退回到「主线程直接写」时会被那一层的 `except OSError` 吞掉。
+                raise RuntimeError("写 stdin 阻塞时 timeout 没有生效")
+
+            previous = signal.signal(signal.SIGALRM, stuck)
+            started = time.monotonic()
+            try:
+                signal.setitimer(signal.ITIMER_REAL, 10)
+                with self.assertRaises(InstallerError) as ctx:
+                    self.runner.run(argv, input="x" * (1024 * 1024), timeout=0.3)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous)
+            self.assertEqual(ctx.exception.reason, "timeout")
+            self.assertLess(time.monotonic() - started, 5.0,
+                            "写 stdin 阻塞时 timeout 没有生效")
+            time.sleep(1.1)
+            self.assertFalse(marker.exists(),
+                             f"超时返回后后代进程还写了 {marker}")
+
     def test_history_records_the_logical_argv_without_stdbuf(self):
         # stdbuf 只存在于 exec 的那一层：history 与 reporter.command 记的是逻辑命令
         self.runner.run(["true"])
@@ -415,20 +447,26 @@ class TestProcessGroupOnTimeout(unittest.TestCase):
         `pacman` 拿不到 docstring 承诺的收尾时间，释放 `/var/lib/pacman/db.lck`
         正是在收尾里。这里让组长秒退、后代忽略 SIGTERM 再用 0.4s 写标记：宽限只看
         组长的话，标记永远写不出来（旧实现会在几毫秒内把它杀掉）。
+
+        忽略处置在 shell 里设、由 `exec` 继承（POSIX：被忽略的信号跨 exec 保留），
+        不留给 Python 去装 handler —— 那只解释器启动的几十毫秒里，0.25s 的 SIGTERM
+        可能先到，用例就会假失败。外层 shell 设完再恢复默认：它自己必须照常死在
+        SIGTERM 上，被测的正是「组长已退、组员还在」。
         """
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "cleaned"
             helper = Path(tmp) / "slow_cleanup.py"
             helper.write_text(
-                "import signal, sys, time, pathlib\n"
-                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "import sys, time, pathlib\n"
                 "time.sleep(0.4)\n"
                 "pathlib.Path(sys.argv[1]).write_text('cleaned')\n",
                 encoding="utf-8",
             )
             argv = ["sh", "-c",
-                    f"( {shlex.quote(sys.executable)} {shlex.quote(str(helper))} "
-                    f"{shlex.quote(str(marker))} ) & wait"]
+                    "trap '' TERM; "
+                    f"( exec {shlex.quote(sys.executable)} {shlex.quote(str(helper))} "
+                    f"{shlex.quote(str(marker))} ) & "
+                    "trap - TERM; wait"]
             with self.assertRaises(InstallerError) as ctx:
                 self.runner.run(argv, timeout=0.25)
             self.assertEqual(ctx.exception.reason, "timeout")
@@ -541,11 +579,11 @@ class TestInterruptStopsTheCommand(unittest.TestCase):
             self._assert_nothing_wrote_late(marker)
 
     def test_interrupt_during_stdin_delivery_takes_the_child_down(self):
-        """**回归测试**：卡在写 stdin 上的中断也要收整组。
+        """**回归测试**：写 stdin 还没写完时来了中断，也要收整组。
 
-        子进程不读 stdin 时，`proc.stdin.write()` 写到管道满就阻塞 —— 旧实现的
-        收尾从 `wait()` 才开始，中断落在这一句上时子进程留在自己的会话里继续跑；
-        收尾卸载目标时它还在往盘上写。
+        子进程不读 stdin 时，1 MiB 输入会把写线程卡在管道上（旧实现是主线程自己
+        卡在 `write()` 里）。中断落在这一段时，子进程必须跟着停 —— 它留在自己的
+        会话里的话，收尾卸载目标时还在往盘上写。
         """
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "late"

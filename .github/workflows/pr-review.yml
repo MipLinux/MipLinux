@@ -89,9 +89,9 @@ jobs:
           short="${HEAD_SHA:0:7}"
 
           body=$(cat <<EOF
-          ## 🔍 MipLinux 严格型审查启动中…
+          ## 🔍 严格型审查中…
 
-          已收到 \`/mipl-review\` 指令（触发者 @${ACTOR}），正在按 \`docs/work/ai-code-review-rubric.md\` 判读本次改动（commit \`${short}\`）。结论与行级批注稍后以 Review 形式回传。
+          \`${short}\` · @${ACTOR} 触发
 
           <!-- mipl-review-ack: run=${GITHUB_RUN_ID} -->
           EOF
@@ -198,12 +198,19 @@ jobs:
           verdict = data.get("verdict", "PASS")
           comments = data.get("comments", [])
 
+          # 注意：本段 python 被外层 bash 单引号包裹，源码里只能出现双引号
+          # （单引号会提前闭合 bash 串，bash -n 查不出来，只有真跑才炸）
+          # emoji 由 workflow 按枚举确定性映射，不交给模型自由发挥
+          verdict_emoji = {"PASS": "✅", "NEEDS_ATTENTION": "⚠️"}.get(verdict, "❓")
+          cat_emoji = {"REDLINE": "🚫", "ENGINEERING": "🔧"}
+          sev_emoji = {"ERROR": "❌", "WARNING": "⚠️", "INFO": "💡"}
+
           body_lines = [
-              "### MipLinux PR 严格型审查结论",
+              "### 🔍 MipLinux PR 严格型审查结论",
               "",
-              f"- **结论**: {verdict}",
-              f"- **概括**: {summary}",
-              f"- **Commit**: `{head_sha[:7]}`",
+              f"- {verdict_emoji} **结论**: {verdict}",
+              f"- 📝 **概括**: {summary}",
+              f"- 🔖 **Commit**: `{head_sha[:7]}`",
               "",
               "<!-- mipl-review: head=" + head_sha[:7] + " -->"
           ]
@@ -227,11 +234,15 @@ jobs:
               if not (path and line):
                   continue
               line_int = int(line)
+              # 取值先落到变量：f-string 里不嵌套同类引号，免得依赖 PEP 701（Python 3.12+）
+              mark = sev_emoji.get(sev, "-")
+              catmark = cat_emoji.get(cat, "-")
               # 校验行号是否在 diff 内；valid_lines 为空时跳过校验（context.md 缺失场景）
-              if valid_lines and path in valid_lines and line_int not in valid_lines[path]:
-                  fallback_notes.append(f"- **[{cat}/{sev}]** `{path}:{line_int}` {msg}")
+              # path 不在 diff 里也必须降级：贴上去会被 GitHub 以 422 拒绝，整条 Review 一起失败
+              if valid_lines and (path not in valid_lines or line_int not in valid_lines[path]):
+                  fallback_notes.append(f"- {mark} **[{cat} / {sev}]** `{path}:{line_int}` {msg}")
                   continue
-              comment_body = f"**[{cat} / {sev}]** {msg}"
+              comment_body = f"{mark} **[{catmark} {cat} / {sev}]** {msg}"
               item = {
                   "path": path,
                   "line": line_int,
@@ -267,10 +278,13 @@ jobs:
           # 这一步失败不应连累已经回传成功的 Review，只发 warning。
           if [ -n "${ACK_COMMENT_ID:-}" ]; then
             verdict=$(jq -r '.verdict // "UNKNOWN"' .pr-review/result.json)
+            case "$verdict" in
+              PASS) verdict_emoji="✅" ;;
+              NEEDS_ATTENTION) verdict_emoji="⚠️" ;;
+              *) verdict_emoji="❓" ;;
+            esac
             done_body=$(printf '%s\n' \
-              "✅ **审查完成**：结论 \`${verdict}\`，commit \`$(echo "$HEAD_SHA" | cut -c1-7)\`。" \
-              "" \
-              "结论与行级批注见上方 Review；判据见 \`docs/work/ai-code-review-rubric.md\`。" \
+              "${verdict_emoji} **审查完成** · 结论 \`${verdict}\` · \`$(echo "$HEAD_SHA" | cut -c1-7)\`" \
               "" \
               "<!-- mipl-review-ack: done run=${GITHUB_RUN_ID} -->")
             if jq -n --arg body "$done_body" '{body: $body}' \

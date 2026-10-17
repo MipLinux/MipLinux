@@ -7,6 +7,10 @@ name: PR review（严格型代码与红线审查）
 # 判据的唯一源：docs/work/ai-code-review-rubric.md
 # 上下文提取脚本：scripts/pr-review-context.sh
 # 触发机制：仅当核心维护者在 PR 评论中输入 /mipl-review 时按需唤醒，或通过 workflow_dispatch 手动触发。
+#
+# 推理在哪跑：不在 runner 上，而是维护者自建服务器上的 dsh agent（见 vars.REVIEWER_ENDPOINT）。
+# 判据与 diff 一起送过去，agent 通过只读克隆对照全仓；回传仍由本工作流用审查者 App 完成。
+# 鉴权用 GitHub OIDC（id-token: write）：没有长期共享密钥，token 只对本次运行有效。
 
 on:
   issue_comment:
@@ -20,6 +24,8 @@ on:
 permissions:
   pull-requests: write
   contents: read
+  # 换取服务端可验签的 OIDC token；服务端只认本仓库 + 固定 audience
+  id-token: write
 
 jobs:
   review:
@@ -38,11 +44,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 检查 fork 与权限
+      - name: 检查触发条件与配置
         id: precheck
         env:
           INPUT_PR: ${{ github.event.issue.number || github.event.inputs.pr }}
-          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ENDPOINT: ${{ vars.REVIEWER_ENDPOINT }}
           REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
           REVIEWER_PRIVATE_KEY: ${{ secrets.REVIEWER_PRIVATE_KEY }}
         run: |
@@ -50,10 +56,11 @@ jobs:
           case "$INPUT_PR" in ''|*[!0-9]*) echo "::error::PR 编号必须是纯数字"; exit 1 ;; esac
           echo "pr=$INPUT_PR" >>"$GITHUB_OUTPUT"
 
-          # 检查是否能读取必要 Secret
-          if [ -z "$DEEPSEEK_KEY" ]; then
+          # 服务端入口是仓库变量（不是密钥）：没配就别往下走。
+          # 推理所需的那把 API key 在服务器上，runner 侧不再持有。
+          if [ -z "$ENDPOINT" ]; then
             echo "skip=true" >>"$GITHUB_OUTPUT"
-            echo "::notice::未配置 DEEPSEEK_API_KEY 或来自外部 fork 无法访问 secrets，跳过本次审查。"
+            echo "::notice::未配置 REVIEWER_ENDPOINT 变量，跳过本次审查。"
           else
             echo "skip=false" >>"$GITHUB_OUTPUT"
           fi
@@ -112,27 +119,53 @@ jobs:
           set -euo pipefail
           ./scripts/pr-review-context.sh --pr "$PR" --out "$GITHUB_WORKSPACE/.pr-review"
 
-      - name: 严格型审查（AI 判红线与工程质量）
+      - name: 严格型审查（服务器 dsh agent，GitHub OIDC 鉴权）
         id: ai
         if: steps.precheck.outputs.skip != 'true'
-        uses: appleboy/LLM-action@v1.4.0
-        with:
-          base_url: 'https://api.deepseek.com'
-          api_key: ${{ secrets.DEEPSEEK_API_KEY }}
-          model: 'deepseek-flash'
-          max_tokens: '65536'
-          system_prompt: 'file:///github/workspace/docs/work/ai-code-review-rubric.md'
-          input_prompt: 'file:///github/workspace/.pr-review/context.md'
+        env:
+          ENDPOINT: ${{ vars.REVIEWER_ENDPOINT }}
+          PR: ${{ steps.precheck.outputs.pr }}
+        run: |
+          set -euo pipefail
+
+          # OIDC token：只对本次运行有效；服务端用 GitHub 的 JWKS 验签，
+          # 因此这里不需要任何长期共享密钥（也就没有可泄漏的 token）。
+          oidc=$(curl -sS --fail-with-body --max-time 30 \
+                   -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=mipl-reviewer" | jq -r '.value // empty')
+          [ -n "$oidc" ] || { echo "::error::取 OIDC token 失败"; exit 1; }
+
+          HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
+          [ -n "$HEAD_SHA" ] || { echo "::error::未能解析到 head sha"; exit 1; }
+
+          # 判据随请求一起送过去：rubric 的唯一源仍在仓库里，改判据不用登服务器
+          jq -n --rawfile rubric docs/work/ai-code-review-rubric.md \
+                --rawfile context .pr-review/context.md \
+                --argjson pr "$PR" --arg sha "$HEAD_SHA" \
+                '{rubric:$rubric, context:$context, pr:$pr, head_sha:$sha}' \
+            > .pr-review/request.json
+          echo "请求体 $(wc -c <.pr-review/request.json) 字节 -> $ENDPOINT"
+
+          # agent 要克隆仓库并逐条核对，单次可能跑到十几分钟
+          curl -sS --fail-with-body --max-time 900 \
+            -H "Authorization: Bearer $oidc" \
+            -H 'Content-Type: application/json' \
+            --data-binary @.pr-review/request.json \
+            "$ENDPOINT" -o .pr-review/response.txt
+          echo "已收到审查结果 $(wc -c <.pr-review/response.txt) 字节"
 
       - name: 回传行级 Review 批注
         if: steps.precheck.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           PR: ${{ steps.precheck.outputs.pr }}
-          RAW_RESPONSE: ${{ steps.ai.outputs.response }}
           ACK_COMMENT_ID: ${{ steps.ack.outputs.comment_id }}
         run: |
           set -euo pipefail
+
+          # 结果来自服务端返回的文件（不再是 action 的 output）
+          RAW_RESPONSE=$(cat .pr-review/response.txt)
+          [ -n "$RAW_RESPONSE" ] || { echo "::error::服务端返回为空"; exit 1; }
 
           export HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
           [ -n "$HEAD_SHA" ] || { echo "::error::未能解析到 head sha"; exit 1; }

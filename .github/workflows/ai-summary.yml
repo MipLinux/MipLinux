@@ -93,9 +93,10 @@ jobs:
         with:
           base_url: 'https://api.deepseek.com'
           api_key: ${{ secrets.DEEPSEEK_API_KEY }}
-          model: 'deepseek-v4-flash'
-          # 判断类任务要压温度：同一份正文跑三次，四块的档位不该变（rubric 的抖动断言）
-          temperature: '0.2'
+          # 与 pr-acceptance.yml 同一个理由：现行模型名是 `deepseek-flash`；
+          # 旧名 `deepseek-v4-flash` 已退役（官方仍接受，由同一个 V4.1-Flash 承接）。
+          model: 'deepseek-flash'
+          # 同样刻意不设 temperature：思考模式下无效（官方文档 "Has no effect in thinking mode"）。
           # 默认 1000 会把四块输出截断；判断类输出长度不可控，留足余量（模型自带 max_tokens 上限保护）。
           # 注意「留余量」不等于鼓励写长：篇幅上限在 rubric 第七节，机器只是别在写成之前被截断。
           # 与 pr-acceptance.yml 同一个理由：推理与正文共用这个预算，取官方 thinking 模式的

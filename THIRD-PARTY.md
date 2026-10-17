@@ -136,7 +136,8 @@ GPL / LGPL 的义务不因“包来自 Arch 仓库”而消失。发布 ISO 或�
 | 程序 | 许可 | 我们做了什么 |
 |---|---|---|
 | cage v0.3.1 | MIT（Copyright (c) 2018-2020 Jente Hidskes；Copyright (c) 2019 The Sway authors） | Live 的 kiosk 合成器：套 [cage-0.3.1-enable-tap.patch](scripts/patches/cage-0.3.1-enable-tap.patch) 打开触摸板轻点，编译成 `mipl-cage` 装进 ISO |
-| Caelestia（fork） | GPL-3.0-only | CI、文档与后续品牌化改动；代码改动在 fork 中公开，按 GPL-3.0-only 发布 |
+| Caelestia-dotfiles（fork） | GPL-3.0-only | CI、文档与后续品牌化改动；代码改动在 fork 中公开，按 GPL-3.0-only 发布 |
+| Caelestia-shell / CLI（fork） | GPL-3.0-only | 当前为 NOTICE；后续中文、品牌与 NVIDIA 相关改动在各自 fork 公开 |
 
 ## 依据
 

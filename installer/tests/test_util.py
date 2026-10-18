@@ -104,7 +104,7 @@ class TestRunner(unittest.TestCase):
                 os.close(write_fd)
                 os.dup2(read_fd, 0)
                 os.close(read_fd)
-                self.assertTrue(self.runner.attempt(["sh", "-c", f"cat > {seen}"]))
+                self.assertTrue(self.runner.attempt(["sh", "-c", f"cat > {shlex.quote(str(seen))}"]))
             finally:
                 os.dup2(saved, 0)
                 os.close(saved)
@@ -175,6 +175,32 @@ class TestWriteText(unittest.TestCase):
                                 mode=0o600, secret=True)
         self.assertEqual(seen["mode"], 0o600,
                          "内容还没写，权限就已经该是 0600 —— 中间不许有 0644 的窗口")
+
+    def test_a_failed_write_leaves_the_old_content_untouched(self):
+        """**回归测试**（评审指出）：半途失败不许在目标路径留下截断的配置文件。
+
+        旧实现直接 `O_TRUNC` 打开目标：`fdopen` / 写内容失败时，旧配置已经被截成
+        0 字节。先写同目录临时文件、成功后再 `os.replace`，目标就只会是旧内容。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pacman.conf"
+            path.write_text("旧内容\n", encoding="utf-8")
+            with mock.patch("mipl_installer.util.os.fdopen", side_effect=OSError("写不进去")):
+                with self.assertRaises(OSError):
+                    util.write_text(Runner(RecordingReporter()), str(path), "新内容\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "旧内容\n")
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["pacman.conf"],
+                             "失败后临时文件也不许留在目标目录里")
+
+    def test_replacing_an_existing_file_keeps_its_mode(self):
+        """`mode=None` 覆盖已有文件时，权限要照旧 —— 别被临时文件的 umask 改掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hostname"
+            path.write_text("旧\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+            util.write_text(Runner(RecordingReporter()), str(path), "新\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "新\n")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_a_symlink_is_refused_instead_of_written_through(self):
         """**回归测试**：root 不许跟着目标盘里的符号链接改写别的文件。
@@ -364,7 +390,7 @@ class TestTimeout(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "late"
-            argv = ["sh", "-c", f"(sleep 1; printf late > {marker}) & sleep 30"]
+            argv = ["sh", "-c", f"(sleep 1; printf late > {shlex.quote(str(marker))}) & sleep 30"]
 
             def stuck(*_args: object) -> None:
                 # 用 RuntimeError 而不是 TimeoutError：后者是 OSError 的子类，
@@ -410,7 +436,7 @@ class TestProcessGroupOnTimeout(unittest.TestCase):
 
     @staticmethod
     def _deferred_write(marker: Path, delay: float = 0.6) -> list[str]:
-        return ["sh", "-c", f"(sleep {delay}; printf late > {marker}) & wait"]
+        return ["sh", "-c", f"(sleep {delay}; printf late > {shlex.quote(str(marker))}) & wait"]
 
     def _assert_nothing_wrote_late(self, marker: Path) -> None:
         time.sleep(0.8)      # 比上面的 delay 长：后代活着的话，这期间一定会写
@@ -438,6 +464,23 @@ class TestProcessGroupOnTimeout(unittest.TestCase):
             marker = Path(tmp) / "late"
             self.assertFalse(self.runner.attempt(self._deferred_write(marker), timeout=0.2))
             self._assert_nothing_wrote_late(marker)
+
+    def test_a_refused_killpg_is_not_mistaken_for_a_dead_group(self):
+        """**回归测试**（评审指出）：`killpg` 的 `OSError` 不等于「整组已经没了」。
+
+        旧实现把任何 `OSError` 都当「组已退出」直接返回；调用方收尾时是无超时的
+        `proc.wait()`，子进程还活着就会永久挂起。这里让 `killpg` 一律报权限错误，
+        `run()` 必须仍在宽限期后收掉直接子进程并抛超时，而不是卡满 `sleep`。
+        """
+        started = time.monotonic()
+        with mock.patch("mipl_installer.util.os.killpg",
+                        side_effect=PermissionError("不许发信号")):
+            with self.assertRaises(InstallerError) as ctx:
+                self.runner.run(["sleep", "5"], timeout=0.1)
+        elapsed = time.monotonic() - started
+        self.assertEqual(ctx.exception.reason, "timeout")
+        self.assertLess(elapsed, 2.5,
+                        f"killpg 失败被当成杀完了，收尾卡在 wait() 上（{elapsed:.1f}s）")
 
     def test_the_terminate_grace_covers_the_whole_group_not_just_the_leader(self):
         """**回归测试**：SIGTERM 的宽限要给整组，不是只看组长。
@@ -520,7 +563,7 @@ class TestStreamedReader(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "late"
-            argv = ["sh", "-c", f"(sleep 1; printf late > {marker}) & sleep 30"]
+            argv = ["sh", "-c", f"(sleep 1; printf late > {shlex.quote(str(marker))}) & sleep 30"]
             with mock.patch.object(threading.Thread, "start",
                                    side_effect=RuntimeError("起不了线程")):
                 with self.assertRaises(RuntimeError):
@@ -545,7 +588,7 @@ class TestInterruptStopsTheCommand(unittest.TestCase):
 
     @staticmethod
     def _deferred_write(marker: Path, delay: float = 1.0) -> list[str]:
-        return ["sh", "-c", f"(sleep {delay}; printf late > {marker}) & wait"]
+        return ["sh", "-c", f"(sleep {delay}; printf late > {shlex.quote(str(marker))}) & wait"]
 
     @staticmethod
     def _raise_interrupt(*_args: object) -> None:
@@ -587,7 +630,7 @@ class TestInterruptStopsTheCommand(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "late"
-            argv = ["sh", "-c", f"(sleep 1; printf late > {marker}) & sleep 30"]
+            argv = ["sh", "-c", f"(sleep 1; printf late > {shlex.quote(str(marker))}) & sleep 30"]
             self._run_interrupted(argv, input="x" * (1024 * 1024))   # 远大于管道缓冲
             self._assert_nothing_wrote_late(marker)
 

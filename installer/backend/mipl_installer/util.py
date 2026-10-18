@@ -288,11 +288,18 @@ class Runner:
 
         组长每轮都要 `wait()` 回收：留着僵尸组长，`killpg(pid, 0)` 会一直报「组还在」，
         宽限期就变成固定的 `TERMINATE_GRACE_SECONDS` 硬等。
+
+        只有 `ProcessLookupError` 才是「整组已经没了」。别的 `OSError`（信号被拒、
+        参数不被接受）**不能当成杀完了**：调用方收尾时是无超时的 `proc.wait()`，
+        子进程还活着就会一直等下去。这种失败照样走完宽限期，最后用 `proc.kill()`
+        把直接子进程收掉兜底 —— 组员可能已经逃出进程组，但调用方不会再挂死。
         """
         try:
             os.killpg(proc.pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            return
+        except ProcessLookupError:
+            return                           # 整组都没了；组长是僵尸的话交给调用方 wait()
+        except OSError:
+            pass                             # 信号没发出去，不是「已经杀完」：继续兜底
         deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         while True:
             try:
@@ -304,14 +311,21 @@ class Runner:
             except ProcessLookupError:
                 return                       # 整组都已退出，不必 SIGKILL
             except OSError:
-                break
+                pass                         # 探不清就当作还活着，宽限期结束后再 SIGKILL
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.05)
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
+        except ProcessLookupError:
+            return
+        except OSError:
+            # 整组收不掉（不是「已经没了」）：至少把直接子进程收掉，
+            # 调用方随后的 proc.wait() 才不会永久挂起。
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass                         # 已经被别的线程回收了；收尾函数不再节外生枝
 
     @staticmethod
     def _close_pipes(proc: subprocess.Popen) -> None:
@@ -654,6 +668,10 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
     再 `chmod`：后者会留下一个「密码 / sudoers 已经在文件里、权限还是 umask 给的
     0644」的窗口。窗口很短，但它是 root 在写密码文件 —— 这种窗口不该有。
 
+    **先写临时文件，`fsync` 后再 `os.replace`**：直接 `O_TRUNC` 覆盖的话，写到一半
+    失败 / 断电会在目标路径上留下半份配置（fstab、pacman.conf 半份就等于起不来的
+    系统）。同目录的临时文件 + 原子改名让目标要么是旧内容、要么是新内容。
+
     **不跟随符号链接**（`O_NOFOLLOW`）：写的是 `<target>/etc/pacman.conf` 这类
     目标盘路径，而目标盘内容在 `--steps configure` 这种续跑场景里不一定是安装器
     自己刚铺的。一个 `pacman.conf -> /etc/pacman.conf` 的链接会让 root 在宿主机
@@ -668,27 +686,58 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
         return
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(target, flags, mode if mode is not None else 0o666)
-    except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.EMLINK):
-            raise InstallerError(
-                f"拒绝写入符号链接：{path}",
-                EXIT_GUARD,
-                hint="目标系统里这个路径是符号链接 —— 安装器只写普通文件，不跟着链接改别处",
-            ) from exc
-        raise
+        existing = os.lstat(target)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        raise InstallerError(
+            f"拒绝写入符号链接：{path}",
+            EXIT_GUARD,
+            hint="目标系统里这个路径是符号链接 —— 安装器只写普通文件，不跟着链接改别处",
+        )
+    # 覆盖已有文件时保持它原来的权限（与 O_TRUNC 直接写的旧行为一致）。
+    existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    temp: Path | None = None
     try:
+        for _ in range(100):
+            candidate = target.parent / f".{target.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+            try:
+                fd = os.open(candidate, flags, 0o666)   # umask 照常生效
+            except FileExistsError:
+                continue
+            temp = candidate
+            break
+        else:
+            raise OSError(errno.EEXIST, f"找不到可用的临时文件名：{path}")
         if mode is not None:
-            # 文件已存在时，`os.open` 的 mode 参数不生效；这里补一次，仍然在写内容之前。
+            # `os.open` 的 mode 会被 umask 掩掉；fchmod 一次拿到调用方要求的精确
+            # 权限，仍然在写内容之前。
             os.fchmod(fd, mode)
+        elif existing_mode is not None:
+            os.fchmod(fd, existing_mode)
         handle = os.fdopen(fd, "w", encoding="utf-8")
-    except BaseException:
-        os.close(fd)
-        raise
-    with handle:
-        handle.write(text)
+        fd = -1
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())      # 内容先落盘，再让改名把它换上去
+        os.replace(temp, target)
+        temp = None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp is not None:
+            try:
+                temp.unlink()              # 失败时别在目标目录里留下半份临时文件
+            except OSError:
+                pass
 
 
 #: dry-run 里预览内容的最多行数。mirrorlist 那种几十行的文件不值得占满屏幕。

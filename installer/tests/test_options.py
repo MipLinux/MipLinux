@@ -201,6 +201,21 @@ class TestValidateTarget(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
         self.assertEqual(ctx.exception.reason, "format")
 
+    def test_refuses_a_boot_mount_that_resolves_elsewhere(self):
+        """ESP 挂在 `<target>/boot`，`mount` / `umount -R` 同样会解析它（复核二轮 finding）。"""
+        from unittest import mock
+
+        real = options.os.path.realpath
+
+        def fake(path):
+            return "/" if path == "/mnt/mipl/boot" else real(path)
+
+        with mock.patch("mipl_installer.options.os.path.realpath", side_effect=fake):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target("/mnt/mipl")
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+
 
 class TestValidators(_RootCase):
     def test_timezone_must_exist(self):

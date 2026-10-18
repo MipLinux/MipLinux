@@ -221,13 +221,14 @@ _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 def _without_ssid(text: str, ssid: str) -> str:
     """把报错里回显的**这个** SSID 摘掉（SSID 是外部输入，不能当判据）。
 
-    用词边界而不是裸 `replace`：SSID 叫 `a` 时，裸替换会把 `password` 拆成
-    `pssword`；`(?<!\\w)…(?!\\w)` 只摘独立出现的那个名字。`re.escape` 负责名字里的
-    `'` / 空格等字符。
+    只摘**引号里**的那一份：引号是 nmcli 回显名字的边界。不按词边界全局删 ——
+    SSID 叫 `No` 时，全局删会把 `No network with SSID … found.` 开头的 `No` 也删掉，
+    真正的报错反而认不出来（notFound 变 other）。名字里带 `'`（`Cafe's password`）时，
+    引号内仍是完整的一整段，`'<ssid>'` 照样能整段命中。
     """
     if not ssid:
         return text
-    return re.sub(rf"(?<!\w){re.escape(ssid)}(?!\w)", "", text)
+    return text.replace(f"'{ssid}'", "''").replace(f'"{ssid}"', '""')
 
 
 def classify_failure(text: str) -> str:

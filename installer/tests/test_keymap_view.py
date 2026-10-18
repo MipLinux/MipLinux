@@ -123,6 +123,13 @@ class TestIncludes(unittest.TestCase):
         self.assertEqual([item.path for item in view.includes], [None, None])
         self.assertEqual([key.code for key in view.keys], [16])
 
+    def test_include_with_a_nul_byte_is_treated_as_missing(self):
+        """NUL 让 `Path.is_file()` 抛 `ValueError`（不是 `OSError`）：坏数据不能变 traceback。"""
+        _write_map(self.root, "i386/qwerty/us.map.gz", 'include "a\x00b"\nkeycode 16 = q\n')
+        view = keymap_view.parse("us", str(self.root))
+        self.assertIsNone(view.includes[0].path)
+        self.assertEqual([key.code for key in view.keys], [16])
+
 
 class TestMerge(unittest.TestCase):
     """include 的语义 = 把对方的内容插在这一行，后出现的覆盖先出现的。"""

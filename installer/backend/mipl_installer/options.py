@@ -273,6 +273,10 @@ def validate_target(target: str) -> None:
     能过上面每一条，却把一次 `umount -R`（或一次挂载）落到真实路径上；指向 `/` 时
     足以影响运行中的系统。所以再按 `realpath` 比一次：只接**解析后与字面完全一致**
     的写法 —— 保留命名空间里的链接同样不认，归属判据才只有一个答案。
+
+    两个挂载点都要查：`target` 与 `target/boot`（ESP 挂在后者，`disk.py` 会
+    `mount` / `umount -R` 它）。只查前者的话，`/mnt/mipl/boot -> /` 仍然能把一次
+    递归卸载带到整台机器上。
     """
     components = PurePosixPath(target).parts if target else ()
     if (
@@ -286,11 +290,12 @@ def validate_target(target: str) -> None:
             hint=f"/mnt/ 下的规范化绝对路径，例如 {DEFAULT_TARGET}（不要用 /、/mnt 或带 .. 的写法）",
             reason="format",
         )
-    resolved = os.path.realpath(target)
-    if resolved != target:
-        raise InstallerError(
-            f"目标挂载点不能经过符号链接：{target!r}（实际指向 {resolved!r}）",
-            EXIT_USAGE,
-            hint=f"/mnt/ 下的真实目录，例如 {DEFAULT_TARGET}；不要用指向别处的链接",
-            reason="format",
-        )
+    for path in (target, f"{target}/boot"):
+        resolved = os.path.realpath(path)
+        if resolved != path:
+            raise InstallerError(
+                f"目标挂载点不能经过符号链接：{path!r}（实际指向 {resolved!r}）",
+                EXIT_USAGE,
+                hint=f"/mnt/ 下的真实目录，例如 {DEFAULT_TARGET}；不要用指向别处的链接",
+                reason="format",
+            )

@@ -230,6 +230,17 @@ class TestClassifyFailure(unittest.TestCase):
             network.connect(runner, "Cafe's password", "wrong")
         self.assertEqual(ctx.exception.reason, "notFound")
 
+    def test_a_short_ssid_that_appears_in_the_phrase_is_not_removed(self):
+        """SSID 叫 `No` 时，全局删名字会把报错开头的 `No` 也删掉（notFound → other）。"""
+        self.assertEqual(
+            network.classify_failure("Error: No network with SSID 'No' found."),
+            "notFound",
+        )
+        runner = _NmcliErrorRunner("Error: No network with SSID 'No' found.")
+        with self.assertRaises(InstallerError) as ctx:
+            network.connect(runner, "No", "wrong")
+        self.assertEqual(ctx.exception.reason, "notFound")
+
     def test_connect_reports_the_code_from_the_error_not_the_ssid(self):
         runner = _NmcliErrorRunner("Error: No network with SSID 'password' found.")
         with self.assertRaises(InstallerError) as ctx:

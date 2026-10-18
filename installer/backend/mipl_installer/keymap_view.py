@@ -251,15 +251,18 @@ def resolve_include(name: str, includer: Path, root: Path) -> Path | None:
     **以 `/` 开头的右操作数会直接覆盖左操作数**。所以 `include "/etc/passwd"`
     会让 `directory / name` 落到树外，`include "../../x"` 同理 —— 那让
     `--print-keymap` 变成「读任意文件」。这里要求**解析后的真实路径仍在 root 下**。
+
+    名字里出现 NUL 时 `Path.is_file()` 抛的是 `ValueError`（不是 `OSError`）：
+    坏数据要给「找不到」这个答案，不能把 `--print-keymap` 摔成 traceback。
     """
     base = root.resolve()
     for candidate in include_candidates(name, includer, root):
-        if not candidate.is_file():
-            continue
         try:
+            if not candidate.is_file():
+                continue
             if not candidate.resolve().is_relative_to(base):
                 continue
-        except OSError:
+        except (OSError, ValueError):
             continue
         return candidate
     return None

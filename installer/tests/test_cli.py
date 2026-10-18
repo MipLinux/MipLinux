@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from mipl_installer import cli, disk, events, pipeline, util
+from mipl_installer import cli, disk, events, options, pipeline, util
 from mipl_installer.util import EXIT_GUARD, EXIT_USAGE, InstallerError
 from tests.support import FakeRunner
 
@@ -157,6 +157,31 @@ class TestDryRun(unittest.TestCase):
         code, output = self._run(["--disk", "/dev/vda", "--yes", "--dry-run", "--steps", "teapot"])
         self.assertEqual(code, EXIT_USAGE)
         self.assertIn("不认识的阶段", output)
+
+    def test_timezone_warning_goes_to_stderr_not_into_the_json(self):
+        """名单类的出口：stdout 上只能有一份 JSON。
+
+        D19 的「运行时扔异」会打印一条警告（表里列了、这台机器上没有）——
+        它必须走 stderr：混进 stdout，前端 `JSON.parse` 就会当场炸，
+        而症状看起来像「后端挂了」，不是「表该刷新了」。
+        """
+        real_table = options.read_zone_table()          # 运行系统上真实存在的区
+        self.assertTrue(real_table, "随包的表是空的，这条测不出东西")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            table = Path(tmp) / "timezones.txt"
+            table.write_text(f"{real_table[0]}\nAsia/Nowhere\n", encoding="utf-8")
+
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(options, "default_zone_table", return_value=table), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--print-timezones"])
+
+        self.assertEqual(code, util.EXIT_OK, err.getvalue())
+        payload = json.loads(out.getvalue())            # 解析不了正是这条要抓的东西
+        self.assertEqual([zone["id"] for zone in payload["timezones"]], [real_table[0]])
+        self.assertNotIn("Nowhere", out.getvalue())
+        self.assertIn("Asia/Nowhere", err.getvalue())   # 警告确实在，只是不在 stdout
 
     def test_missing_disk_argument_is_a_usage_error(self):
         """`--disk` 不再是 argparse 的必填项（只读出口不该逼人先指一块盘），

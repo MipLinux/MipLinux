@@ -219,6 +219,17 @@ class TestClassifyFailure(unittest.TestCase):
             "auth",
         )
 
+    def test_a_name_with_an_apostrophe_still_comes_off(self):
+        """名字里带 `'` 时按引号对切只会摘掉前半截，`password` 会漏出来（复核 finding）。"""
+        self.assertEqual(
+            network.classify_failure("Error: No network with SSID 'Cafe's password' found."),
+            "notFound",
+        )
+        runner = _NmcliErrorRunner("Error: No network with SSID 'Cafe's password' found.")
+        with self.assertRaises(InstallerError) as ctx:
+            network.connect(runner, "Cafe's password", "wrong")
+        self.assertEqual(ctx.exception.reason, "notFound")
+
     def test_connect_reports_the_code_from_the_error_not_the_ssid(self):
         runner = _NmcliErrorRunner("Error: No network with SSID 'password' found.")
         with self.assertRaises(InstallerError) as ctx:

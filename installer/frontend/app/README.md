@@ -79,9 +79,11 @@ export default {
 
 ## 4. i18n
 
-- 唯一源：`docs/work/tech/09-安装器界面文案.md`（104 条界面文案 + 附 A 34 条时区名）。
+- 唯一源：`docs/work/tech/09-安装器界面文案.md`（139 条界面文案 + 附 A 34 条时区名 = 173 键）。
 - 生成物：`renderer/i18n/{zh_CN,en_US}.json`，由 `tools/i18n.py --write` 生成、`--check` 守卫。
 - 时区显示名走 `timezone.name.<IANA>` 键；`tz-names.js` 只做**去重与拼装**（不撰写名字、不按日期算夏令时）。
+- **时区名单也不在前端**：后端随包的 `data/timezones.txt`（D19，34 条精选子集，入表条件 = 附 A 里有过审中文名）
+  说了算；附 A 与那张表由 `tools/gen-timezones.py --check` 与 `i18n.py --check` 双向盯着。表外时区不上界面。
 - 顶栏「中 / EN」切换语言：重渲染即可，**不重启进程**。
 
 ## 5. 设计 token 与视觉
@@ -106,7 +108,8 @@ export default {
 
 ```bash
 node --test "installer/frontend/app/tests/*.test.mjs"                     # 单测（含后端适配层与真键位对账）
-python3 installer/frontend/app/tools/i18n.py --check                      # 文案 137 键
+python3 installer/frontend/app/tools/i18n.py --check                      # 文案 173 键 + 时区名单一致性
+python3 installer/frontend/app/tools/gen-timezones.py --check --tzdata-check   # 名单生成物 + 本机 tzdata 对账
 python3 installer/frontend/app/tools/gen-tokens.py --check                # 色板生成物
 python3 installer/frontend/app/tools/gen-icons.py --check                 # 图标生成物
 python3 installer/frontend/app/tools/check-tokens.py                      # 色板三方 + token 结构

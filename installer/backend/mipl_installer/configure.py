@@ -104,10 +104,9 @@ OPTIONAL_TRUST_RE = re.compile(
 def target_pacman_conf(pacman_conf_text: str) -> str:
     """Live conf → 装后系统的 conf：去掉禁用验签或放宽信任的覆盖（#135 / #152）。
 
-    Live 出厂设置里 `[archlinuxcn]` 写 `SigLevel = Optional TrustAll`（不校验签名）——
-    内部构建无所谓，装后系统不行（P11 候选 A）：这种行整行去掉，该段就继承
-    `[options]` 的全局 `SigLevel = Required DatabaseOptional`，装后系统对
-    `[archlinuxcn]` 的每次 pacman 操作都验包签名。验签所需的 key 由
+    当前 Live 出厂已无这种行；这里去掉它，是给旧 conf / 自定义 conf 的兜底：
+    该段会继承 `[options]` 的全局 `SigLevel = Required DatabaseOptional`，装后系统对
+    `[archlinuxcn]` 的每次 pacman 操作都验包签名（D16）。验签所需的 key 由
     `run_in_chroot()` 里对 `archlinuxcn` 的 populate 导入目标密钥环。
     """
     lines = [

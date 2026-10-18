@@ -130,11 +130,24 @@ jobs:
         with:
           base_url: 'https://api.deepseek.com'
           api_key: ${{ secrets.DEEPSEEK_API_KEY }}
-          model: 'deepseek-v4-flash'
-          # 判断类任务压温度：同一份正文跑三次，档位不该变
-          temperature: '0.2'
+          # 用官方**现行**模型名：DeepSeek-V4.1-Flash 的 API 名就是 `deepseek-flash`
+          # （旧名 `deepseek-v4-flash` 已退役，官方仍接受、也仍由 V4.1-Flash 承接并按 Flash
+          # 计价 —— 换名是为了不继续挂在退役别名上，不是因为换接了另一个模型）。
+          model: 'deepseek-flash'
+          # 刻意**不设** temperature：思考模式下它无效（官方 create-chat-completion 文档原话
+          # "Has no effect in thinking mode"），而该模型思考模式默认开启。
+          # 档位稳定性由 rubric 的档位定义兜，不靠这个旋钮 —— 写了反而让人以为它管用。
+          # 真要压推理得走 thinking / reasoning_effort，而 appleboy/LLM-action@v1.4.0 没暴露这两个。
           # 默认 1000 会把复核意见截断；篇幅上限在 rubric 第十节，这里只是别在写成之前被截断。
-          max_tokens: '10000'
+          #
+          # 取官方 thinking 模式的默认值 64K，**不自造数字**（上下限 1..384K，见
+          # https://api-docs.deepseek.com/api/create-chat-completion 的 max_tokens）。
+          # 原来的 10000 比官方默认还低，而推理与正文**共用**这个预算：
+          # 2026-10-16 PR #160 实测——completion=10000 全是 reasoning_tokens，
+          # `--- LLM Response ---` 与 `--- End Response ---` 之间是空的，
+          # 随后被 [ -n "$SEMANTIC" ] 判红；重任务（8 条判据、5 条未命中）第一次就撞上。
+          # 上限仍由 API 兜底（超上限会被拒），不是「写得越长越好」。
+          max_tokens: '65536'
           # 必须是**容器内**的工作区挂载点（Docker action 的 WORKDIR 是 /app）
           system_prompt: 'file:///github/workspace/docs/work/ai-review-rubric.md'
           input_prompt: 'file:///github/workspace/.pr-acceptance/context.md'

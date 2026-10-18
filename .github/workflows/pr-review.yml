@@ -1,0 +1,415 @@
+name: PR review（严格型代码与红线审查）
+
+# 本工作流实现 PR 审查的第二轨（严格型审查）：
+#   CodeRabbit 负责日常通用工程质量与摘要（宽松型），
+#   DeepSeek 专攻 MipLinux 架构红线与严格型系统级工程质量（严格型）。
+#
+# 判据的唯一源：docs/work/ai-code-review-rubric.md
+# 上下文提取脚本：scripts/pr-review-context.sh
+# 触发机制：仅当 .github/CODEOWNERS 里的 owner 在 PR 评论中输入 /mipl-review 时按需唤醒，或由其通过 workflow_dispatch 手动触发。
+# 其他用户输入 /mipl-review 不会启动审查；precheck 会提示联系 CODEOWNERS owner。
+#
+# 推理在哪跑：不在 runner 上，而是维护者自建服务器上的 dsh agent（见 vars.REVIEWER_ENDPOINT）。
+# 判据与 diff 一起送过去，agent 通过只读克隆核对 diff 涉及的上下文；回传仍由本工作流用审查者 App 完成。
+# 鉴权用 GitHub OIDC（id-token: write）：没有长期共享密钥，token 只对本次运行有效。
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR 编号'
+        required: true
+
+permissions:
+  pull-requests: write
+  contents: read
+  # 无权限提示与回执都走 issues comments 接口
+  issues: write
+  # 换取服务端可验签的 OIDC token；服务端只认本仓库 + 固定 audience
+  id-token: write
+
+jobs:
+  review:
+    # 严格门禁：
+    # 1. 仅限针对 PR 的评论（issue.pull_request 存在）或手动 dispatch；
+    # 2. 评论必须包含 /mipl-review 指令；
+    # 3. 触发者必须是 .github/CODEOWNERS 里的 owner；无权限时由 precheck 提示并跳过。
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/mipl-review') &&
+       github.event.comment.user.type != 'Bot')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 检查触发权限与配置
+        id: precheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_PR: ${{ github.event.issue.number || github.event.inputs.pr }}
+          ACTOR: ${{ github.actor }}
+          ENDPOINT: ${{ vars.REVIEWER_ENDPOINT }}
+          REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+          REVIEWER_PRIVATE_KEY: ${{ secrets.REVIEWER_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_PR" in ''|*[!0-9]*) echo "::error::PR 编号必须是纯数字"; exit 1 ;; esac
+          echo "pr=$INPUT_PR" >>"$GITHUB_OUTPUT"
+
+          # 触发权限的唯一源是仓库里的 CODEOWNERS（GitHub Actions 没有内置的
+          # CODEOWNER 变量）。只匹配 @用户名；团队条目 @org/team 需要额外解析。
+          OWNERS=$(sed 's/#.*//' .github/CODEOWNERS \
+                     | grep -oE '@[A-Za-z0-9_./-]+' \
+                     | sort -u | tr '\n' ' ' || true)
+          OWNERS=${OWNERS% }
+          if [ -z "$OWNERS" ]; then
+            echo "::error::CODEOWNERS 里没有可识别的 @owner，无法判定触发权限"
+            exit 1
+          fi
+          if printf '%s\n' "$OWNERS" | tr ' ' '\n' | grep -Fxiq "@${ACTOR}"; then
+            echo "触发者 @${ACTOR} 是 CODEOWNERS owner：${OWNERS}"
+          else
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            body=$(printf '## 🔒 严格型审查仅限代码所有者触发\n\n@%s 严格型审查目前只允许代码所有者（%s）触发。需要审查请联系 %s。\n\n<!-- mipl-review-denied -->' \
+              "$ACTOR" "$OWNERS" "$OWNERS")
+            # 同一 PR 只保留一条提示，避免反复触发刷屏
+            existing=$(gh api "repos/{owner}/{repo}/issues/$INPUT_PR/comments" --paginate \
+                         -q '.[] | select(.body | contains("mipl-review-denied")) | .id' | tail -1 || true)
+            if [ -n "$existing" ]; then
+              jq -n --arg body "$body" '{body: $body}' \
+                | gh api -X PATCH "repos/{owner}/{repo}/issues/comments/$existing" --input - >/dev/null
+              echo "已更新无权限提示评论 #$existing"
+            else
+              jq -n --arg body "$body" '{body: $body}' \
+                | gh api -X POST "repos/{owner}/{repo}/issues/$INPUT_PR/comments" --input - >/dev/null
+              echo "已投递无权限提示评论"
+            fi
+            exit 0
+          fi
+
+          # 服务端入口是仓库变量（不是密钥）：没配就别往下走。
+          # 推理所需的那把 API key 在服务器上，runner 侧不再持有。
+          if [ -z "$ENDPOINT" ]; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::未配置 REVIEWER_ENDPOINT 变量，跳过本次审查。"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+          # secrets 上下文不允许出现在 if: 表达式里（用了会让整个 workflow 文件失效），
+          # 因此在这里判断密钥是否齐备，再以 step output 的形式供后续 if 使用。
+          if [ -n "$REVIEWER_APP_ID" ] && [ -n "$REVIEWER_PRIVATE_KEY" ]; then
+            echo "use_app=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "use_app=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 获取专属审查者 App Token（可选）
+        id: app-token
+        if: steps.precheck.outputs.skip != 'true' && steps.precheck.outputs.use_app == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_PRIVATE_KEY }}
+
+      - name: 即时回执（正在审查中）
+        id: ack
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.precheck.outputs.pr }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          # 「评论后立刻有反馈」优先：这里只查一次 PR 拿 head sha，不跑上下文脚本。
+          HEAD_SHA=$(gh api "repos/{owner}/{repo}/pulls/$PR" --jq .head.sha)
+          short="${HEAD_SHA:0:7}"
+
+          body=$(cat <<EOF
+          ## 🔍 严格型审查中…
+
+          \`${short}\` · @${ACTOR} 触发
+
+          <!-- mipl-review-ack: run=${GITHUB_RUN_ID} -->
+          EOF
+          )
+
+          comment_id=$(jq -n --arg body "$body" '{body: $body}' \
+            | gh api -X POST "repos/{owner}/{repo}/issues/$PR/comments" --input - --jq .id)
+          echo "comment_id=$comment_id" >>"$GITHUB_OUTPUT"
+          echo "已投递回执评论 #$comment_id"
+
+      - name: 生成审查上下文（脚本算 diff 与机械信号）
+        id: ctx
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.precheck.outputs.pr }}
+        run: |
+          set -euo pipefail
+          ./scripts/pr-review-context.sh --pr "$PR" --out "$GITHUB_WORKSPACE/.pr-review"
+
+      - name: 严格型审查（服务器 dsh agent，GitHub OIDC 鉴权）
+        id: ai
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          ENDPOINT: ${{ vars.REVIEWER_ENDPOINT }}
+          PR: ${{ steps.precheck.outputs.pr }}
+        run: |
+          set -euo pipefail
+
+          # OIDC token：只对本次运行有效；服务端用 GitHub 的 JWKS 验签，
+          # 因此这里不需要任何长期共享密钥（也就没有可泄漏的 token）。
+          oidc=$(curl -sS --fail-with-body --max-time 30 \
+                   -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=mipl-reviewer" | jq -r '.value // empty')
+          [ -n "$oidc" ] || { echo "::error::取 OIDC token 失败"; exit 1; }
+
+          HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
+          [ -n "$HEAD_SHA" ] || { echo "::error::未能解析到 head sha"; exit 1; }
+
+          # 判据随请求一起送过去：rubric 的唯一源仍在仓库里，改判据不用登服务器
+          jq -n --rawfile rubric docs/work/ai-code-review-rubric.md \
+                --rawfile context .pr-review/context.md \
+                --argjson pr "$PR" --arg sha "$HEAD_SHA" \
+                '{rubric:$rubric, context:$context, pr:$pr, head_sha:$sha}' \
+            > .pr-review/request.json
+          echo "请求体 $(wc -c <.pr-review/request.json) 字节 -> $ENDPOINT"
+
+          # 预算契约：服务端单次审查上限（/srv/mipl-reviewer 的 runTimeoutMs）要比
+          # 这里的 --max-time 至少少 60s，客户端才收得到服务端到点时返回的
+          # 502 + stderr；两边取同一个值，客户端必然先超时，诊断全丢。
+          # 2026-10-17 PR #175（run 39055944585）就是两边都卡在 900s：客户端先
+          # 超时（0 字节），服务端随后被 RuntimeMaxSec 杀掉。
+          # 连接失败时 curl 不会创建/截断 -o 指定的文件，先清空免得读到残留。
+          : > .pr-review/response.txt
+          set +e
+          curl -sS --fail-with-body --max-time 1860 \
+            -H "Authorization: Bearer $oidc" \
+            -H 'Content-Type: application/json' \
+            --data-binary @.pr-review/request.json \
+            -w '%{http_code}' \
+            -o .pr-review/response.txt \
+            "$ENDPOINT" > .pr-review/http-status.txt
+          rc=$?
+          set -e
+          http=$(cat .pr-review/http-status.txt 2>/dev/null || true)
+          echo "审查服务 HTTP ${http:-000}，curl exit $rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::审查服务调用失败（curl exit $rc，HTTP ${http:-000}）"
+            # 502 的响应体里有服务端的 exit code 和 stderr，是唯一的根因线索；
+            # 以前它只落在 response.txt 里，set -e 一退就再也看不到。
+            if [ -s .pr-review/response.txt ]; then
+              echo "--- 服务端响应体（截断 8000 字节）---"
+              head -c 8000 .pr-review/response.txt
+              echo
+            fi
+            exit "$rc"
+          fi
+          echo "已收到审查结果 $(wc -c <.pr-review/response.txt) 字节"
+
+      - name: 回传行级 Review 批注
+        if: steps.precheck.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.precheck.outputs.pr }}
+          ACK_COMMENT_ID: ${{ steps.ack.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+
+          # 结果来自服务端返回的文件（不再是 action 的 output）
+          RAW_RESPONSE=$(cat .pr-review/response.txt)
+          [ -n "$RAW_RESPONSE" ] || { echo "::error::服务端返回为空"; exit 1; }
+
+          export HEAD_SHA=$(awk -F'\t' '$1=="head"{print $2}' .pr-review/meta.tsv)
+          [ -n "$HEAD_SHA" ] || { echo "::error::未能解析到 head sha"; exit 1; }
+          echo "Head SHA: $HEAD_SHA"
+
+          # 提取纯 JSON 内容（若模型返回带 ```json 代码块则剥离）
+          CLEAN_JSON=$(python3 -c '
+          import sys, re, json, os
+          text = sys.stdin.read().strip()
+          m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+          if m:
+              raw = m.group(1)
+          else:
+              raw = text
+          try:
+              data = json.loads(raw)
+              print(json.dumps(data))
+          except Exception as e:
+              # 解析失败：保留原始响应到文件，方便排查
+              with open(".pr-review/raw-response.txt", "w") as rf:
+                  rf.write(text)
+              sys.stderr.write(f"::warning::AI 响应 JSON 解析失败（{e}），原始内容已写入 .pr-review/raw-response.txt\n")
+              fallback = {
+                  "summary": "审查结果解析异常，请查看原始日志（raw-response.txt）。",
+                  "verdict": "NEEDS_ATTENTION",
+                  "comments": []
+              }
+              print(json.dumps(fallback))
+          ' <<< "$RAW_RESPONSE")
+
+          echo "$CLEAN_JSON" > .pr-review/result.json
+
+          # 构造 GitHub Review API 请求负载
+          # 注意：GitHub Review API 要求 inline comment 的行号必须在该文件的 diff hunk 内；
+          # 行号越界会导致整条 Review 以 422 失败。对无效行号的批注降级为 body 文本。
+          python3 -c '
+          import json, os, sys
+
+          with open(".pr-review/result.json", "r") as f:
+              data = json.load(f)
+
+          # 从 context.md 的 [L行号] 标记中提取各文件的合法行号集合
+          valid_lines: dict[str, set[int]] = {}
+          try:
+              with open(".pr-review/context.md", "r") as cf:
+                  cur_file = None
+                  for ln in cf:
+                      ln = ln.rstrip("\n")
+                      if ln.startswith("文件: "):
+                          cur_file = ln[4:].strip()
+                          valid_lines.setdefault(cur_file, set())
+                      elif cur_file and ln.startswith("[L"):
+                          bracket = ln.index("]")
+                          try:
+                              valid_lines[cur_file].add(int(ln[2:bracket]))
+                          except ValueError:
+                              pass
+          except FileNotFoundError:
+              pass  # context.md 缺失时跳过校验，让 API 自行处理
+
+          head_sha = os.environ.get("HEAD_SHA")
+          summary = data.get("summary", "审查已完成。")
+          verdict = data.get("verdict", "PASS")
+          comments = data.get("comments", [])
+
+          # 注意：本段 python 被外层 bash 单引号包裹，源码里只能出现双引号
+          # （单引号会提前闭合 bash 串，bash -n 查不出来，只有真跑才炸）
+          # emoji 由 workflow 按枚举确定性映射，不交给模型自由发挥
+          verdict_emoji = {"PASS": "✅", "NEEDS_ATTENTION": "⚠️"}.get(verdict, "❓")
+          cat_emoji = {"REDLINE": "🚫", "ENGINEERING": "🔧"}
+          sev_emoji = {"ERROR": "❌", "WARNING": "⚠️", "INFO": "💡"}
+
+          body_lines = [
+              "### 🔍 MipLinux PR 严格型审查结论",
+              "",
+              f"- {verdict_emoji} **结论**: {verdict}",
+              f"- 📝 **概括**: {summary}",
+              f"- 🔖 **Commit**: `{head_sha[:7]}`",
+              "",
+              "<!-- mipl-review: head=" + head_sha[:7] + " -->"
+          ]
+
+          review_payload = {
+              "commit_id": head_sha,
+              "body": "",  # 先占位，最后填入
+              "event": "COMMENT",
+              "comments": []
+          }
+
+          fallback_notes = []  # 行号越界的批注降级到 body
+
+          for c in comments:
+              path = c.get("path")
+              line = c.get("line")
+              start_line = c.get("start_line")
+              msg = c.get("message", "")
+              cat = c.get("category", "ENGINEERING")
+              sev = c.get("severity", "WARNING")
+              if not (path and line):
+                  continue
+              line_int = int(line)
+              # 取值先落到变量：f-string 里不嵌套同类引号，免得依赖 PEP 701（Python 3.12+）
+              mark = sev_emoji.get(sev, "-")
+              catmark = cat_emoji.get(cat, "-")
+              # 校验行号是否在 diff 内；valid_lines 为空时跳过校验（context.md 缺失场景）
+              # path 不在 diff 里也必须降级：贴上去会被 GitHub 以 422 拒绝，整条 Review 一起失败
+              if valid_lines and (path not in valid_lines or line_int not in valid_lines[path]):
+                  fallback_notes.append(f"- {mark} **[{cat} / {sev}]** `{path}:{line_int}` {msg}")
+                  continue
+              comment_body = f"{mark} **[{catmark} {cat} / {sev}]** {msg}"
+              item = {
+                  "path": path,
+                  "line": line_int,
+                  "side": "RIGHT",
+                  "body": comment_body
+              }
+              if start_line is not None:
+                  try:
+                      sl = int(start_line)
+                      if sl < line_int:
+                          item["start_line"] = sl
+                          item["start_side"] = "RIGHT"
+                  except (ValueError, TypeError):
+                      pass
+              review_payload["comments"].append(item)
+
+          if fallback_notes:
+              body_lines += ["", "---", "**⚠️ 以下批注因行号超出 diff 范围，无法贴到具体行：**", ""] + fallback_notes
+
+          review_payload["body"] = "\n".join(body_lines)
+
+          with open(".pr-review/payload.json", "w") as f:
+              json.dump(review_payload, f, indent=2)
+          '
+
+          # 提交 GitHub Review
+          gh api -X POST "repos/{owner}/{repo}/pulls/$PR/reviews" \
+            --input .pr-review/payload.json >/dev/null
+
+          echo "Review 已成功回传至 PR #$PR"
+
+          # 回执收尾：把「正在审查中」改成完成态，避免 PR 里留下过期提示。
+          # 这一步失败不应连累已经回传成功的 Review，只发 warning。
+          if [ -n "${ACK_COMMENT_ID:-}" ]; then
+            verdict=$(jq -r '.verdict // "UNKNOWN"' .pr-review/result.json)
+            case "$verdict" in
+              PASS) verdict_emoji="✅" ;;
+              NEEDS_ATTENTION) verdict_emoji="⚠️" ;;
+              *) verdict_emoji="❓" ;;
+            esac
+            done_body=$(printf '%s\n' \
+              "${verdict_emoji} **审查完成** · 结论 \`${verdict}\` · \`$(echo "$HEAD_SHA" | cut -c1-7)\`" \
+              "" \
+              "<!-- mipl-review-ack: done run=${GITHUB_RUN_ID} -->")
+            if jq -n --arg body "$done_body" '{body: $body}' \
+              | gh api -X PATCH "repos/{owner}/{repo}/issues/comments/$ACK_COMMENT_ID" --input - >/dev/null; then
+              echo "回执评论 #$ACK_COMMENT_ID 已更新为完成态"
+            else
+              echo "::warning::回执评论 #$ACK_COMMENT_ID 更新失败（Review 已回传，不影响结论）"
+            fi
+          fi
+
+          # 写入 Step Summary
+          {
+            echo "### MipLinux PR 严格型审查结果"
+            echo
+            jq -r '.body' .pr-review/payload.json
+            echo
+            echo "- **行级批注数**: $(jq ".comments | length" .pr-review/payload.json)"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # 中途失败时不能让「正在审查中」一直挂着，否则 PR 上的状态是假的
+      - name: 回执收尾（审查中断）
+        if: failure() && steps.ack.outputs.comment_id != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          ACK_COMMENT_ID: ${{ steps.ack.outputs.comment_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          body=$(printf '%s\n' \
+            "⚠️ **审查中断**：工作流在回传结论前失败，请查看 [运行日志](${RUN_URL})。" \
+            "" \
+            "<!-- mipl-review-ack: failed run=${GITHUB_RUN_ID} -->")
+          jq -n --arg body "$body" '{body: $body}' \
+            | gh api -X PATCH "repos/{owner}/{repo}/issues/comments/$ACK_COMMENT_ID" --input - >/dev/null
+          echo "回执评论 #$ACK_COMMENT_ID 已标注为中断"

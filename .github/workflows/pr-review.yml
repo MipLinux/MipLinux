@@ -6,10 +6,11 @@ name: PR review（严格型代码与红线审查）
 #
 # 判据的唯一源：docs/work/ai-code-review-rubric.md
 # 上下文提取脚本：scripts/pr-review-context.sh
-# 触发机制：仅当核心维护者在 PR 评论中输入 /mipl-review 时按需唤醒，或通过 workflow_dispatch 手动触发。
+# 触发机制：仅当 .github/CODEOWNERS 里的 owner 在 PR 评论中输入 /mipl-review 时按需唤醒，或由其通过 workflow_dispatch 手动触发。
+# 其他用户输入 /mipl-review 不会启动审查；precheck 会提示联系 CODEOWNERS owner。
 #
 # 推理在哪跑：不在 runner 上，而是维护者自建服务器上的 dsh agent（见 vars.REVIEWER_ENDPOINT）。
-# 判据与 diff 一起送过去，agent 通过只读克隆对照全仓；回传仍由本工作流用审查者 App 完成。
+# 判据与 diff 一起送过去，agent 通过只读克隆核对 diff 涉及的上下文；回传仍由本工作流用审查者 App 完成。
 # 鉴权用 GitHub OIDC（id-token: write）：没有长期共享密钥，token 只对本次运行有效。
 
 on:
@@ -24,6 +25,8 @@ on:
 permissions:
   pull-requests: write
   contents: read
+  # 无权限提示与回执都走 issues comments 接口
+  issues: write
   # 换取服务端可验签的 OIDC token；服务端只认本仓库 + 固定 audience
   id-token: write
 
@@ -32,22 +35,24 @@ jobs:
     # 严格门禁：
     # 1. 仅限针对 PR 的评论（issue.pull_request 存在）或手动 dispatch；
     # 2. 评论必须包含 /mipl-review 指令；
-    # 3. 严格限制触发者身份：仅项目核心维护者（OWNER / MEMBER）有权触发，防止非受信任用户消耗 Token 或注入。
+    # 3. 触发者必须是 .github/CODEOWNERS 里的 owner；无权限时由 precheck 提示并跳过。
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.issue.pull_request != null &&
        contains(github.event.comment.body, '/mipl-review') &&
-       contains(fromJSON('["OWNER","MEMBER"]'), github.event.comment.author_association))
+       github.event.comment.user.type != 'Bot')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 检查触发条件与配置
+      - name: 检查触发权限与配置
         id: precheck
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_PR: ${{ github.event.issue.number || github.event.inputs.pr }}
+          ACTOR: ${{ github.actor }}
           ENDPOINT: ${{ vars.REVIEWER_ENDPOINT }}
           REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
           REVIEWER_PRIVATE_KEY: ${{ secrets.REVIEWER_PRIVATE_KEY }}
@@ -55,6 +60,37 @@ jobs:
           set -euo pipefail
           case "$INPUT_PR" in ''|*[!0-9]*) echo "::error::PR 编号必须是纯数字"; exit 1 ;; esac
           echo "pr=$INPUT_PR" >>"$GITHUB_OUTPUT"
+
+          # 触发权限的唯一源是仓库里的 CODEOWNERS（GitHub Actions 没有内置的
+          # CODEOWNER 变量）。只匹配 @用户名；团队条目 @org/team 需要额外解析。
+          OWNERS=$(sed 's/#.*//' .github/CODEOWNERS \
+                     | grep -oE '@[A-Za-z0-9_./-]+' \
+                     | sort -u | tr '\n' ' ' || true)
+          OWNERS=${OWNERS% }
+          if [ -z "$OWNERS" ]; then
+            echo "::error::CODEOWNERS 里没有可识别的 @owner，无法判定触发权限"
+            exit 1
+          fi
+          if printf '%s\n' "$OWNERS" | tr ' ' '\n' | grep -Fxiq "@${ACTOR}"; then
+            echo "触发者 @${ACTOR} 是 CODEOWNERS owner：${OWNERS}"
+          else
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            body=$(printf '## 🔒 严格型审查仅限代码所有者触发\n\n@%s 严格型审查目前只允许代码所有者（%s）触发。需要审查请联系 %s。\n\n<!-- mipl-review-denied -->' \
+              "$ACTOR" "$OWNERS" "$OWNERS")
+            # 同一 PR 只保留一条提示，避免反复触发刷屏
+            existing=$(gh api "repos/{owner}/{repo}/issues/$INPUT_PR/comments" --paginate \
+                         -q '.[] | select(.body | contains("mipl-review-denied")) | .id' | tail -1 || true)
+            if [ -n "$existing" ]; then
+              jq -n --arg body "$body" '{body: $body}' \
+                | gh api -X PATCH "repos/{owner}/{repo}/issues/comments/$existing" --input - >/dev/null
+              echo "已更新无权限提示评论 #$existing"
+            else
+              jq -n --arg body "$body" '{body: $body}' \
+                | gh api -X POST "repos/{owner}/{repo}/issues/$INPUT_PR/comments" --input - >/dev/null
+              echo "已投递无权限提示评论"
+            fi
+            exit 0
+          fi
 
           # 服务端入口是仓库变量（不是密钥）：没配就别往下走。
           # 推理所需的那把 API key 在服务器上，runner 侧不再持有。

@@ -205,10 +205,10 @@ class TestValidateTarget(unittest.TestCase):
         """ESP 挂在 `<target>/boot`，`mount` / `umount -R` 同样会解析它（复核二轮 finding）。"""
         from unittest import mock
 
-        real = options.os.path.realpath
-
+        # 非 boot 的路径原样返回：不读宿主机状态，测试就不会因为宿主 `/mnt` 是链接
+        # 而在 target 那一步先被拒（那样这条用例就没验到 boot）。
         def fake(path):
-            return "/" if path == "/mnt/mipl/boot" else real(path)
+            return "/" if path == "/mnt/mipl/boot" else path
 
         with mock.patch("mipl_installer.options.os.path.realpath", side_effect=fake):
             with self.assertRaises(InstallerError) as ctx:

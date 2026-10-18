@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path, PurePosixPath
@@ -267,6 +268,11 @@ def validate_target(target: str) -> None:
     位置却长得不一样的写法，会让「是不是我们的」这个判断悄悄失准。`..` 尤其要
     单独拦：`PurePosixPath` 只做词法规范化、**不解析 `..`**，光靠它会漏掉
     `/mnt/../etc` 这种「前缀像 `/mnt/`、解析后是 `/etc`」的写法。
+
+    **字符串合法还不够：`mount` / `umount` 都会解析符号链接。** `/mnt/mipl -> /proc`
+    能过上面每一条，却把一次 `umount -R`（或一次挂载）落到真实路径上；指向 `/` 时
+    足以影响运行中的系统。所以再按 `realpath` 比一次：只接**解析后与字面完全一致**
+    的写法 —— 保留命名空间里的链接同样不认，归属判据才只有一个答案。
     """
     components = PurePosixPath(target).parts if target else ()
     if (
@@ -278,5 +284,13 @@ def validate_target(target: str) -> None:
             f"目标挂载点不合法：{target!r}",
             EXIT_USAGE,
             hint=f"/mnt/ 下的规范化绝对路径，例如 {DEFAULT_TARGET}（不要用 /、/mnt 或带 .. 的写法）",
+            reason="format",
+        )
+    resolved = os.path.realpath(target)
+    if resolved != target:
+        raise InstallerError(
+            f"目标挂载点不能经过符号链接：{target!r}（实际指向 {resolved!r}）",
+            EXIT_USAGE,
+            hint=f"/mnt/ 下的真实目录，例如 {DEFAULT_TARGET}；不要用指向别处的链接",
             reason="format",
         )

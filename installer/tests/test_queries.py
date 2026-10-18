@@ -341,6 +341,20 @@ class TestRunQuery(unittest.TestCase):
                 self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
         self.assertEqual(runner.history, [], "目标不合法时一条命令都不该跑")
 
+    def test_unmount_target_refuses_a_symlinked_target(self):
+        """字符串合法但指向别处：`umount -R` 会解析链接，所以在动手前就拒。
+
+        `/mnt/mipl -> /proc` 是复核 finding 的原始例子；这里用 realpath 的假答案
+        验同一条判据（不往宿主机 `/mnt` 写东西）。
+        """
+        runner = FakeRunner()
+        with mock.patch("mipl_installer.options.os.path.realpath", return_value="/proc"):
+            with self.assertRaises(InstallerError) as ctx:
+                queries.unmount_target(runner)
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+        self.assertEqual(runner.history, [], "链接目标不合法时一条命令都不该跑")
+
     def test_unmount_target_is_a_query_and_never_runs_under_dry_run(self):
         boom = AssertionError("dry-run 下不许起任何子进程")
         with mock.patch.object(util.subprocess, "run", side_effect=boom), \

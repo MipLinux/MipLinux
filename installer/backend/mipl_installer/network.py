@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .util import EXIT_USAGE, InstallerError, Runner
 
 #: 无线信号是**百分比**（nmcli 的 SIGNAL 字段，0–100），**不是 dBm**。
@@ -193,19 +195,21 @@ def wifi_networks(runner: Runner, *, rescan: bool = False) -> list[dict]:
 
 
 #: 连接失败的分类。界面按它查 `network.err.*` 的句子（**错误码是数据，句子是文案**）。
-#:
-#: **顺序即优先级，而且先认没有歧义的措辞。** nmcli 会把 SSID 原样回显进报错，而
-#: SSID 是外部输入：一个叫 `password` 的网络能让「找不到这个网络」被判成密码错，
-#: 界面就给出一句与事实无关的补救话。所以 `no network with SSID`、
-#: `secrets were required` 这类**明确措辞**排在 `password` / `psk` / `timeout`
-#: 这些**普通词**前面（同一个码出现两次是允许的：那只是把它的判据分成两档）。
+#: 顺序即优先级 —— nmcli 一句报错里可能同时出现「密码」和「超时」，先认更具体的那条。
 FAILURE_PATTERNS = (
-    ("notFound", ("no network with ssid",)),
-    ("auth", ("secrets were required", "no secrets", "802-11-wireless-security", "802.1x")),
+    ("auth", ("secrets were required", "no secrets", "802-11-wireless-security",
+              "password", "psk", "802.1x", "authentication")),
+    ("notFound", ("no network with ssid", "not found", "no such")),
     ("timeout", ("timeout", "timed out", "time out")),
-    ("auth", ("password", "psk", "authentication")),
-    ("notFound", ("not found", "no such")),
 )
+
+#: `util.Runner.run` 的失败消息头：`命令失败（退出码 4）：<命令>`，命令之后可能接
+#: `：\n    <stderr>`。**只认这个前缀**，不按「有没有换行」猜：调用方直接传 nmcli
+#: 自己的多行报错时，第一行恰恰是真正的错误（`Error: Secrets were required…`）。
+_RUNNER_FAILURE = re.compile(r"^命令失败（退出码 \d+）：")
+
+#: nmcli 回显的**名字**（SSID / 连接名）一律带引号。名字是外部输入，不能当判据。
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
 def classify_failure(text: str) -> str:
@@ -215,15 +219,24 @@ def classify_failure(text: str) -> str:
     就可能变，而界面要按它选中英两套句子。在这里收敛成四个码，界面的分支就固定了。
     认不出来的一律 `other` —— 编一个具体的失败原因比说「连接失败」更糟。
 
-    `Runner.run` 拼出来的消息**第一行是命令本身**，nmcli 的报错在后面：SSID 是
-    外部输入，一个叫 `password` / `timeout` 的网络会让「找不到这个网络」被判成
-    密码错或超时。所以有换行时只认报错那一段；直接传一行报错（本函数的原始用法）
-    时仍是全文匹配。判据内部的优先级见 `FAILURE_PATTERNS`。
+    两条输入卫生（都是「认得出才做」，不是猜）：
+
+    * `Runner.run` 的消息 = `命令失败（退出码 N）：` + 命令 + 可选 `：\\n` + stderr。
+      只有**开头认得出这个前缀**才切掉命令段；认不出来就整段当报错本身 ——
+      直接传 nmcli 的多行输出时，第一行不能丢。
+    * 引号里的是**名字**（`SSID 'X'` / `Connection 'X'`），而名字是外部输入：
+      一个叫 `password` 或 `no network with ssid` 的网络，会让报错里凭空多出分类
+      关键词。匹配前把引号段摘掉；**不**按子串全局删 SSID（名字叫 `a` 时会把
+      `password` 拆坏）。判据内部的优先级见 `FAILURE_PATTERNS`。
     """
     lowered = (text or "").lower()
-    _, separator, detail = lowered.partition("\n")
-    if separator:
+    if _RUNNER_FAILURE.match(lowered):
+        _, separator, detail = lowered.partition("：\n")
+        if not separator:
+            # 命令跑挂了但没捕获到 stderr：没有可读的报错，不猜。
+            return "other"
         lowered = detail
+    lowered = _QUOTED.sub("''", lowered)
     for code, needles in FAILURE_PATTERNS:
         if any(needle in lowered for needle in needles):
             return code

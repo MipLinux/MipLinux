@@ -108,6 +108,21 @@ class TestIncludes(unittest.TestCase):
         view = keymap_view.parse("us", str(self.root))
         self.assertEqual(sorted(key.code for key in view.keys), [16, 17])
 
+    def test_include_cannot_climb_out_of_the_keymap_root(self):
+        """名字来自数据，但**绝对路径会覆盖左操作数**：`directory / "/etc/passwd"`
+        直接落到树外。不拦的话 `--print-keymap` 就成了「读任意文件」。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outside = Path(tmp.name) / "secret.inc"
+        outside.write_text("keycode 30 = a\n", encoding="utf-8")
+        _write_map(self.root, "i386/qwerty/us.map.gz",
+                   f'include "{outside}"\n'                 # 绝对路径
+                   'include "../../../../../../etc/passwd"\n'  # `..` 爬到树外
+                   'keycode 16 = q\n')
+        view = keymap_view.parse("us", str(self.root))
+        self.assertEqual([item.path for item in view.includes], [None, None])
+        self.assertEqual([key.code for key in view.keys], [16])
+
 
 class TestMerge(unittest.TestCase):
     """include 的语义 = 把对方的内容插在这一行，后出现的覆盖先出现的。"""

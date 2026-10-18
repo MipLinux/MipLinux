@@ -187,6 +187,20 @@ class TestValidateTarget(unittest.TestCase):
                 self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
                 self.assertEqual(ctx.exception.reason, "format")
 
+    def test_refuses_a_target_that_resolves_elsewhere(self):
+        """字符串合法不等于安全：`mount` / `umount` 会**解析符号链接**。
+
+        `/mnt/mipl -> /proc` 能过上面每一条字符串检查，却把一次 `umount -R` 落到
+        `/proc` 上。这里直接把 realpath 换成另一种答案来验（不往宿主机 `/mnt` 写东西）。
+        """
+        from unittest import mock
+
+        with mock.patch("mipl_installer.options.os.path.realpath", return_value="/proc"):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target("/mnt/mipl")
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+
 
 class TestValidators(_RootCase):
     def test_timezone_must_exist(self):

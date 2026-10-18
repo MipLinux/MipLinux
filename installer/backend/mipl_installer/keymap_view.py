@@ -245,9 +245,23 @@ def include_candidates(name: str, includer: Path, root: Path) -> list[Path]:
 
 
 def resolve_include(name: str, includer: Path, root: Path) -> Path | None:
+    """把 `include "名字"` 解析成 root 之下的一个真文件；解析不出去就是 None。
+
+    名字来自键位表（数据，不是用户输入），但 `Path` 有一条容易忘的规则：
+    **以 `/` 开头的右操作数会直接覆盖左操作数**。所以 `include "/etc/passwd"`
+    会让 `directory / name` 落到树外，`include "../../x"` 同理 —— 那让
+    `--print-keymap` 变成「读任意文件」。这里要求**解析后的真实路径仍在 root 下**。
+    """
+    base = root.resolve()
     for candidate in include_candidates(name, includer, root):
-        if candidate.is_file():
-            return candidate
+        if not candidate.is_file():
+            continue
+        try:
+            if not candidate.resolve().is_relative_to(base):
+                continue
+        except OSError:
+            continue
+        return candidate
     return None
 
 

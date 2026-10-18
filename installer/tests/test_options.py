@@ -216,6 +216,25 @@ class TestValidateTarget(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
         self.assertEqual(ctx.exception.reason, "format")
 
+    def test_refuses_a_target_that_exists_as_a_regular_file(self):
+        """`ensure_dir()` 跑在盘擦完之后：等到那时才抛 FileExistsError 就晚了。"""
+        from unittest import mock
+
+        target = "/mnt/mipl"
+
+        def fake_exists(path):
+            return path in (target, "/mnt")
+
+        def fake_isdir(path):
+            return path == "/mnt"
+
+        with mock.patch("mipl_installer.options.os.path.exists", side_effect=fake_exists), \
+                mock.patch("mipl_installer.options.os.path.isdir", side_effect=fake_isdir):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target(target)
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+
 
 class TestValidators(_RootCase):
     def test_timezone_must_exist(self):

@@ -299,3 +299,17 @@ def validate_target(target: str) -> None:
                 hint=f"/mnt/ 下的真实目录，例如 {DEFAULT_TARGET}；不要用指向别处的链接",
                 reason="format",
             )
+    # 已存在的部分必须是**目录**。`ensure_dir()` 跑在盘擦完之后，撞上一个同名普通
+    # 文件才抛 `FileExistsError` —— 那时分区已经没了，失败点远在动盘之后。
+    probe = target
+    while True:
+        if os.path.exists(probe) and not os.path.isdir(probe):
+            raise InstallerError(
+                f"目标挂载点已存在但不是目录：{probe!r}",
+                EXIT_USAGE,
+                hint=f"{DEFAULT_TARGET} 这类路径要么不存在（安装器会建），要么是目录",
+                reason="format",
+            )
+        if probe == "/mnt":
+            break
+        probe = os.path.dirname(probe)

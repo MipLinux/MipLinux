@@ -146,12 +146,34 @@ jobs:
             > .pr-review/request.json
           echo "请求体 $(wc -c <.pr-review/request.json) 字节 -> $ENDPOINT"
 
-          # agent 要克隆仓库并逐条核对，单次可能跑到十几分钟
-          curl -sS --fail-with-body --max-time 900 \
+          # 预算契约：服务端单次审查上限（/srv/mipl-reviewer 的 runTimeoutMs）要比
+          # 这里的 --max-time 至少少 60s，客户端才收得到服务端到点时返回的
+          # 502 + stderr；两边取同一个值，客户端必然先超时，诊断全丢。
+          # 2026-10-17 PR #175（run 39055944585）就是两边都卡在 900s：客户端先
+          # 超时（0 字节），服务端随后被 RuntimeMaxSec 杀掉。
+          set +e
+          curl -sS --fail-with-body --max-time 1860 \
             -H "Authorization: Bearer $oidc" \
             -H 'Content-Type: application/json' \
             --data-binary @.pr-review/request.json \
-            "$ENDPOINT" -o .pr-review/response.txt
+            -w '%{http_code}' \
+            -o .pr-review/response.txt \
+            "$ENDPOINT" > .pr-review/http-status.txt
+          rc=$?
+          set -e
+          http=$(cat .pr-review/http-status.txt 2>/dev/null || true)
+          echo "审查服务 HTTP ${http:-000}，curl exit $rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::审查服务调用失败（curl exit $rc，HTTP ${http:-000}）"
+            # 502 的响应体里有服务端的 exit code 和 stderr，是唯一的根因线索；
+            # 以前它只落在 response.txt 里，set -e 一退就再也看不到。
+            if [ -s .pr-review/response.txt ]; then
+              echo "--- 服务端响应体（截断 8000 字节）---"
+              head -c 8000 .pr-review/response.txt
+              echo
+            fi
+            exit "$rc"
+          fi
           echo "已收到审查结果 $(wc -c <.pr-review/response.txt) 字节"
 
       - name: 回传行级 Review 批注

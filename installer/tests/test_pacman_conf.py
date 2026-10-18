@@ -140,7 +140,7 @@ class TestCopyPacmanConfig(unittest.TestCase):
                              mirrorlist.read_text(encoding="utf-8"))
 
     def test_writes_strict_conf_when_source_has_optional_trust(self):
-        """照抄 Live conf 会把 `Optional TrustAll` 带进装后系统 —— 不许（#135）。"""
+        """来源 conf 带 `Optional TrustAll` 时，不能把它带进装后系统（#135）。"""
         runner = FakeRunner()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

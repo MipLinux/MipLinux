@@ -28,8 +28,20 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+/**
+ * 为探针隔离 Chromium 数据：直接采用 MIPL_PROBE_USER_DATA，否则创建默认临时目录。
+ * @returns {string} 用户数据目录路径；环境变量指定的目录不在此创建。
+ */
+function pickUserDataDir() {
+  if (process.env.MIPL_PROBE_USER_DATA) return process.env.MIPL_PROBE_USER_DATA;
+  const dir = path.join(os.tmpdir(), 'mipl-probe-data');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 const APP_DIR = path.resolve(__dirname, '..');
-const PID_FILE = path.join(os.tmpdir(), 'mipl-probe.pid');
+const userDataDir = pickUserDataDir();
+const PID_FILE = path.join(userDataDir, 'mipl-probe.pid');
 
 /**
  * 按命令行特征收集候选探针 PID，排除自身与 mip-paper，忽略不可读的进程。
@@ -43,13 +55,14 @@ function findProbeProcesses() {
     for (const entry of entries) {
       if (!/^\d+$/.test(entry)) continue;
       const pid = Number(entry);
-      if (pid === process.pid) continue;
+      if (pid === process.pid || pid === process.ppid || pid <= 1) continue;
       try {
         const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
         if (cmd.includes('mip-paper')) continue; // 绝对防护：宿主机服务绝不误杀
+        const parts = cmd.split('\0').filter(Boolean);
         const isProbe =
-          (cmd.includes('--user-data-dir=') && cmd.includes('mipl-probe')) ||
-          (cmd.includes('installer/frontend/app') && (cmd.includes('electron') || cmd.includes('probe-render')));
+          parts.some((arg) => arg.startsWith('--user-data-dir=') && arg.includes('mipl-probe')) ||
+          parts.some((arg) => /(?:^|\/)tools\/probe-render\.js$/.test(arg));
         if (isProbe) pids.push(pid);
       } catch {}
     }
@@ -67,8 +80,11 @@ function cleanStaleProbes({ verbose = true } = {}) {
   const targetPids = new Set(findProbeProcesses());
   if (fs.existsSync(PID_FILE)) {
     try {
-      const saved = Number(fs.readFileSync(PID_FILE, 'utf8').trim());
-      if (saved && saved !== process.pid) targetPids.add(saved);
+      const raw = fs.readFileSync(PID_FILE, 'utf8').trim();
+      const saved = /^\d+$/.test(raw) ? Number(raw) : NaN;
+      if (Number.isSafeInteger(saved) && saved > 1 && saved !== process.pid) {
+        targetPids.add(saved);
+      }
       fs.unlinkSync(PID_FILE);
     } catch {}
   }
@@ -148,23 +164,11 @@ function pickOutDir() {
   }
 }
 
-/**
- * 为探针隔离 Chromium 数据：直接采用 MIPL_PROBE_USER_DATA，否则创建默认临时目录。
- * @returns {string} 用户数据目录路径；环境变量指定的目录不在此创建。
- */
-function pickUserDataDir() {
-  if (process.env.MIPL_PROBE_USER_DATA) return process.env.MIPL_PROBE_USER_DATA;
-  const dir = path.join(os.tmpdir(), 'mipl-probe-data');
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
 // 启动前先静默收敛一次历史残留，防止占用单实例锁
 cleanStaleProbes({ verbose: false });
 
 const electron = findElectron();
 const outDir = pickOutDir();
-const userDataDir = pickUserDataDir();
 
 const args = [
   APP_DIR,
@@ -186,7 +190,7 @@ console.log(`截图目录: ${outDir}\n`);
 
 const child = spawn(electron, args, {
   cwd: APP_DIR,
-  stdio: 'inherit',
+  stdio: ['inherit', 'pipe', 'inherit'],
   env: { ...process.env, MIPL_PROBE: '1', MIPL_PROBE_OUT: outDir, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
 });
 
@@ -221,6 +225,42 @@ const forwardSignal = (sig) => {
 process.on('SIGINT', () => forwardSignal('SIGINT'));
 process.on('SIGTERM', () => forwardSignal('SIGTERM'));
 
+let stdoutBuffer = '';
+let passedSentinel = false;
+let failedSentinel = false;
+let lastProgressLine = '';
+
+function recordLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  lastProgressLine = trimmed;
+  if (trimmed.includes('✅ 探针全部通过')) {
+    passedSentinel = true;
+  }
+  if (trimmed.includes('❌ 探针失败')) {
+    failedSentinel = true;
+  }
+}
+
+function flushRemainingStdout() {
+  if (stdoutBuffer) {
+    recordLine(stdoutBuffer);
+    stdoutBuffer = '';
+  }
+}
+
+if (child.stdout) {
+  child.stdout.on('data', (chunk) => {
+    process.stdout.write(chunk);
+    stdoutBuffer += chunk.toString('utf8');
+    const lines = stdoutBuffer.split('\n');
+    stdoutBuffer = lines.pop();
+    for (const line of lines) {
+      recordLine(line);
+    }
+  });
+}
+
 child.on('error', (error) => {
   cleanPid();
   console.error(`\n❌ 起不了 Electron（${electron}）：${error.message}`);
@@ -228,11 +268,61 @@ child.on('error', (error) => {
   process.exit(2);
 });
 
-child.on('exit', (code, signal) => {
+let terminated = false;
+function handleTermination(code, signal) {
+  if (terminated) return;
+  terminated = true;
   cleanPid();
+  flushRemainingStdout();
+
   if (signal) {
     console.error(`\n❌ Electron 被信号终止：${signal}`);
+    if (lastProgressLine) {
+      console.error(`   最后进展：${lastProgressLine}`);
+    }
     process.exit(2);
   }
-  process.exit(code === null ? 2 : code);
+
+  if (code !== 0) {
+    if (!failedSentinel && !passedSentinel) {
+      console.error(`\n❌ 探针异常退出（退出码 ${code}）`);
+      console.error(`   最后进展：${lastProgressLine || '（无任何输出）'}`);
+    }
+    process.exit(code === null ? 2 : code);
+  }
+
+  // code === 0
+  if (!passedSentinel) {
+    console.error('\n❌ 探针未完成就提前退出（退出码 0，未见「✅ 探针全部通过」）');
+    console.error(`   最后进展：${lastProgressLine || '（无任何输出）'}`);
+    process.exit(1);
+  }
+
+  const pngCount = fs.existsSync(outDir)
+    ? fs.readdirSync(outDir).filter((name) => name.endsWith('.png')).length
+    : 0;
+  if (pngCount === 0) {
+    console.error('\n❌ 探针未生成任何截图产物（未见有效截图）');
+    console.error(`   截图目录：${outDir}`);
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
+let exitCode = null;
+let exitSignal = null;
+
+child.on('exit', (code, signal) => {
+  cleanPid();
+  exitCode = code;
+  exitSignal = signal;
+  // Fallback: 如果 close 事件未在 1000ms 内触发，确保仍能收敛退出
+  setTimeout(() => handleTermination(exitCode, exitSignal), 1000).unref();
+});
+
+child.on('close', (code, signal) => {
+  const finalCode = code !== null ? code : exitCode;
+  const finalSignal = signal !== null ? signal : exitSignal;
+  handleTermination(finalCode, finalSignal);
 });

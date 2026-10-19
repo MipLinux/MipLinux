@@ -120,6 +120,9 @@ node installer/frontend/app/tools/probe-render.js --clean                       
 > 若探针异常中断需清理残留进程，走 `node tools/probe-render.js --clean` 或精准匹配该唯一目录路径。
 > **严禁用 `pkill -f "electron*"` 泛匹配**，它会误杀宿主机所有 Electron 服务（如 `mip-paper` 动态壁纸），
 > 导致其它应用崩溃、core dump 或桌面丢失壁纸。
+>
+> **完成校验（Issue #179）**：`probe-render.js` 必须确认 stdout 输出 `✅ 探针全部通过` 且截图产物存在才返回 0；
+> 渲染进程崩溃、窗口提前关闭或异常假退出时，driver 会以非 0 退出并明确打印「最后进展」，杜绝假绿。
 
 
 `node --test` 里有一组会**真的起一次后端**（`--print-keymap` 跑 `us`/`de`/`fr`/`dvorak`）——

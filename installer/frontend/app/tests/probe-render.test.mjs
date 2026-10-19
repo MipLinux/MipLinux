@@ -6,7 +6,9 @@
  *   2. Electron 提前以 0 退出时明确报非 0，且打印「最后跑到哪」（Issue #179）；
  *   3. 缺少截图产物时明确拦截（非 0）；
  *   4. 跑完且有产物时正常返回 0；
- *   5. 失败项存在时透传非 0 退出码。
+ *   5. 失败项存在时透传非 0 退出码；
+ *   6. 含有失败标记即便退出码为 0 也拒绝通过；
+ *   7. 启动前清理旧截图产物，防止历史旧图造成假通过。
  */
 
 import { test } from 'node:test';
@@ -21,23 +23,33 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.join(here, '..');
 const PROBE_RENDER = path.join(APP, 'tools', 'probe-render.js');
 
-function runProbe(args = [], env = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [PROBE_RENDER, ...args], {
-      env: { ...process.env, ...env },
+async function runProbe(args = [], env = {}) {
+  const ownsUserDataDir = !env.MIPL_PROBE_USER_DATA;
+  const userDataDir =
+    env.MIPL_PROBE_USER_DATA ?? (await mkdtemp(path.join(tmpdir(), 'probe-data-')));
+  try {
+    return await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [PROBE_RENDER, ...args], {
+        env: { ...process.env, ...env, MIPL_PROBE_USER_DATA: userDataDir },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => {
+        stdout += d.toString('utf8');
+      });
+      child.stderr.on('data', (d) => {
+        stderr += d.toString('utf8');
+      });
+      child.on('error', reject);
+      child.on('close', (code, signal) => {
+        resolve({ code, signal, stdout, stderr });
+      });
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => {
-      stdout += d.toString('utf8');
-    });
-    child.stderr.on('data', (d) => {
-      stderr += d.toString('utf8');
-    });
-    child.on('close', (code, signal) => {
-      resolve({ code, signal, stdout, stderr });
-    });
-  });
+  } finally {
+    if (ownsUserDataDir) {
+      await rm(userDataDir, { recursive: true, force: true });
+    }
+  }
 }
 
 test('probe-render.js --help 输出用法且返回 0', async () => {
@@ -113,7 +125,7 @@ test('通过标记与有效截图产物齐全时，driver 正常返回 0', async
   try {
     await writeFile(
       fakeBin,
-      '#!/bin/sh\ntouch "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      '#!/bin/sh\necho "fake-png-bytes" > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
       { mode: 0o755 }
     );
     const res = await runProbe([], {
@@ -141,6 +153,49 @@ test('探针明确断言失败时，driver 透传退出码且不报提前退出'
     });
     assert.equal(res.code, 1);
     assert.doesNotMatch(res.stderr, /探针未完成就提前退出/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('子进程退出 0 但含有失败标记时，driver 拒绝通过并报非 0', async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), 'probe-fake-'));
+  const fakeBin = path.join(tmp, 'fake-electron.sh');
+  try {
+    await writeFile(
+      fakeBin,
+      '#!/bin/sh\necho "❌ 探针失败 1 项："\necho "  - 示例断言失败"\necho "fake-png" > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      { mode: 0o755 }
+    );
+    const res = await runProbe([], {
+      MIPL_ELECTRON_BIN: fakeBin,
+      MIPL_PROBE_OUT: tmp,
+    });
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /探针包含失败断言，不能视为通过/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('运行前清理旧截图产物，若本次运行未生成有效截图则报错', async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), 'probe-fake-'));
+  const fakeBin = path.join(tmp, 'fake-electron.sh');
+  try {
+    // 写入一个旧截图
+    await writeFile(path.join(tmp, 'old-shot.png'), 'fake-image');
+    // fake 脚本打印通过但不产出任何截图
+    await writeFile(
+      fakeBin,
+      '#!/bin/sh\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      { mode: 0o755 }
+    );
+    const res = await runProbe([], {
+      MIPL_ELECTRON_BIN: fakeBin,
+      MIPL_PROBE_OUT: tmp,
+    });
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /探针未生成任何截图产物（未见有效截图）/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

@@ -113,7 +113,14 @@ python3 installer/frontend/app/tools/check-tokens.py                      # 色�
 python3 installer/frontend/app/tools/check-contrast.py                    # 对比度 46 组
 python3 -m unittest discover -s installer/frontend/theme/tests -t installer/frontend/theme
 MIPL_ELECTRON_BIN=<electron> node installer/frontend/app/tools/probe-render.js   # 离屏逐页渲染 + 断言 + 截图
+node installer/frontend/app/tools/probe-render.js --clean                          # 安全清理残留探针（严禁 pkill -f electron*）
 ```
+
+> **安全纪律（Issue #177）**：探针启动使用独立的 `--user-data-dir=/tmp/mipl-probe-data` 与宿主机隔离。
+> 若探针异常中断需清理残留进程，走 `node tools/probe-render.js --clean` 或精准匹配该唯一目录路径。
+> **严禁用 `pkill -f "electron*"` 泛匹配**，它会误杀宿主机所有 Electron 服务（如 `mip-paper` 动态壁纸），
+> 导致其它应用崩溃、core dump 或桌面丢失壁纸。
+
 
 `node --test` 里有一组会**真的起一次后端**（`--print-keymap` 跑 `us`/`de`/`fr`/`dvorak`）——
 这是这一层唯一能防住「两侧各自绿、合起来错」的办法，所以它需要 `python3` 与 `kbd`

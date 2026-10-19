@@ -5,15 +5,22 @@
  * ==========================================
  *
  *   node installer/frontend/app/tools/probe-render.js
+ *   node installer/frontend/app/tools/probe-render.js --clean
  *   MIPL_ELECTRON_BIN=/path/to/electron node …/probe-render.js
  *   MIPL_PROBE_OUT=/tmp/probe node …/probe-render.js
  *
  * Electron 运行时的找法（按顺序）：
  *   1. 环境变量 `MIPL_ELECTRON_BIN`（宿主机上通常指向解包出来的 `electron44`）；
  *   2. PATH 里的 `electron`（Live / 构建容器里由 profile/packages.x86_64 提供）；
- *   3. `/usr/lib/electron44/electron`（Arch 官方 electron44 包的位置）。
+ *   3. `/usr/lib/electron44/electron` 与 `/usr/lib/electron43/electron`。
  *
  * 找不到就**明确失败**，不假装通过 —— 「没跑」和「跑过且绿」必须分得清。
+ *
+ * 安全与进程纪律（Issue #177）：
+ *   探针必须携带独立的 `--user-data-dir`（默认 /tmp/mipl-probe-data），
+ *   使 Chromium 衍生出的所有子进程（GPU、Zygote、Network、Utility）全链条携带该唯一特征，
+ *   彻底与宿主机其他 Electron 应用（如 mip-paper）隔离；
+ *   清理必须通过本工具 `--clean` 或精准匹配该唯一目录路径，严禁 `pkill -f electron*`。
  */
 
 const { spawn } = require('node:child_process');
@@ -22,10 +29,90 @@ const os = require('node:os');
 const path = require('node:path');
 
 const APP_DIR = path.resolve(__dirname, '..');
+const PID_FILE = path.join(os.tmpdir(), 'mipl-probe.pid');
+
+function findProbeProcesses() {
+  const pids = [];
+  if (!fs.existsSync('/proc')) return pids;
+  try {
+    const entries = fs.readdirSync('/proc');
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (pid === process.pid) continue;
+      try {
+        const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+        if (cmd.includes('mip-paper')) continue; // 绝对防护：宿主机服务绝不误杀
+        const isProbe =
+          (cmd.includes('--user-data-dir=') && cmd.includes('mipl-probe')) ||
+          (cmd.includes('installer/frontend/app') && (cmd.includes('electron') || cmd.includes('probe-render')));
+        if (isProbe) pids.push(pid);
+      } catch {}
+    }
+  } catch {}
+  return pids;
+}
+
+function cleanStaleProbes({ verbose = true } = {}) {
+  const targetPids = new Set(findProbeProcesses());
+  if (fs.existsSync(PID_FILE)) {
+    try {
+      const saved = Number(fs.readFileSync(PID_FILE, 'utf8').trim());
+      if (saved && saved !== process.pid) targetPids.add(saved);
+      fs.unlinkSync(PID_FILE);
+    } catch {}
+  }
+
+  if (targetPids.size === 0) {
+    if (verbose) console.log('（无残留探针进程）');
+    return;
+  }
+
+  if (verbose) console.log(`发现 ${targetPids.size} 个残留探针进程：${[...targetPids].join(', ')}，正在清理...`);
+  for (const pid of targetPids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {}
+  }
+
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    let alive = false;
+    for (const pid of targetPids) {
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {}
+    }
+    if (!alive) break;
+  }
+
+  for (const pid of targetPids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+  }
+  if (verbose) console.log('探针残留清理完成。');
+}
+
+if (process.argv.includes('--clean')) {
+  cleanStaleProbes({ verbose: true });
+  process.exit(0);
+}
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log(`用法:
+  node tools/probe-render.js           # 运行离屏探针
+  node tools/probe-render.js --clean   # 安全清理残留的探针进程
+  MIPL_ELECTRON_BIN=<path> node tools/probe-render.js
+  MIPL_PROBE_OUT=<path> node tools/probe-render.js
+`);
+  process.exit(0);
+}
 
 function findElectron() {
   if (process.env.MIPL_ELECTRON_BIN) return process.env.MIPL_ELECTRON_BIN;
-  const candidates = ['/usr/bin/electron', '/usr/lib/electron44/electron'];
+  const candidates = ['/usr/bin/electron', '/usr/lib/electron44/electron', '/usr/lib/electron43/electron'];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
   }
@@ -47,11 +134,23 @@ function pickOutDir() {
   }
 }
 
+function pickUserDataDir() {
+  if (process.env.MIPL_PROBE_USER_DATA) return process.env.MIPL_PROBE_USER_DATA;
+  const dir = path.join(os.tmpdir(), 'mipl-probe-data');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+// 启动前先静默收敛一次历史残留，防止占用单实例锁
+cleanStaleProbes({ verbose: false });
+
 const electron = findElectron();
 const outDir = pickOutDir();
+const userDataDir = pickUserDataDir();
 
 const args = [
   APP_DIR,
+  `--user-data-dir=${userDataDir}`,
   '--theme=light',  // 亮色是主主题：默认就按亮色验
   '--scale=1',
   '--lang=zh_CN',
@@ -64,6 +163,7 @@ const args = [
 
 console.log(`Electron: ${electron}`);
 console.log(`应用目录: ${APP_DIR}`);
+console.log(`数据目录: ${userDataDir}`);
 console.log(`截图目录: ${outDir}\n`);
 
 const child = spawn(electron, args, {
@@ -72,13 +172,37 @@ const child = spawn(electron, args, {
   env: { ...process.env, MIPL_PROBE: '1', MIPL_PROBE_OUT: outDir, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
 });
 
+try {
+  fs.writeFileSync(PID_FILE, String(child.pid), 'utf8');
+} catch {}
+
+const cleanPid = () => {
+  try {
+    if (fs.existsSync(PID_FILE) && fs.readFileSync(PID_FILE, 'utf8').trim() === String(child.pid)) {
+      fs.unlinkSync(PID_FILE);
+    }
+  } catch {}
+};
+
+const forwardSignal = (sig) => {
+  if (child && !child.killed) {
+    try {
+      child.kill(sig);
+    } catch {}
+  }
+};
+process.on('SIGINT', () => forwardSignal('SIGINT'));
+process.on('SIGTERM', () => forwardSignal('SIGTERM'));
+
 child.on('error', (error) => {
+  cleanPid();
   console.error(`\n❌ 起不了 Electron（${electron}）：${error.message}`);
   console.error('   宿主机上可以 `MIPL_ELECTRON_BIN=<解包的 electron44> node tools/probe-render.js`。');
   process.exit(2);
 });
 
 child.on('exit', (code, signal) => {
+  cleanPid();
   if (signal) {
     console.error(`\n❌ Electron 被信号终止：${signal}`);
     process.exit(2);

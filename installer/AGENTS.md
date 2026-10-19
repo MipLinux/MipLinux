@@ -77,9 +77,10 @@ python3 installer/frontend/app/tools/check-tokens.py                   # V1：to
 python3 installer/frontend/app/tools/check-contrast.py                 # V2：对比度 46 组
 python3 -m unittest discover -s installer/frontend/theme/tests -t installer/frontend/theme
 MIPL_ELECTRON_BIN=electron node installer/frontend/app/tools/probe-render.js   # 8/12 步渲染 + 截图
+node installer/frontend/app/tools/probe-render.js --clean                          # 安全清理残留探针（严禁 pkill -f electron*）
 ```
 
-（`MIPL_ELECTRON_BIN` 是给宿主机准备的：Live / 构建容器里 `electron` 在 PATH 上，宿主机上可以指向解包出来的 `electron44` 二进制。）
+（`MIPL_ELECTRON_BIN` 是给宿主机准备的：Live / 构建容器里 `electron` 在 PATH 上，宿主机上可以指向解包出来的 `electron44` 二进制。探针带独立的 `--user-data-dir=/tmp/mipl-probe-data` 与宿主机隔离；清理只走 `--clean`，严禁用 `pkill -f electron*` 泛匹配误杀宿主机 Electron 应用如 `mip-paper`。）
 
 ## 测试
 

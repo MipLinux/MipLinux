@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Protocol, TextIO
 
@@ -113,6 +114,10 @@ class FileSinks:
     又活得过重启/断电的地方。挂上时先把**内存里记下的全部历史行**补写进去，之后每行
     同时写所有落点 —— 中途挂死被强杀时，盘上是到挂死点为止的完整日志，而不是
     「收尾时抢救出来的那一点」（测试阶段 Bug 多，复盘材料必须默认就在）。
+
+    **日志是旁路，不许把安装拖下水。** 落点写不进去（目标盘满、被拔掉、Live 侧
+    管道被关）时，坏掉的那一份被关掉、留一句提示，其余落点与安装本身继续 ——
+    收到一半「写日志失败」的异常会让一次快装完的安装在收尾处整段作废。
     """
 
     def _init_sinks(self, log_path: str | None) -> None:
@@ -120,14 +125,25 @@ class FileSinks:
         self._log = open(log_path, "w", encoding="utf-8") if log_path else None
         self._extra: list[TextIO] = []
         self._lines: list[str] = []
+        #: 落点坏掉的提示只说一次，免得每个包都刷一行
+        self._sink_warning_shown = False
+        #: 读子进程输出的线程也在写事件流（`_run_streamed` 的超时路径）：不加锁时
+        #: 两条线程能把一行 JSON 拆成两截，前端看到的就是「后端输出无法解析」。
+        #: 用 RLock：`_warn_sink_lost()` 会在锁内再走一次 `note()`。
+        self._lock = threading.RLock()
 
     def attach_log_path(self, path: str) -> None:
         """再加一个日志落点（覆盖式打开，历史行先补写）。"""
         handle = open(path, "w", encoding="utf-8")
-        if self._lines:
-            handle.write("\n".join(self._lines) + "\n")
-        handle.flush()
-        self._extra.append(handle)
+        try:
+            with self._lock:
+                if self._lines:
+                    handle.write("\n".join(self._lines) + "\n")
+                handle.flush()
+                self._extra.append(handle)
+        except OSError:
+            self._close_quietly(handle)     # 补写失败不许留一个开着的句柄
+            raise
 
     def detach_log_paths(self) -> None:
         """把后挂的落点（目标盘那份）**关掉**。
@@ -137,24 +153,68 @@ class FileSinks:
         正常装完都会留下挂载，下一次开工被自己的残留拦在门外（#105）。
         关掉之后本进程只剩 Live 侧那份日志；目标盘上那份停在关掉前的那一行。
         """
-        for handle in self._extra:
-            handle.close()
-        self._extra = []
+        with self._lock:
+            extras, self._extra = self._extra, []
+        for handle in extras:
+            self._close_quietly(handle)
 
     def _write_line(self, line: str) -> None:
-        self._lines.append(line)
-        print(line, file=self.stream, flush=True)
-        for handle in (self._log, *self._extra):
-            if handle is not None:
-                handle.write(line + "\n")
-                handle.flush()
+        with self._lock:
+            self._lines.append(line)
+            try:
+                print(line, file=self.stream, flush=True)
+            except (OSError, ValueError):
+                # 输出端没了（界面进程崩了 / 管子被 `head` 关掉）不是安装失败：
+                # 该干的活还得干完，落点里还有完整记录。
+                pass
+            failed: list[tuple[TextIO, BaseException]] = []
+            for handle in (self._log, *self._extra):
+                if handle is None:
+                    continue
+                try:
+                    handle.write(line + "\n")
+                    handle.flush()
+                except (OSError, ValueError) as exc:
+                    failed.append((handle, exc))
+            for handle, exc in failed:
+                self._drop_sink(handle)
+                self._warn_sink_lost(exc)
+
+    def _drop_sink(self, handle: TextIO) -> None:
+        """把一个写坏了的落点摘掉（并关掉它的句柄）。"""
+        if handle is self._log:
+            self._log = None
+        else:
+            try:
+                self._extra.remove(handle)
+            except ValueError:
+                pass
+        self._close_quietly(handle)
+
+    def _warn_sink_lost(self, exc: BaseException) -> None:
+        if self._sink_warning_shown:
+            return
+        self._sink_warning_shown = True
+        try:
+            # 走 note 而不是直接 print：JSON 模式下 stdout 上只能有 JSON 行
+            self.note(f"日志落点写入失败（{exc}）；已停用这一份，安装继续")
+        except Exception:  # noqa: BLE001 - 报不了就算了，安装本身更重要
+            pass
+
+    @staticmethod
+    def _close_quietly(handle: TextIO) -> None:
+        try:
+            handle.close()
+        except (OSError, ValueError):
+            pass
 
     def close(self) -> None:
-        for handle in (self._log, *self._extra):
-            if handle is not None:
-                handle.close()
-        self._log = None
-        self._extra = []
+        with self._lock:
+            handles = [handle for handle in (self._log, *self._extra) if handle is not None]
+            self._log = None
+            self._extra = []
+            for handle in handles:
+                self._close_quietly(handle)
 
 
 class TextReporter(FileSinks):

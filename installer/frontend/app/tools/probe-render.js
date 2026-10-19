@@ -203,21 +203,13 @@ function pickOutDir() {
 }
 
 /**
- * 清理指定输出目录中的旧 PNG 截图产物，避免历史产物干扰本次运行判定。
- * @param {string} dir 截图输出目录。
- * @returns {void}
+ * 在指定输出目录下为本次运行创建独立子目录，保留已有文件并隔离历史产物。
+ * @param {string} dir 截图输出根目录。
+ * @returns {string} 本次运行的截图目录（绝对路径）。
  */
 function prepareOutDir(dir) {
-  if (!fs.existsSync(dir)) return;
-  try {
-    for (const file of fs.readdirSync(dir)) {
-      if (file.endsWith('.png')) {
-        try {
-          fs.unlinkSync(path.join(dir, file));
-        } catch {}
-      }
-    }
-  } catch {}
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.mkdtempSync(path.join(path.resolve(dir), 'run-'));
 }
 
 const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -262,8 +254,7 @@ function countValidScreenshots(dir, sinceTime = 0) {
 cleanStaleProbes({ verbose: false });
 
 const electron = findElectron();
-const outDir = pickOutDir();
-prepareOutDir(outDir);
+const outDir = prepareOutDir(pickOutDir());
 const probeStartTime = Date.now();
 
 const args = [

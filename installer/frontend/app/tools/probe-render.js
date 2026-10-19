@@ -31,6 +31,10 @@ const path = require('node:path');
 const APP_DIR = path.resolve(__dirname, '..');
 const PID_FILE = path.join(os.tmpdir(), 'mipl-probe.pid');
 
+/**
+ * 按命令行特征收集候选探针 PID，排除自身与 mip-paper，忽略不可读的进程。
+ * @returns {number[]} 匹配的 PID；无 /proc 或无法读取时返回空数组。
+ */
 function findProbeProcesses() {
   const pids = [];
   if (!fs.existsSync('/proc')) return pids;
@@ -53,6 +57,12 @@ function findProbeProcesses() {
   return pids;
 }
 
+/**
+ * 合并候选 PID 与 PID 文件记录，删除记录后发送 SIGTERM，最多等待 500ms 再尝试 SIGKILL。
+ * @param {Object} [options={}] 清理选项。
+ * @param {boolean} [options.verbose=true] 是否打印清理进度。
+ * @returns {void}
+ */
 function cleanStaleProbes({ verbose = true } = {}) {
   const targetPids = new Set(findProbeProcesses());
   if (fs.existsSync(PID_FILE)) {
@@ -110,6 +120,10 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
   process.exit(0);
 }
 
+/**
+ * 优先采用 MIPL_ELECTRON_BIN，其次查找已知安装路径，最后交给 PATH 解析 electron。
+ * @returns {string} Electron 可执行文件路径或命令名。
+ */
 function findElectron() {
   if (process.env.MIPL_ELECTRON_BIN) return process.env.MIPL_ELECTRON_BIN;
   const candidates = ['/usr/bin/electron', '/usr/lib/electron44/electron', '/usr/lib/electron43/electron'];
@@ -134,6 +148,10 @@ function pickOutDir() {
   }
 }
 
+/**
+ * 为探针隔离 Chromium 数据：直接采用 MIPL_PROBE_USER_DATA，否则创建默认临时目录。
+ * @returns {string} 用户数据目录路径；环境变量指定的目录不在此创建。
+ */
 function pickUserDataDir() {
   if (process.env.MIPL_PROBE_USER_DATA) return process.env.MIPL_PROBE_USER_DATA;
   const dir = path.join(os.tmpdir(), 'mipl-probe-data');
@@ -176,6 +194,10 @@ try {
   fs.writeFileSync(PID_FILE, String(child.pid), 'utf8');
 } catch {}
 
+/**
+ * 仅在 PID 文件仍记录当前子进程时删除它，避免清掉另一实例的记录；忽略文件操作失败。
+ * @returns {void}
+ */
 const cleanPid = () => {
   try {
     if (fs.existsSync(PID_FILE) && fs.readFileSync(PID_FILE, 'utf8').trim() === String(child.pid)) {
@@ -184,6 +206,11 @@ const cleanPid = () => {
   } catch {}
 };
 
+/**
+ * 向尚未标记为 killed 的 Electron 子进程转发信号，忽略发送失败。
+ * @param {string} sig 要转发的信号名，例如 SIGINT 或 SIGTERM。
+ * @returns {void}
+ */
 const forwardSignal = (sig) => {
   if (child && !child.killed) {
     try {

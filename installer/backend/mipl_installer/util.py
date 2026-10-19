@@ -696,7 +696,7 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
             EXIT_GUARD,
             hint="目标系统里这个路径是符号链接 —— 安装器只写普通文件，不跟着链接改别处",
         )
-    # 覆盖已有文件时保持它原来的权限（与 O_TRUNC 直接写的旧行为一致）。
+    # 覆盖已有文件时保持它原来的属主、属组和权限（与 O_TRUNC 直接写的旧行为一致）。
     existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -713,6 +713,9 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
             break
         else:
             raise OSError(errno.EEXIST, f"找不到可用的临时文件名：{path}")
+        if existing is not None:
+            # chown 可能清除 setuid/setgid 位，因此先恢复属主和属组，再设置权限。
+            os.fchown(fd, existing.st_uid, existing.st_gid)
         if mode is not None:
             # `os.open` 的 mode 会被 umask 掩掉；fchmod 一次拿到调用方要求的精确
             # 权限，仍然在写内容之前。

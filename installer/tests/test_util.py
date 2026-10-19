@@ -202,6 +202,41 @@ class TestWriteText(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "新\n")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_replacing_restores_ownership_before_mode_and_content(self):
+        for mode in (None, 0o440):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "hostname"
+                path.write_text("旧\n", encoding="utf-8")
+                os.chmod(path, 0o640)
+                metadata = list(path.stat())
+                metadata[4:6] = [1234, 5678]  # 模拟其他属主 / 属组，不要求 root。
+                calls = mock.Mock()
+                with mock.patch("mipl_installer.util.os.lstat", return_value=os.stat_result(metadata)), \
+                        mock.patch("mipl_installer.util.os.fchown") as chown, \
+                        mock.patch("mipl_installer.util.os.fchmod", wraps=os.fchmod) as chmod, \
+                        mock.patch("mipl_installer.util.os.fdopen", wraps=os.fdopen) as fdopen:
+                    calls.attach_mock(chown, "chown")
+                    calls.attach_mock(chmod, "chmod")
+                    calls.attach_mock(fdopen, "fdopen")
+                    util.write_text(Runner(RecordingReporter()), str(path), "新\n", mode=mode)
+                self.assertEqual(calls.mock_calls, [
+                    mock.call.chown(mock.ANY, 1234, 5678),
+                    mock.call.chmod(mock.ANY, 0o640 if mode is None else mode),
+                    mock.call.fdopen(mock.ANY, "w", encoding="utf-8"),
+                ])
+                self.assertEqual(path.read_text(encoding="utf-8"), "新\n")
+                self.assertEqual(path.stat().st_mode & 0o777, 0o640 if mode is None else mode)
+
+    def test_failed_ownership_change_keeps_original_and_removes_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hostname"
+            path.write_text("旧\n", encoding="utf-8")
+            with mock.patch("mipl_installer.util.os.fchown", side_effect=PermissionError):
+                with self.assertRaises(PermissionError):
+                    util.write_text(Runner(RecordingReporter()), str(path), "新\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "旧\n")
+            self.assertEqual(list(Path(tmp).iterdir()), [path])
+
     def test_a_symlink_is_refused_instead_of_written_through(self):
         """**回归测试**：root 不许跟着目标盘里的符号链接改写别的文件。
 

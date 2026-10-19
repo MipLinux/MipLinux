@@ -210,8 +210,10 @@ const cleanPid = () => {
   } catch {}
 };
 
+let forceKillTimer = null;
+
 /**
- * 向尚未标记为 killed 的 Electron 子进程转发信号，忽略发送失败。
+ * 向尚未标记为 killed 的 Electron 子进程转发信号，并在超时后强制清理，忽略发送失败。
  * @param {string} sig 要转发的信号名，例如 SIGINT 或 SIGTERM。
  * @returns {void}
  */
@@ -220,6 +222,13 @@ const forwardSignal = (sig) => {
     try {
       child.kill(sig);
     } catch {}
+    if (!forceKillTimer) {
+      forceKillTimer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {}
+      }, 1000);
+    }
   }
 };
 process.on('SIGINT', () => forwardSignal('SIGINT'));
@@ -262,6 +271,7 @@ if (child.stdout) {
 }
 
 child.on('error', (error) => {
+  if (forceKillTimer) clearTimeout(forceKillTimer);
   cleanPid();
   console.error(`\n❌ 起不了 Electron（${electron}）：${error.message}`);
   console.error('   宿主机上可以 `MIPL_ELECTRON_BIN=<解包的 electron44> node tools/probe-render.js`。');
@@ -272,6 +282,7 @@ let terminated = false;
 function handleTermination(code, signal) {
   if (terminated) return;
   terminated = true;
+  if (forceKillTimer) clearTimeout(forceKillTimer);
   cleanPid();
   flushRemainingStdout();
 

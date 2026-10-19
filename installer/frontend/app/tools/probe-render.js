@@ -44,6 +44,25 @@ const userDataDir = pickUserDataDir();
 const PID_FILE = path.join(userDataDir, 'mipl-probe.pid');
 
 /**
+ * 校验目标 PID 是否确实是对应 targetUserDataDir 的探针进程（杜绝 PID 复用或误杀）。
+ * @param {number} pid 要校验的进程 PID。
+ * @param {string} [targetUserDataDir=userDataDir] 期望的探针用户数据目录。
+ * @returns {boolean} 是否为合法探针子进程。
+ */
+function isProbeProcess(pid, targetUserDataDir = userDataDir) {
+  if (pid === process.pid || pid === process.ppid || pid <= 1) return false;
+  if (!fs.existsSync(`/proc/${pid}/cmdline`)) return false;
+  try {
+    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    if (cmd.includes('mip-paper')) return false; // 绝对防护：宿主机服务绝不误杀
+    const parts = cmd.split('\0').filter(Boolean);
+    return parts.some((arg) => arg === `--user-data-dir=${targetUserDataDir}`);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 按命令行特征收集候选探针 PID，排除自身与 mip-paper，忽略不可读的进程。
  * @param {string} [targetUserDataDir=userDataDir] 目标用户数据目录；仅匹配此目录衍生的进程。
  * @returns {number[]} 匹配的 PID；无 /proc 或无法读取时返回空数组。
@@ -56,14 +75,9 @@ function findProbeProcesses(targetUserDataDir = userDataDir) {
     for (const entry of entries) {
       if (!/^\d+$/.test(entry)) continue;
       const pid = Number(entry);
-      if (pid === process.pid || pid === process.ppid || pid <= 1) continue;
-      try {
-        const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-        if (cmd.includes('mip-paper')) continue; // 绝对防护：宿主机服务绝不误杀
-        const parts = cmd.split('\0').filter(Boolean);
-        const isProbe = parts.some((arg) => arg === `--user-data-dir=${targetUserDataDir}`);
-        if (isProbe) pids.push(pid);
-      } catch {}
+      if (isProbeProcess(pid, targetUserDataDir)) {
+        pids.push(pid);
+      }
     }
   } catch {}
   return pids;
@@ -73,24 +87,32 @@ function findProbeProcesses(targetUserDataDir = userDataDir) {
  * 合并候选 PID 与 PID 文件记录，删除记录后发送 SIGTERM，最多等待 500ms 再尝试 SIGKILL。
  * @param {Object} [options={}] 清理选项。
  * @param {boolean} [options.verbose=true] 是否打印清理进度。
- * @returns {void}
+ * @returns {boolean} 清理是否完全成功（所有目标进程均已退出）。
  */
 function cleanStaleProbes({ verbose = true } = {}) {
   const targetPids = new Set(findProbeProcesses(userDataDir));
-  if (fs.existsSync(PID_FILE)) {
+  if (fs.existsSync(userDataDir)) {
     try {
-      const raw = fs.readFileSync(PID_FILE, 'utf8').trim();
-      const saved = /^\d+$/.test(raw) ? Number(raw) : NaN;
-      if (Number.isSafeInteger(saved) && saved > 1 && saved !== process.pid && saved !== process.ppid) {
-        targetPids.add(saved);
+      const files = fs.readdirSync(userDataDir);
+      for (const file of files) {
+        if (file === 'mipl-probe.pid' || /^probe-\d+\.pid$/.test(file)) {
+          const filePath = path.join(userDataDir, file);
+          try {
+            const raw = fs.readFileSync(filePath, 'utf8').trim();
+            const saved = /^\d+$/.test(raw) ? Number(raw) : NaN;
+            if (Number.isSafeInteger(saved) && isProbeProcess(saved, userDataDir)) {
+              targetPids.add(saved);
+            }
+            fs.unlinkSync(filePath);
+          } catch {}
+        }
       }
-      fs.unlinkSync(PID_FILE);
     } catch {}
   }
 
   if (targetPids.size === 0) {
     if (verbose) console.log('（无残留探针进程）');
-    return;
+    return true;
   }
 
   if (verbose) console.log(`发现 ${targetPids.size} 个残留探针进程：${[...targetPids].join(', ')}，正在清理...`);
@@ -117,12 +139,29 @@ function cleanStaleProbes({ verbose = true } = {}) {
       process.kill(pid, 'SIGKILL');
     } catch {}
   }
+
+  const failedPids = [];
+  for (const pid of targetPids) {
+    try {
+      process.kill(pid, 0);
+      failedPids.push(pid);
+    } catch {}
+  }
+
+  if (failedPids.length > 0) {
+    if (verbose) {
+      console.error(`❌ 清理未彻底：进程 ${failedPids.join(', ')} 仍然存活。`);
+    }
+    return false;
+  }
+
   if (verbose) console.log('探针残留清理完成。');
+  return true;
 }
 
 if (process.argv.includes('--clean')) {
-  cleanStaleProbes({ verbose: true });
-  process.exit(0);
+  const ok = cleanStaleProbes({ verbose: true });
+  process.exit(ok ? 0 : 1);
 }
 
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
@@ -181,20 +220,35 @@ function prepareOutDir(dir) {
   } catch {}
 }
 
+const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 /**
- * 统计指定输出目录中有效的 PNG 截图产物数量（必须是实际文件且大小大于 0）。
+ * 统计指定输出目录中有效的 PNG 截图产物数量（必须是实际文件、大小足够、含 PNG 签名头，且为本次运行生成）。
  * @param {string} dir 截图输出目录。
+ * @param {number} [sinceTime=0] 允许的最小文件修改时间戳（毫秒）。
  * @returns {number} 有效的截图文件数量。
  */
-function countValidScreenshots(dir) {
+function countValidScreenshots(dir, sinceTime = 0) {
   if (!fs.existsSync(dir)) return 0;
   try {
     let valid = 0;
     for (const name of fs.readdirSync(dir)) {
       if (name.endsWith('.png')) {
         try {
-          const stat = fs.statSync(path.join(dir, name));
-          if (stat.isFile() && stat.size > 0) valid += 1;
+          const fullPath = path.join(dir, name);
+          const stat = fs.statSync(fullPath);
+          if (!stat.isFile() || stat.size < 8) continue;
+          if (sinceTime > 0 && stat.mtimeMs < sinceTime - 1000) continue;
+          const fd = fs.openSync(fullPath, 'r');
+          try {
+            const buf = Buffer.alloc(8);
+            const bytesRead = fs.readSync(fd, buf, 0, 8, 0);
+            if (bytesRead === 8 && buf.equals(PNG_HEADER)) {
+              valid += 1;
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
         } catch {}
       }
     }
@@ -210,6 +264,7 @@ cleanStaleProbes({ verbose: false });
 const electron = findElectron();
 const outDir = pickOutDir();
 prepareOutDir(outDir);
+const probeStartTime = Date.now();
 
 const args = [
   APP_DIR,
@@ -235,6 +290,10 @@ const child = spawn(electron, args, {
   env: { ...process.env, MIPL_PROBE: '1', MIPL_PROBE_OUT: outDir, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
 });
 
+const instancePidFile = path.join(userDataDir, `probe-${child.pid}.pid`);
+try {
+  fs.writeFileSync(instancePidFile, String(child.pid), 'utf8');
+} catch {}
 try {
   fs.writeFileSync(PID_FILE, String(child.pid), 'utf8');
 } catch {}
@@ -244,6 +303,11 @@ try {
  * @returns {void}
  */
 const cleanPid = () => {
+  try {
+    if (fs.existsSync(instancePidFile)) {
+      fs.unlinkSync(instancePidFile);
+    }
+  } catch {}
   try {
     if (fs.existsSync(PID_FILE) && fs.readFileSync(PID_FILE, 'utf8').trim() === String(child.pid)) {
       fs.unlinkSync(PID_FILE);
@@ -357,7 +421,7 @@ function handleTermination(code, signal) {
     process.exit(1);
   }
 
-  const pngCount = countValidScreenshots(outDir);
+  const pngCount = countValidScreenshots(outDir, probeStartTime);
   if (pngCount === 0) {
     console.error('\n❌ 探针未生成任何截图产物（未见有效截图）');
     console.error(`   截图目录：${outDir}`);

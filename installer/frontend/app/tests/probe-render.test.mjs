@@ -125,7 +125,7 @@ test('通过标记与有效截图产物齐全时，driver 正常返回 0', async
   try {
     await writeFile(
       fakeBin,
-      '#!/bin/sh\necho "fake-png-bytes" > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      '#!/bin/sh\nprintf \'\\x89PNG\\r\\n\\x1a\\n\' > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
       { mode: 0o755 }
     );
     const res = await runProbe([], {
@@ -133,6 +133,46 @@ test('通过标记与有效截图产物齐全时，driver 正常返回 0', async
       MIPL_PROBE_OUT: tmp,
     });
     assert.equal(res.code, 0);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('产物为 0 字节文件（touch）时，driver 拒绝并通过且报非 0', async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), 'probe-fake-'));
+  const fakeBin = path.join(tmp, 'fake-electron.sh');
+  try {
+    await writeFile(
+      fakeBin,
+      '#!/bin/sh\ntouch "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      { mode: 0o755 }
+    );
+    const res = await runProbe([], {
+      MIPL_ELECTRON_BIN: fakeBin,
+      MIPL_PROBE_OUT: tmp,
+    });
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /探针未生成任何截图产物（未见有效截图）/);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('产物缺少 PNG 签名头时，driver 拒绝并通过且报非 0', async () => {
+  const tmp = await mkdtemp(path.join(tmpdir(), 'probe-fake-'));
+  const fakeBin = path.join(tmp, 'fake-electron.sh');
+  try {
+    await writeFile(
+      fakeBin,
+      '#!/bin/sh\necho "not-a-png-file" > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      { mode: 0o755 }
+    );
+    const res = await runProbe([], {
+      MIPL_ELECTRON_BIN: fakeBin,
+      MIPL_PROBE_OUT: tmp,
+    });
+    assert.equal(res.code, 1);
+    assert.match(res.stderr, /探针未生成任何截图产物（未见有效截图）/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
@@ -164,7 +204,7 @@ test('子进程退出 0 但含有失败标记时，driver 拒绝通过并报非 
   try {
     await writeFile(
       fakeBin,
-      '#!/bin/sh\necho "❌ 探针失败 1 项："\necho "  - 示例断言失败"\necho "fake-png" > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
+      '#!/bin/sh\necho "❌ 探针失败 1 项："\necho "  - 示例断言失败"\nprintf \'\\x89PNG\\r\\n\\x1a\\n\' > "$MIPL_PROBE_OUT/shot.png"\necho "✅ 探针全部通过（离屏旁证；cage / 真 ISO 仍未实测）"\nexit 0\n',
       { mode: 0o755 }
     );
     const res = await runProbe([], {

@@ -45,14 +45,48 @@ PACKAGES_FILE_DIR = "data"
 #: Live 的清单：不是装后系统的清单，拿它来装会得到「Live 能跑、装完一堆用不上的东西」。
 LIVE_PACKAGES_FILE = "packages.x86_64"
 
+#: Arch 的包名允许的字符（`PKGBUILD(5)`）：字母数字与 `@ . _ + -`，且**不能以
+#: `-` 或 `.` 开头。校验它不是洁癖：清单里的 token 会被原样拼进 `pacstrap` 的
+#: argv，`-U /tmp/x.pkg.tar.zst` 这种写法会被 pacman 当**选项**、带 `/` 的会被
+#: 当**包文件路径**读 —— 那等于让一份数据文件决定命令行。
+PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@._+-]*")
+
+
+def _check_package_name(name: str) -> None:
+    """一个包名必须能安全地进 `pacstrap` 的 argv（见 `PACKAGE_NAME_RE`）。"""
+    if PACKAGE_NAME_RE.fullmatch(name):
+        return
+    raise InstallerError(
+        f"包清单里有不合法的包名：{name!r}",
+        EXIT_USAGE,
+        hint="一行一个包名，只能用字母数字与 @ . _ + -（且不以 - 或 . 开头）；"
+             "不要写选项或包文件路径",
+    )
+
 
 def default_packages_file() -> str:
     """`mipl_installer/data/target-packages.x86_64`（相对本包定位，不依赖 cwd）。"""
     return str(Path(__file__).resolve().parent / PACKAGES_FILE_DIR / PACKAGES_FILE_NAME)
 
 
+def _read_text(resolved: Path, original: str) -> str:
+    """读清单文本。读不出来（权限、不是 UTF-8）翻成 `InstallerError`，
+    而不是把一个 `UnicodeDecodeError` 的 traceback 摔在装盘流程里。"""
+    try:
+        return resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InstallerError(
+            f"包清单读不出来：{original}",
+            EXIT_USAGE,
+            hint="确认文件存在、可读，且是 UTF-8 文本",
+        ) from exc
+
+
 def parse_package_list(text: str) -> list[str]:
-    """一行一个包名，`#` 起注释，空行跳过。重复的按首次出现去重。"""
+    """一行一个包名，`#` 起注释，空行跳过。重复的按首次出现去重。
+
+    每个 token 都过一遍 `_check_package_name`：不合法的当场报错，绝不交给 `pacstrap`。
+    """
     packages: list[str] = []
     seen: set[str] = set()
     for raw in text.splitlines():
@@ -60,6 +94,7 @@ def parse_package_list(text: str) -> list[str]:
         if not line:
             continue
         for token in line.split():
+            _check_package_name(token)
             if token not in seen:
                 seen.add(token)
                 packages.append(token)
@@ -81,7 +116,7 @@ def read_package_list(path: str) -> list[str]:
             hint="Live 与装后系统分别维护清单，规则见 docs/knowledge/04-架构决策.md §3.1；默认读取 mipl_installer/data/target-packages.x86_64",
         )
 
-    packages = parse_package_list(resolved.read_text(encoding="utf-8"))
+    packages = parse_package_list(_read_text(resolved, path))
     if not packages:
         raise InstallerError(
             f"包清单是空的：{path}",
@@ -149,7 +184,12 @@ def pacstrap(runner: Runner, target: str, packages: list[str], pacman_conf: str,
     `-C` 显式给 conf（不用运行环境默认的那份含糊）；`-G` 不抄运行系统的 keyring
     （我们已经建好目标自己的）；`-M` 不抄它的 mirrorlist（`configure.py` 写）。
     `counter` 给了就一边跑一边把 `(n/m)` 接成细进度。
+
+    拼 argv **之前**再逐个校一遍包名：这里是 argv 成型的地方，`packages` 是
+    参数而不是文件，解析阶段那道校验到不了这条路上（第二道，与 `parse_package_list` 同源）。
     """
+    for name in packages:
+        _check_package_name(name)
     ensure_dir(runner, target)
     runner.run(
         ["pacstrap", "-C", pacman_conf, "-G", "-M", target, *packages],

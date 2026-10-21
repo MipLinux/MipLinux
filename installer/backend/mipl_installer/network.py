@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .util import EXIT_USAGE, InstallerError, Runner
 
 #: 无线信号是**百分比**（nmcli 的 SIGNAL 字段，0–100），**不是 dBm**。
@@ -201,6 +203,33 @@ FAILURE_PATTERNS = (
     ("timeout", ("timeout", "timed out", "time out")),
 )
 
+#: `util.Runner.run` 的失败消息头：`命令失败（退出码 4）：<命令>`，命令之后可能接
+#: `：\n    <stderr>`。**只认这个前缀**，不按「有没有换行」猜：调用方直接传 nmcli
+#: 自己的多行报错时，第一行恰恰是真正的错误（`Error: Secrets were required…`）。
+_RUNNER_FAILURE = re.compile(r"^命令失败（退出码 \d+）：")
+
+#: nmcli 的「找不到网络」是唯一一种**明文回显 SSID** 的报错：
+#: `No network with SSID '<名字>' found.`。名字里可能带单引号（`Cafe's password`），
+#: 所以从 `SSID ` 后的第一个引号**贪婪**匹配到 `' found.` —— 只按引号对切会只摘掉
+#: `Cafe`，剩下的 `password` 会把 notFound 判成 auth。
+_MISSING_NETWORK = re.compile(r"(no network with ssid )'.*'( found\.)")
+
+#: 其余回显的**名字**（连接名等）同样是外部输入，按引号对摘掉（尽力而为）。
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _without_ssid(text: str, ssid: str) -> str:
+    """把报错里回显的**这个** SSID 摘掉（SSID 是外部输入，不能当判据）。
+
+    只摘**引号里**的那一份：引号是 nmcli 回显名字的边界。不按词边界全局删 ——
+    SSID 叫 `No` 时，全局删会把 `No network with SSID … found.` 开头的 `No` 也删掉，
+    真正的报错反而认不出来（notFound 变 other）。名字里带 `'`（`Cafe's password`）时，
+    引号内仍是完整的一整段，`'<ssid>'` 照样能整段命中。
+    """
+    if not ssid:
+        return text
+    return text.replace(f"'{ssid}'", "''").replace(f'"{ssid}"', '""')
+
 
 def classify_failure(text: str) -> str:
     """nmcli 的报错 → `auth` / `notFound` / `timeout` / `other`。
@@ -208,8 +237,29 @@ def classify_failure(text: str) -> str:
     为什么不让界面自己读 nmcli 的英文报错：那是**外部工具**的措辞，换一版 NM
     就可能变，而界面要按它选中英两套句子。在这里收敛成四个码，界面的分支就固定了。
     认不出来的一律 `other` —— 编一个具体的失败原因比说「连接失败」更糟。
+
+    三条输入卫生（都是「认得出才做」，不是猜）：
+
+    * `Runner.run` 的消息 = `命令失败（退出码 N）：` + 命令 + 可选 `：\\n` + stderr。
+      只有**开头认得出这个前缀**才切掉命令段；认不出来就整段当报错本身 ——
+      直接传 nmcli 的多行输出时，第一行不能丢。
+    * `No network with SSID '<名字>' found.` 是唯一明文回显 SSID 的写法，而名字里
+      可能带 `'`（`Cafe's password`）—— 按**整段**摘，不按引号对切（见
+      `_MISSING_NETWORK`）。
+    * 其余引号里的是**名字**（`Connection 'X'`），按引号对摘掉（尽力而为）。
+      名字是外部输入：一个叫 `password` 或 `no network with ssid` 的网络，不能让
+      报错里凭空多出分类关键词。**不**按子串全局删 SSID（名字叫 `a` 时会把
+      `password` 拆坏）。判据内部的优先级见 `FAILURE_PATTERNS`。
     """
     lowered = (text or "").lower()
+    if _RUNNER_FAILURE.match(lowered):
+        _, separator, detail = lowered.partition("：\n")
+        if not separator:
+            # 命令跑挂了但没捕获到 stderr：没有可读的报错，不猜。
+            return "other"
+        lowered = detail
+    lowered = _MISSING_NETWORK.sub(r"\1''\2", lowered)
+    lowered = _QUOTED.sub("''", lowered)
     for code, needles in FAILURE_PATTERNS:
         if any(needle in lowered for needle in needles):
             return code
@@ -235,5 +285,6 @@ def connect(runner: Runner, ssid: str, password: str = "") -> None:
         runner.run(argv, input=f"{password}\n" if password else "\n",
                    capture=True, exit_code=EXIT_USAGE)
     except InstallerError as exc:
+        # 名字是外部输入：分类前把**这个** SSID 从报错里摘掉（带引号、空格都不影响）。
         raise InstallerError(str(exc), exc.exit_code, exc.hint,
-                             reason=classify_failure(str(exc))) from exc
+                             reason=classify_failure(_without_ssid(str(exc), ssid))) from exc

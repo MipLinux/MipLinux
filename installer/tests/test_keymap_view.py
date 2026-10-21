@@ -108,6 +108,28 @@ class TestIncludes(unittest.TestCase):
         view = keymap_view.parse("us", str(self.root))
         self.assertEqual(sorted(key.code for key in view.keys), [16, 17])
 
+    def test_include_cannot_climb_out_of_the_keymap_root(self):
+        """名字来自数据，但**绝对路径会覆盖左操作数**：`directory / "/etc/passwd"`
+        直接落到树外。不拦的话 `--print-keymap` 就成了「读任意文件」。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outside = Path(tmp.name) / "secret.inc"
+        outside.write_text("keycode 30 = a\n", encoding="utf-8")
+        _write_map(self.root, "i386/qwerty/us.map.gz",
+                   f'include "{outside}"\n'                 # 绝对路径
+                   'include "../../../../../../etc/passwd"\n'  # `..` 爬到树外
+                   'keycode 16 = q\n')
+        view = keymap_view.parse("us", str(self.root))
+        self.assertEqual([item.path for item in view.includes], [None, None])
+        self.assertEqual([key.code for key in view.keys], [16])
+
+    def test_include_with_a_nul_byte_is_treated_as_missing(self):
+        """NUL 让 `Path.is_file()` 抛 `ValueError`（不是 `OSError`）：坏数据不能变 traceback。"""
+        _write_map(self.root, "i386/qwerty/us.map.gz", 'include "a\x00b"\nkeycode 16 = q\n')
+        view = keymap_view.parse("us", str(self.root))
+        self.assertIsNone(view.includes[0].path)
+        self.assertEqual([key.code for key in view.keys], [16])
+
 
 class TestMerge(unittest.TestCase):
     """include 的语义 = 把对方的内容插在这一行，后出现的覆盖先出现的。"""
@@ -142,6 +164,33 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(len(keys), 1)
         self.assertEqual(keys[83].plain, "KP_Comma")
 
+    def test_left_right_modifiers_are_not_the_plain_layer(self):
+        """`ctrll` / `shiftl` / `shiftr` / `ctrlr` 是 kbd 的左右修饰键（`man keymaps`）。
+
+        真实键位表里它们出现几千次（`ua` 596 处、`koy` 上千处）。漏掉它们的话
+        修饰键词会被整个滤掉、`mods` 变成空集，于是 `ctrll keycode 57 = zero`
+        被当成默认层，把真正的 `space` 盖掉 —— 界面上画出来的是原文里没有的字。
+        """
+        _write_map(self.root, "i386/qwerty/us.map.gz", "\n".join([
+            "keycode 57 = space",
+            "ctrll keycode 57 = zero",
+            "shiftl ctrll keycode 57 = zero",
+            "shiftr ctrlr keycode 57 = zero",
+            "keycode 2 = one exclam",
+            "ctrlr keycode 2 = one",
+        ]) + "\n")
+        keys = {key.code: key for key in keymap_view.parse("us", str(self.root)).keys}
+        self.assertEqual(keys[57].plain, "space")
+        self.assertEqual(keys[57].shift, "")
+        self.assertEqual((keys[2].plain, keys[2].shift), ("one", "exclam"))
+
+    def test_an_unknown_modifier_word_never_becomes_the_plain_layer(self):
+        """认不出的修饰键词同样不算默认层：数据问题不猜，绝不凭空改写主键区。"""
+        _write_map(self.root, "i386/qwerty/us.map.gz",
+                   'keycode 16 = q\nfoo keycode 16 = x\n')
+        keys = {key.code: key for key in keymap_view.parse("us", str(self.root)).keys}
+        self.assertEqual(keys[16].plain, "q")
+
     def test_shift_layer_comes_from_the_second_column(self):
         _write_map(self.root, "i386/qwerty/us.map.gz", "keycode 2 = one exclam\n")
         keys = {key.code: key for key in keymap_view.parse("us", str(self.root)).keys}
@@ -155,6 +204,54 @@ class TestMerge(unittest.TestCase):
                    "keycode 2 = one exclam\n! shift control keycode 2 = VoidSymbol\n")
         keys = {key.code: key for key in keymap_view.parse("us", str(self.root)).keys}
         self.assertEqual(keys[2].plain, "one")
+
+
+class TestBrokenData(unittest.TestCase):
+    """坏掉的键位表要给一句人话，而不是一个 traceback。
+
+    `read_map()` 原先直接 `gzip.open(...).read()`：截断的 `.gz` 抛 `EOFError`、
+    坏掉的 deflate 抛 `zlib.error`，两者都不是 `InstallerError` ——
+    `--print-keymap` 那侧只接得住后者，于是界面上出现的是一个 traceback。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def test_truncated_gzip_is_a_clean_error(self):
+        path = self.root / "i386/qwerty/us.map.gz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(gzip.compress(b"keycode 16 = q\n")[:6])   # 只剩文件头
+        with self.assertRaises(InstallerError) as ctx:
+            keymap_view.parse("us", str(self.root))
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_corrupt_deflate_body_is_a_clean_error(self):
+        path = self.root / "i386/qwerty/us.map.gz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = bytearray(gzip.compress(b"keycode 16 = q\n"))
+        for index in range(10, min(len(data) - 8, 20)):
+            data[index] ^= 0xFF                                     # 头部完好、正文坏了
+        path.write_bytes(bytes(data))
+        with self.assertRaises(InstallerError) as ctx:
+            keymap_view.parse("us", str(self.root))
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_not_a_gzip_at_all_is_a_clean_error(self):
+        _write_map(self.root, "i386/qwerty/us.map.gz", "keycode 16 = q\n", compress=False)
+        with self.assertRaises(InstallerError) as ctx:
+            keymap_view.parse("us", str(self.root))
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+
+    def test_corrupt_include_is_a_clean_error(self):
+        _write_map(self.root, "i386/qwerty/us.map.gz", 'include "bad.gz"\nkeycode 16 = q\n')
+        broken = self.root / "i386/include/bad.gz"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_bytes(b"not gzip")
+        with self.assertRaises(InstallerError) as ctx:
+            keymap_view.parse("us", str(self.root))
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
 
 
 class TestRealKeymaps(unittest.TestCase):
@@ -210,6 +307,25 @@ class TestRealKeymaps(unittest.TestCase):
         self.assertEqual(keys[2].shift, "exclam")
         self.assertEqual(keys[16].plain, "q")
         self.assertEqual(keys[16].shift, "")
+
+    def test_left_right_modifier_lines_do_not_clobber_the_plain_layer(self):
+        """**真数据回归**（`koy` / `ua` 用的是 `shiftl` / `ctrll` 那套写法）。
+
+        `koy` 第 57 键原文是 `space`，后面跟着三条 `ctrll ... = zero`；
+        第 15 键原文是 `Tab`，跟着 `shiftl ... = Backtab`。把左右修饰键滤掉之后
+        这两行都变成了默认层，键位页画的是 Backtab / zero —— 原文里没有的字。
+        """
+        self._require("koy")
+        keys = {key.code: key for key in keymap_view.parse("koy").keys}
+        self.assertEqual(keys[57].plain, "space", "被 `ctrll` 那一行盖掉了")
+        self.assertEqual(keys[15].plain, "Tab", "被 `shiftl` 那一行盖掉了")
+        self.assertEqual(keys[2].plain, "one", "被 `ctrll` 那一行盖掉了")
+
+        # `ua` 第 2 键是一行两列（`one exclam`），后面跟着一条只写一列的
+        # `ctrll keycode 2 = one` —— 那一行不该把 Shift 列一起抹掉。
+        self._require("ua")
+        ua = {key.code: key for key in keymap_view.parse("ua").keys}
+        self.assertEqual((ua[2].plain, ua[2].shift), ("one", "exclam"))
 
 
 class TestLookup(unittest.TestCase):

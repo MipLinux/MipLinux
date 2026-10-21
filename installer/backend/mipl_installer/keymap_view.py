@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import gzip
 import re
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,7 +57,14 @@ _BINDING_RE = re.compile(
 _INCLUDE_RE = re.compile(r'^include\s+"(?P<name>[^"]+)"\s*$')
 
 #: 认得出的修饰键。`plain` 是「没有修饰键」的另一种写法，归一化成空集。
-_MODIFIERS = frozenset({"shift", "altgr", "control", "alt", "plain", "meta", "ctrl"})
+#: `shiftl` / `shiftr` / `ctrll` / `ctrlr` 是 kbd 的**左右修饰键**（`man keymaps` 的
+#: 九个修饰键表里有 ShiftL / ShiftR / CtrlL / CtrlR），真实键位表里用得很多
+#: （`ua` 596 处、`koy` 上千处）—— 漏掉它们，那些行会被当成默认层，把主键区
+#: 的字改成原文里没有的那一个。
+_MODIFIERS = frozenset({
+    "shift", "altgr", "control", "alt", "plain", "meta", "ctrl",
+    "shiftl", "shiftr", "ctrll", "ctrlr",
+})
 
 #: `include` 找不到目标时给的提示（三种写法各自去哪儿找，写清楚省得下一个人再摸一遍）。
 _INCLUDE_HINT = (
@@ -115,11 +123,24 @@ class KeymapView:
 
 # ── 读文件 ────────────────────────────────────────────────────────────
 def read_map(path: Path) -> str:
-    """读一份键位表。`.gz` 透明解压 —— `.inc` / `compose.*` 是纯文本。"""
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    return path.read_text(encoding="utf-8", errors="replace")
+    """读一份键位表。`.gz` 透明解压 —— `.inc` / `compose.*` 是纯文本。
+
+    读不出来一律翻成 `InstallerError`：截断的 `.gz`（`EOFError`）、坏掉的 deflate
+    （`zlib.error`）、不可读的文件（`OSError`）原先会原样抛出类型各异的异常，
+    而 `--print-keymap` 那侧只认 `InstallerError` —— 其结果是把一个 traceback
+    摔在界面上，而不是「失败 + 一句人话」。
+    """
+    try:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, EOFError, zlib.error) as exc:
+        raise InstallerError(
+            f"键位表读不出来：{path}",
+            EXIT_USAGE,
+            hint="文件损坏或不可读（截断的 .gz 会这样）；重装 kbd 或换一份键位映射",
+        ) from exc
 
 
 def find_keymap(name: str, root: str = KEYMAP_ROOT) -> Path:
@@ -224,9 +245,26 @@ def include_candidates(name: str, includer: Path, root: Path) -> list[Path]:
 
 
 def resolve_include(name: str, includer: Path, root: Path) -> Path | None:
+    """把 `include "名字"` 解析成 root 之下的一个真文件；解析不出去就是 None。
+
+    名字来自键位表（数据，不是用户输入），但 `Path` 有一条容易忘的规则：
+    **以 `/` 开头的右操作数会直接覆盖左操作数**。所以 `include "/etc/passwd"`
+    会让 `directory / name` 落到树外，`include "../../x"` 同理 —— 那让
+    `--print-keymap` 变成「读任意文件」。这里要求**解析后的真实路径仍在 root 下**。
+
+    名字里出现 NUL 时 `Path.is_file()` 抛的是 `ValueError`（不是 `OSError`）：
+    坏数据要给「找不到」这个答案，不能把 `--print-keymap` 摔成 traceback。
+    """
+    base = root.resolve()
     for candidate in include_candidates(name, includer, root):
-        if candidate.is_file():
-            return candidate
+        try:
+            if not candidate.is_file():
+                continue
+            if not candidate.resolve().is_relative_to(base):
+                continue
+        except (OSError, ValueError):
+            continue
+        return candidate
     return None
 
 
@@ -306,7 +344,12 @@ def _expand(
             continue
         # `plain keycode 83 = ...` 与 `keycode 83 = ...` 是同一件事，归一化成空集，
         # 否则同一个键会留下两条「默认层」记录，后一条把前一条盖掉，凭空少一个键。
-        words = (match.group("mods") or "").split()
-        mods = tuple(sorted(word for word in words if word in _MODIFIERS and word != "plain"))
+        #
+        # 反过来，修饰键词**一个都不认识**时绝不能当成默认层（那等于凭空改写主键区）：
+        # 认不出来就不记这一行 —— 数据问题，不猜。
+        words = [word for word in (match.group("mods") or "").split() if word != "plain"]
+        mods = tuple(sorted(word for word in words if word in _MODIFIERS))
+        if words and not mods:
+            continue
         syms = tuple(match.group("syms").split())
         bindings[(int(match.group("code")), mods)] = syms

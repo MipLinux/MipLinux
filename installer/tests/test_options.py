@@ -73,6 +73,15 @@ class TestTimezones(_RootCase):
         """读不到就空着 —— 内建一份名单会掩盖「这个环境列不出来」。"""
         self.assertEqual(options.timezones(str(self.root)), [])
 
+    def test_undecodable_tab_is_empty_not_a_traceback(self):
+        """表在、但解不出 UTF-8：与读不到同一种结果。
+
+        外面只接得住 `InstallerError`；让 `UnicodeDecodeError` 冒出去，
+        `--print-timezones` 就会摔一个 traceback 而不是空名单 + 一句人话。
+        """
+        (self.root / "zone1970.tab").write_bytes(b"\xff\xfe\x00garbage")
+        self.assertEqual(options.timezones(str(self.root)), [])
+
 
 class TestZoneOffset(_RootCase):
     JANUARY = datetime(2024, 1, 15, 12, 0, tzinfo=dt_timezone.utc)
@@ -122,6 +131,17 @@ class TestKeymaps(_RootCase):
     def test_missing_root_is_an_empty_list(self):
         self.assertEqual(options.keymaps(str(self.root / "nope")), [])
 
+    def test_only_names_that_can_go_into_vconsole_conf_are_listed(self):
+        """名单里的每个名字都会被原样写进 `KEYMAP=`。
+
+        `.map.gz`（切出空串）与带空白的 basename 都不是 `vconsole.conf` 收的值：
+        列出来就是让人选一个写进去不生效的名字。
+        """
+        self._map("us.map.gz")
+        self._map(".map.gz")
+        self._map("weird name.map.gz")
+        self.assertEqual(options.keymaps(str(self.root)), ["us"])
+
 
 class TestLocales(_RootCase):
     def test_takes_field_one_of_each_non_comment_line(self):
@@ -136,6 +156,12 @@ class TestLocales(_RootCase):
 
     def test_missing_file_is_an_empty_list(self):
         self.assertEqual(options.locales(str(self.root / "SUPPORTED")), [])
+
+    def test_undecodable_file_is_empty_not_a_traceback(self):
+        """与 `timezones()` 同一条：解不出来 = 列不出名单，不能把异常漏出去。"""
+        path = self.root / "SUPPORTED"
+        path.write_bytes(b"zh_CN.UTF-8 UTF-8\n\xff\xfe\x00")
+        self.assertEqual(options.locales(str(path)), [])
 
 
 class TestValidateTarget(unittest.TestCase):
@@ -160,6 +186,73 @@ class TestValidateTarget(unittest.TestCase):
                 # `--target` 传错属于「参数不对，没动手」——不是配置阶段失败。
                 self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
                 self.assertEqual(ctx.exception.reason, "format")
+
+    def test_refuses_a_target_that_resolves_elsewhere(self):
+        """字符串合法不等于安全：`mount` / `umount` 会**解析符号链接**。
+
+        `/mnt/mipl -> /proc` 能过上面每一条字符串检查，却把一次 `umount -R` 落到
+        `/proc` 上。这里直接把 realpath 换成另一种答案来验（不往宿主机 `/mnt` 写东西）。
+        """
+        from unittest import mock
+
+        with mock.patch("mipl_installer.options.os.path.realpath", return_value="/proc"):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target("/mnt/mipl")
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+
+    def test_refuses_a_boot_mount_that_resolves_elsewhere(self):
+        """ESP 挂在 `<target>/boot`，`mount` / `umount -R` 同样会解析它（复核二轮 finding）。"""
+        from unittest import mock
+
+        # 非 boot 的路径原样返回：不读宿主机状态，测试就不会因为宿主 `/mnt` 是链接
+        # 而在 target 那一步先被拒（那样这条用例就没验到 boot）。
+        def fake(path):
+            return "/" if path == "/mnt/mipl/boot" else path
+
+        with mock.patch("mipl_installer.options.os.path.realpath", side_effect=fake):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target("/mnt/mipl")
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+
+    def test_refuses_a_target_that_exists_as_a_regular_file(self):
+        """`ensure_dir()` 跑在盘擦完之后：等到那时才抛 FileExistsError 就晚了。"""
+        from unittest import mock
+
+        target = "/mnt/mipl"
+
+        def fake_exists(path):
+            return path in (target, "/mnt")
+
+        def fake_isdir(path):
+            return path == "/mnt"
+
+        with mock.patch("mipl_installer.options.os.path.exists", side_effect=fake_exists), \
+                mock.patch("mipl_installer.options.os.path.isdir", side_effect=fake_isdir):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target(target)
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
+
+    def test_refuses_a_boot_mount_that_exists_as_a_regular_file(self):
+        """`target/boot` 是普通文件时，`mount_target()` 同样要等擦盘后才会炸。"""
+        from unittest import mock
+
+        target, boot = "/mnt/mipl", "/mnt/mipl/boot"
+
+        def fake_exists(path):
+            return path in (target, boot, "/mnt")
+
+        def fake_isdir(path):
+            return path in (target, "/mnt")          # boot 是普通文件
+
+        with mock.patch("mipl_installer.options.os.path.exists", side_effect=fake_exists), \
+                mock.patch("mipl_installer.options.os.path.isdir", side_effect=fake_isdir):
+            with self.assertRaises(InstallerError) as ctx:
+                options.validate_target(target)
+        self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
+        self.assertEqual(ctx.exception.reason, "format")
 
 
 class TestValidators(_RootCase):
@@ -188,8 +281,22 @@ class TestValidators(_RootCase):
         options.validate_keymap("us", str(self.root))                  # 名单里有，不该抛
 
     def test_keymap_skips_when_the_root_is_missing(self):
-        """**故意的**：没装 kbd 的环境里无从判断，名单在、名字不在才要拦（Issue #64）。"""
+        """**故意的**：没装 kbd 的环境里列不出名单，形状对的名字照旧放行（Issue #64）。"""
         options.validate_keymap("teapot", str(self.root / "nope"))
+
+    def test_keymap_falls_back_to_shape_when_the_list_is_unreadable(self):
+        """名单读不到时不装作能判断，但也不放垃圾过去（与 `validate_locale` 同形）。
+
+        漏了这一关，空串 / 带斜杠的名字会一路写进 `vconsole.conf` ——
+        systemd-vconsole-setup 认不出来，而那时盘已经擦了。
+        """
+        missing = str(self.root / "nope")
+        for bad in ("", "../etc/passwd", "us,de", "a b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InstallerError) as ctx:
+                    options.validate_keymap(bad, missing)
+                self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+                self.assertEqual(ctx.exception.reason, "format")
 
     def test_hostname_accepts_rfc1123_names(self):
         for hostname in ("mipl", "my-host", "a", "a" * 63):
@@ -230,11 +337,48 @@ class TestValidators(_RootCase):
             options.validate_locale("ja_XX.UTF-8", str(supported))
         self.assertEqual(ctx.exception.reason, "notInList")
 
+    def test_locale_accepts_the_charset_alias(self):
+        """`zh_CN.utf8` 与名单里的 `zh_CN.UTF-8` 是同一个 locale（维护者 #153 跨线要求）。
+
+        `locale-gen` 生成的目录就叫 `zh_CN.utf8`，CLI 传它不该在 preflight 被拒。
+        """
+        supported = self.root / "SUPPORTED"
+        supported.write_text("zh_CN.UTF-8 UTF-8\nsr_RS@latin.UTF-8 UTF-8\n", encoding="utf-8")
+        for alias in ("zh_CN.utf8", "zh_CN.utf-8", "zh_CN.UTF8", "sr_RS@latin.utf8"):
+            with self.subTest(alias=alias):
+                options.validate_locale(alias, str(supported))                 # 不该抛
+
+    def test_locale_alias_does_not_over_merge(self):
+        """只归一**字符集**：语言 / 地区 / 修饰符不同仍是不同的 locale。"""
+        supported = self.root / "SUPPORTED"
+        supported.write_text(
+            "zh_CN.UTF-8 UTF-8\nzh_CN.GB18030 GB18030\nsr_RS@latin.UTF-8 UTF-8\n",
+            encoding="utf-8",
+        )
+        options.validate_locale("zh_CN.gb18030", str(supported))               # 同字符集的另一种写法
+        for bad in ("zh_CN.GBK", "zh_CN", "zh_cn.UTF-8", "sr_RS.UTF-8"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InstallerError) as ctx:
+                    options.validate_locale(bad, str(supported))
+                self.assertEqual(ctx.exception.reason, "notInList")
+
+    def test_preflight_accepts_the_locale_alias(self):
+        """维护者点名的路径：CLI 先过 `pipeline.preflight()`，别名不能在那里被拒。"""
+        from mipl_installer import pipeline
+
+        if "zh_CN.UTF-8" not in options.locales():
+            self.skipTest("本机 /usr/share/i18n/SUPPORTED 里没有 zh_CN.UTF-8")
+        if not Path("/usr/share/zoneinfo/Asia/Shanghai").is_file():
+            self.skipTest("本机没有 Asia/Shanghai（preflight 还会校验时区）")
+        pipeline.preflight(pipeline.Plan(disk="/dev/vda", locale="zh_CN.utf8"))   # 不该抛
+
     def test_locale_falls_back_to_shape_when_the_list_is_unreadable(self):
         """名单读不到时不装作能判断，但也不放垃圾过去（与 `validate_keymap` 同形）。"""
         missing = str(self.root / "nope")
-        options.validate_locale("ja_JP.UTF-8", missing)                     # 形如 xx_YY.UTF-8 → 放行
-        for bad in ("中文", "ja_JP", "ja_JP.utf8", "", "../etc/passwd"):
+        for ok in ("ja_JP.UTF-8", "ja_JP.utf8", "ja_JP.utf-8"):
+            with self.subTest(ok=ok):
+                options.validate_locale(ok, missing)                       # 形如 xx_YY.UTF-8（含字符集别名）→ 放行
+        for bad in ("中文", "ja_JP", "ja_JP.UTF16", "ja_JP.utf8x", "", "../etc/passwd"):
             with self.subTest(bad=bad):
                 with self.assertRaises(InstallerError) as ctx:
                     options.validate_locale(bad, missing)

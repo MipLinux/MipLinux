@@ -160,5 +160,108 @@ class TestConnect(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, EXIT_USAGE)
 
 
+class TestClassifyFailure(unittest.TestCase):
+    """失败码只从 **nmcli 的报错**里读。
+
+    两条不能踩的线（#153 复核）：
+
+    * **只剥认得出的 Runner 前缀**，不按「有没有换行」切 —— 调用方直接传 nmcli
+      自己的多行报错时，第一行才是真正的错误。
+    * **名字不是判据**：nmcli 回显的 SSID / 连接名一律带引号，而名字是外部输入 ——
+      一个叫 `password` 或 `no network with ssid` 的网络不能让失败码跟着变。
+    """
+
+    def test_plain_error_line_still_classifies(self):
+        self.assertEqual(network.classify_failure("Error: Secrets were required, but not provided."),
+                         "auth")
+        self.assertEqual(network.classify_failure("Error: No network with SSID 'X' found."),
+                         "notFound")
+
+    def test_raw_multiline_error_keeps_its_first_line(self):
+        """nmcli 自己的多行输出：第一行就是错误，**不许**丢掉（复核 finding）。"""
+        self.assertEqual(
+            network.classify_failure("Error: Secrets were required, but not provided.\n"
+                                     "Hint: check Wi-Fi credentials."),
+            "auth",
+        )
+
+    def test_single_line_error_with_a_trailing_newline(self):
+        self.assertEqual(network.classify_failure("Error: Secrets were required, but not provided.\n"),
+                         "auth")
+
+    def test_runner_message_without_stderr_is_other(self):
+        """Runner 没捕获到 stderr 时没有可读的报错 —— 不猜。"""
+        self.assertEqual(
+            network.classify_failure("命令失败（退出码 4）：nmcli --ask device wifi connect X"),
+            "other",
+        )
+
+    def test_ssid_in_the_command_line_does_not_pick_the_code(self):
+        message = ("命令失败（退出码 4）：nmcli --ask device wifi connect password：\n"
+                   "    Error: No network with SSID 'password' found.")
+        self.assertEqual(network.classify_failure(message), "notFound")
+
+        timeout_named = ("命令失败（退出码 4）：nmcli --ask device wifi connect timeout：\n"
+                         "    Error: Connection activation failed: (7) Secrets were required, "
+                         "but not provided.")
+        self.assertEqual(network.classify_failure(timeout_named), "auth")
+
+    def test_quoted_name_is_never_a_needle(self):
+        """引号里的是**名字**，不是失败原因（复核 finding 的两种方向都钉住）。"""
+        # SSID 叫 `password`：真正的错误是「找不到网络」
+        self.assertEqual(
+            network.classify_failure("Error: No network with SSID 'password' found."),
+            "notFound",
+        )
+        # SSID 叫 `no network with ssid`：真正的错误是认证失败
+        self.assertEqual(
+            network.classify_failure("Error: authentication failed for SSID 'no network with ssid'"),
+            "auth",
+        )
+
+    def test_a_name_with_an_apostrophe_still_comes_off(self):
+        """名字里带 `'` 时按引号对切只会摘掉前半截，`password` 会漏出来（复核 finding）。"""
+        self.assertEqual(
+            network.classify_failure("Error: No network with SSID 'Cafe's password' found."),
+            "notFound",
+        )
+        runner = _NmcliErrorRunner("Error: No network with SSID 'Cafe's password' found.")
+        with self.assertRaises(InstallerError) as ctx:
+            network.connect(runner, "Cafe's password", "wrong")
+        self.assertEqual(ctx.exception.reason, "notFound")
+
+    def test_a_short_ssid_that_appears_in_the_phrase_is_not_removed(self):
+        """SSID 叫 `No` 时，全局删名字会把报错开头的 `No` 也删掉（notFound → other）。"""
+        self.assertEqual(
+            network.classify_failure("Error: No network with SSID 'No' found."),
+            "notFound",
+        )
+        runner = _NmcliErrorRunner("Error: No network with SSID 'No' found.")
+        with self.assertRaises(InstallerError) as ctx:
+            network.connect(runner, "No", "wrong")
+        self.assertEqual(ctx.exception.reason, "notFound")
+
+    def test_connect_reports_the_code_from_the_error_not_the_ssid(self):
+        runner = _NmcliErrorRunner("Error: No network with SSID 'password' found.")
+        with self.assertRaises(InstallerError) as ctx:
+            network.connect(runner, "password", "wrong")
+        self.assertEqual(ctx.exception.reason, "notFound")
+
+
+class _NmcliErrorRunner:
+    """抛一条**与 `Runner.run` 同形**的消息：第一行带命令（含 SSID），后面才是 nmcli 的报错。"""
+
+    dry_run = False
+
+    def __init__(self, stderr: str) -> None:
+        self.stderr = stderr
+
+    def run(self, argv, **kwargs):
+        raise InstallerError(
+            f"命令失败（退出码 4）：{' '.join(str(a) for a in argv)}：\n    {self.stderr}",
+            EXIT_USAGE,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

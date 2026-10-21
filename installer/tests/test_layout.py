@@ -22,8 +22,8 @@ class TestPlanLayout(unittest.TestCase):
     def test_40gib_default(self):
         layout = disk.plan_layout(40 * GiB)
         self.assertEqual(layout.esp_start, 1 * MiB)          # 1 MiB 对齐，不占 0 扇区
-        self.assertEqual(layout.esp_size, 512 * MiB)
-        self.assertEqual(layout.root_start, 513 * MiB)       # ESP 之后重新对齐
+        self.assertEqual(layout.esp_size, 1 * GiB)
+        self.assertEqual(layout.root_start, 1 * GiB + 1 * MiB)       # ESP 之后重新对齐
         self.assertLessEqual(layout.root_start + layout.root_size, 40 * GiB)
 
     def test_root_is_aligned_and_tail_is_left_alone(self):
@@ -44,11 +44,15 @@ class TestPlanLayout(unittest.TestCase):
         `/proc/partitions` 里少一个、`/dev` 里没有节点，而 `lsblk` 照样把盘上的表
         列出来（它自己去读设备），于是报错完全指不到布局。
         """
-        for total in (40 * GiB, 6 * GiB, 128 * GiB + 7):
+        for total in (40 * GiB, 10 * GiB, 128 * GiB + 7):
             with self.subTest(total=total):
                 layout = disk.plan_layout(total)
                 tail = total - (layout.root_start + layout.root_size)
                 self.assertGreaterEqual(tail, disk.GPT_TAIL_RESERVE)
+
+    def test_old_capacity_limit_is_refused(self):
+        with self.assertRaises(InstallerError):
+            disk.plan_layout(6 * GiB)
 
     def test_too_small_is_refused(self):
         with self.assertRaises(InstallerError) as ctx:
@@ -136,6 +140,9 @@ class TestSameDevice(unittest.TestCase):
     def test_other_disk_is_not_the_same(self):
         self.assertFalse(disk.same_device("/dev/vdb1", "/dev/vda"))
         self.assertFalse(disk.same_device("/dev/vda", "/dev/vda1"))
+        # 字母结尾的设备分区号为纯数字，不能将 /dev/sdap 误判为 /dev/sda
+        self.assertFalse(disk.same_device("/dev/sdap1", "/dev/sda"))
+        self.assertFalse(disk.same_device("/dev/sdaa1", "/dev/sda"))
 
 
 class TestAssertUsable(unittest.TestCase):
@@ -162,7 +169,7 @@ class TestAssertUsable(unittest.TestCase):
 
     def test_happy_path(self):
         layout = self._call()
-        self.assertEqual(layout.esp_size, 512 * MiB)
+        self.assertEqual(layout.esp_size, 1 * GiB)
 
     def test_refuses_non_block_device(self):
         with mock.patch("mipl_installer.util.is_block_device", return_value=False):

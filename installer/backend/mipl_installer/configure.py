@@ -18,7 +18,11 @@
 
 from __future__ import annotations
 
+import glob
+import os
+import posixpath
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,7 +34,6 @@ from .util import (
     InstallerError,
     Runner,
     chroot_argv,
-    ensure_dir,
     read_text,
     write_text,
 )
@@ -39,7 +42,7 @@ from .util import (
 PACMAN_BASELINE = Path(__file__).parent / "data/pacman-baseline"
 
 #: `Include = /etc/pacman.d/mirrorlist` —— 只认未注释的整行
-INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(\S+)\s*$")
+INCLUDE_RE = re.compile(r"^\s*Include\s*=\s*(\S(?:.*\S)?)\s*$")
 
 FSTAB_HEADER = """\
 # /etc/fstab: static file system information.
@@ -91,14 +94,15 @@ def iter_includes(pacman_conf_text: str) -> list[str]:
     return [m.group(1) for line in pacman_conf_text.splitlines() if (m := INCLUDE_RE.match(line))]
 
 
-#: 仓库段里「不校验签名」的 SigLevel 行（`Optional` / `TrustAll`）。`\b` 保证
-#: 不误伤 `Required DatabaseOptional`（全局那行）与 `LocalFileSigLevel = Optional`
-#: （本地包的策略，键名不同，本来就匹配不到）。
-OPTIONAL_TRUST_RE = re.compile(r"^\s*SigLevel\s*=\s*.*\b(?:Optional|TrustAll)\b")
+#: 删除关闭验签或放宽信任的设置，保留 Required DatabaseOptional。
+#: 仅匹配 SigLevel；LocalFileSigLevel 不受影响，注释中的词不参与判断。
+OPTIONAL_TRUST_RE = re.compile(
+    r"^\s*SigLevel\s*=\s*[^#]*\b(?:(?:Package)?(?:Never|Optional|TrustAll)|Database(?:Never|TrustAll))\b"
+)
 
 
 def target_pacman_conf(pacman_conf_text: str) -> str:
-    """Live conf → 装后系统的 conf：去掉来源里的免签 `SigLevel` 行（issue #135）。
+    """Live conf → 装后系统的 conf：去掉禁用验签或放宽信任的覆盖（#135 / #152）。
 
     当前 Live 出厂已无这种行；这里去掉它，是给旧 conf / 自定义 conf 的兜底：
     该段会继承 `[options]` 的全局 `SigLevel = Required DatabaseOptional`，装后系统对
@@ -163,15 +167,21 @@ def locales_to_enable(cfg: TargetConfig) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _norm_locale(s: str) -> str:
+    """规范化 locale 字符串：忽略大小写、短横线与下划线差异，如 zh_CN.utf8 -> zhcnutf8。"""
+    return re.sub(r"[^a-zA-Z0-9]", "", s).lower()
+
+
 def has_locale(locale_gen_text: str, locale: str) -> bool:
     """`locale.gen` 里有没有可放开的那一行（注释或未注释都算）。
 
-    带字符集比较（表里写的是 `zh_CN.UTF-8 UTF-8`），所以按整名匹配 ——
+    带字符集比较（表里写的是 `zh_CN.UTF-8 UTF-8`），规范化后按整名匹配 ——
     `zh_CN.UTF-8` 与 `zh_CN.GB18030` 是两行，不能只看前半个名字。
     """
+    target = _norm_locale(locale)
     for line in locale_gen_text.splitlines():
         body = line.strip().lstrip("#").strip()
-        if body and body.split()[0] == locale:
+        if body and _norm_locale(body.split()[0]) == target:
             return True
     return False
 
@@ -179,16 +189,16 @@ def has_locale(locale_gen_text: str, locale: str) -> bool:
 def enable_locales(locale_gen_text: str, locales: tuple[str, ...]) -> str:
     """把 `/etc/locale.gen` 里指定的行放开（其余原样）。
 
-    locale.gen 里的写法是 `zh_CN.UTF-8 UTF-8`，带字符集，所以直接按整名比。
+    locale.gen 里的写法是 `zh_CN.UTF-8 UTF-8`，带字符集，规范化比对以兼容大小写差异。
     """
-    wanted = {loc for loc in locales}
+    wanted = {_norm_locale(loc) for loc in locales}
     out: list[str] = []
     for line in locale_gen_text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
             body = stripped.lstrip("#").strip()
             parts = body.split()
-            if parts and parts[0] in wanted:
+            if parts and _norm_locale(parts[0]) in wanted:
                 out.append(body)
                 continue
         out.append(line)
@@ -210,6 +220,12 @@ def sudoers_dropin() -> str:
 
 
 def validate_user(user: str) -> None:
+    # 与基础系统及默认目标包中的服务账号冲突，会在擦盘后才让 useradd 失败。
+    if user in {"root", "bin", "daemon", "mail", "ftp", "http", "nobody",
+                "dbus", "polkitd", "systemd-network", "systemd-resolve", "uuidd",
+                "systemd-coredump", "systemd-timesync", "systemd-oom", "systemd-journal-remote",
+                "alpm", "avahi", "tss", "dnsmasq", "nvidia-persistenced"}:
+        raise InstallerError("用户名是系统保留账号，请换一个用户名", EXIT_CONFIGURE)
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", user):
         raise InstallerError(
             f"用户名不合法：{user!r}",
@@ -218,7 +234,34 @@ def validate_user(user: str) -> None:
         )
 
 
+def _validate_passwords(password: str, root_password: str | None) -> None:
+    for value in (password, root_password):
+        if value is not None and (not value or any(c in value for c in "\r\n\x00")):
+            raise InstallerError("密码不能为空或包含换行、回车、NUL", EXIT_CONFIGURE)
+
+
 # ── 落到目标系统 ──────────────────────────────────────────────────────
+def _ensure_config_dir(runner: Runner, path: str, *, announce: bool = False) -> None:
+    if announce:
+        runner.reporter.note(f"建目录 {path}")
+    if runner.dry_run:
+        return
+    missing: list[Path] = []
+    directory = Path(path)
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+
+
+def _write_config(runner: Runner, path: str, text: str, *, mode: int | None = None) -> None:
+    # 配置的可读性不能随启动安装器的 umask 改变。
+    _ensure_config_dir(runner, str(Path(path).parent))
+    write_text(runner, path, text, mode=mode if runner.dry_run else (0o644 if mode is None else mode))
+
+
 def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
     """默认从 ISO 内独立基线写入目标；显式自定义 conf 使用调用者的文件。
 
@@ -239,32 +282,67 @@ def copy_pacman_config(runner: Runner, cfg: TargetConfig) -> None:
             EXIT_CONFIGURE,
             hint=f"配置来源：{conf_path}；默认安装需要 ISO 打包的 pacman 基线",
         )
-    text = target_pacman_conf(read_text(str(conf_path)))
-    includes = iter_includes(text)
+    # 先展开并读取整个 Include 图，再写目标，缺文件或循环不留下半份配置。
+    pending: dict[str, str] = {}
+    active: set[Path] = set()
+    destinations: dict[str, Path] = {}
 
-    write_text(runner, f"{cfg.target}/etc/pacman.conf", text)
+    def collect(source: Path, destination: str) -> str:
+        destination = posixpath.normpath("/" + destination.lstrip("/"))
+        identity = source.resolve()
+        if baseline is not None and not identity.is_relative_to(baseline.resolve()):
+            raise InstallerError("pacman Include 超出打包基线目录", EXIT_CONFIGURE)
+        if len(active) >= 64:
+            raise InstallerError("pacman Include 嵌套过深", EXIT_CONFIGURE)
+        if identity in active:
+            raise InstallerError("pacman Include 存在循环引用", EXIT_CONFIGURE)
+        if destination in destinations and destinations[destination] != identity:
+            # 自定义入口名可能不是 pacman.conf；它包含的同名文件不能覆盖入口。
+            index = len(destinations)
+            while destination in destinations:
+                destination = f"/etc/pacman.d/mipl-includes/{index}.conf"
+                index += 1
+        destinations[destination] = identity
+        if destination in pending:
+            return destination
+        active.add(identity)
+        lines: list[str] = []
+        source_text = target_pacman_conf(read_text(str(source)))
+        for line in source_text.splitlines():
+            match = INCLUDE_RE.match(line)
+            if match is None:
+                lines.append(line)
+                continue
+            include = match.group(1)
+            # 相对输入按源配置目录定位；写入配置时固定为目标内绝对路径。
+            pattern = source_path(include) if Path(include).is_absolute() else source.parent / include
+            matches = sorted(glob.glob(str(pattern)))
+            if not matches:
+                raise InstallerError(f"pacman.conf 里 Include 的文件不存在：{include}", EXIT_CONFIGURE)
+            for name in matches:
+                child = Path(name)
+                if not child.is_file():
+                    raise InstallerError(f"pacman Include 不是普通文件：{include}", EXIT_CONFIGURE)
+                # 通配符可以出现在目录名中，按相对配置目录保持展开后的布局。
+                if Path(include).is_absolute():
+                    child_destination = "/" + str(child.relative_to(baseline)).lstrip("/") if baseline is not None else str(child)
+                else:
+                    relative = posixpath.relpath(str(child), str(source.parent))
+                    child_destination = posixpath.normpath(posixpath.join(posixpath.dirname(destination), relative))
+                child_destination = collect(child, child_destination)
+                lines.append(f"Include = {child_destination}")
+        active.remove(identity)
+        pending[destination] = "\n".join(lines) + "\n"
+        return destination
 
-    if not includes:
-        # conf 里没有 Include（构建期那份 profile/pacman.conf 就是这种写法），
-        # 那就至少把 mirrorlist 写进去。
-        if not source_path(cfg.mirrorlist).is_file():
-            raise InstallerError(
-                f"找不到 mirrorlist：{cfg.mirrorlist}",
-                EXIT_CONFIGURE,
-                hint="装后系统要靠它找仓库（检查点 6），不能没有",
-            )
-        write_text(runner, f"{cfg.target}/etc/pacman.d/mirrorlist", read_text(str(source_path(cfg.mirrorlist))))
-        return
-
-    for include in includes:
-        source = source_path(include) if Path(include).is_absolute() else conf_path.parent / include
-        if not source.is_file():
-            raise InstallerError(
-                f"pacman.conf 里 Include 的文件不存在：{include}",
-                EXIT_CONFIGURE,
-                hint=f"配置来源中找不到 {source}，装后系统缺少该文件将无法升级",
-            )
-        write_text(runner, f"{cfg.target}{include}", read_text(str(source)))
+    collect(conf_path, "/etc/pacman.conf")
+    if not iter_includes(pending["/etc/pacman.conf"]):
+        mirror = source_path(cfg.mirrorlist)
+        if not mirror.is_file():
+            raise InstallerError(f"找不到 mirrorlist：{cfg.mirrorlist}", EXIT_CONFIGURE)
+        pending["/etc/pacman.d/mirrorlist"] = read_text(str(mirror))
+    for destination, text in pending.items():
+        _write_config(runner, str(Path(cfg.target) / destination.lstrip("/")), text)
 
 
 def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
@@ -282,7 +360,7 @@ def copy_mirror_switch(runner: Runner, cfg: TargetConfig) -> None:
             continue
         if not source.is_file():
             raise InstallerError(f"缺少网络换源文件：{source}", EXIT_CONFIGURE)
-        write_text(runner, cfg.target + destination, read_text(str(source)),
+        _write_config(runner, cfg.target + destination, read_text(str(source)),
                    mode=0o644 if destination.endswith(".service") else 0o755)
 
 
@@ -291,23 +369,21 @@ def copy_fonts_conf(runner: Runner, cfg: TargetConfig) -> None:
 
     与 pacman.conf / mirrorlist 同一个哲学：出厂设置在 Live（airootfs），安装器
     不复制第二份字符串 —— 中文 fallback 只该有一份真相。字体包由装后系统清单提供。
+    若非 Live 环境缺少该出厂文件，降级提示并跳过，不阻断主安装流程。
     """
     source = Path(cfg.fonts_conf)
     if not source.is_file():
         if runner.dry_run:
-            # 宿主排练机上没有这份 Live 出厂设置 —— dry-run 只预览命令序列，
-            # 照 write_static_files 对 locale.gen 的同一口径：容忍并说出来。
             runner.reporter.note(
                 f"dry-run：找不到字体配置 {cfg.fonts_conf}（Live 的出厂设置）—— 跳过复制预览"
             )
             return
-        raise InstallerError(
-            f"找不到字体配置：{cfg.fonts_conf}",
-            EXIT_CONFIGURE,
-            hint="默认读运行系统的 /etc/fonts/local.conf —— 这个安装器要在 Live 里跑",
+        runner.reporter.note(
+            f"找不到字体配置：{cfg.fonts_conf}，跳过字体 fallback 复制（装后系统需自行配置或依赖默认字体规则）"
         )
-    ensure_dir(runner, f"{cfg.target}/etc/fonts")
-    write_text(runner, f"{cfg.target}/etc/fonts/local.conf", read_text(str(source)))
+        return
+    _ensure_config_dir(runner, f"{cfg.target}/etc/fonts", announce=True)
+    _write_config(runner, f"{cfg.target}/etc/fonts/local.conf", read_text(str(source)))
 
 
 def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uuid: str) -> None:
@@ -318,14 +394,7 @@ def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uu
     options.validate_timezone(cfg.timezone)
     options.validate_keymap(cfg.keymap)
 
-    write_text(runner, f"{cfg.target}/etc/fstab", fstab_text(root_uuid, esp_uuid))
-    write_text(runner, f"{cfg.target}/etc/locale.conf", locale_conf(cfg.locale))
-    write_text(runner, f"{cfg.target}/etc/environment", environment_text())
-    write_text(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf(cfg.keymap))
-    write_text(runner, f"{cfg.target}/etc/hostname", cfg.hostname + "\n")
-    write_text(runner, f"{cfg.target}/etc/hosts", hosts(cfg.hostname))
-    write_text(runner, f"{cfg.target}/etc/sudoers.d/10-wheel", sudoers_dropin(), mode=0o440)
-
+    locale_gen_text: str | None = None
     locale_gen = Path(f"{cfg.target}/etc/locale.gen")
     if locale_gen.is_file():
         text = read_text(str(locale_gen))
@@ -335,7 +404,7 @@ def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uu
                 EXIT_CONFIGURE,
                 hint="换一个 locale（名单见安装器的语言页），或确认目标清单里装上了 glibc",
             )
-        write_text(runner, str(locale_gen), enable_locales(text, locales_to_enable(cfg)))
+        locale_gen_text = enable_locales(text, locales_to_enable(cfg))
     elif not runner.dry_run:
         raise InstallerError(
             f"目标系统里没有 {locale_gen}（glibc 没装上？）",
@@ -343,11 +412,22 @@ def write_static_files(runner: Runner, cfg: TargetConfig, root_uuid: str, esp_uu
             hint="pacstrap 装完后再跑 configure；清单里要有 base",
         )
 
+    _write_config(runner, f"{cfg.target}/etc/fstab", fstab_text(root_uuid, esp_uuid))
+    _write_config(runner, f"{cfg.target}/etc/locale.conf", locale_conf(cfg.locale))
+    _write_config(runner, f"{cfg.target}/etc/environment", environment_text())
+    _write_config(runner, f"{cfg.target}/etc/vconsole.conf", vconsole_conf(cfg.keymap))
+    _write_config(runner, f"{cfg.target}/etc/hostname", cfg.hostname + "\n")
+    _write_config(runner, f"{cfg.target}/etc/hosts", hosts(cfg.hostname))
+    _write_config(runner, f"{cfg.target}/etc/sudoers.d/10-wheel", sudoers_dropin(), mode=0o440)
+
+    if locale_gen_text is not None:
+        _write_config(runner, str(locale_gen), locale_gen_text)
+
     # 时区用符号链接，不用复制文件：/usr/share/zoneinfo 是 tzdata 提供的，
     # 复制一份出来就成了第二份会漂移的真相。
     tz_target = f"{cfg.target}/etc/localtime"
-    ensure_dir(runner, f"{cfg.target}/etc")
-    runner.run(["ln", "-sf", f"/usr/share/zoneinfo/{cfg.timezone}", tz_target], exit_code=EXIT_CONFIGURE)
+    _ensure_config_dir(runner, f"{cfg.target}/etc", announce=True)
+    runner.run(["ln", "-sfnT", f"/usr/share/zoneinfo/{cfg.timezone}", tz_target], exit_code=EXIT_CONFIGURE)
 
 
 def verify_password(runner: Runner, cfg: TargetConfig, user: str) -> str:
@@ -420,13 +500,36 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     `root_password=None` 表示**保持 root 锁定**（只用 sudo 提权）—— 这是默认，
     但安装器会把这件事**说出来**：一个登不进去的 root 不该让人自己发现。
     """
+    _validate_passwords(password, root_password)
     target = cfg.target
     validate_user(cfg.user)
+    require_archlinuxcn_keyring(runner, cfg)
 
     # 1. 用户与密码：密码走 stdin，**不进 argv**（argv 会留在进程列表与日志里）
     runner.reporter.emit(step_event("configure", "user", f"创建用户 {cfg.user}"))
-    runner.run(chroot_argv(target, ["useradd", "-m", "-G", "wheel", "-s", "/bin/bash", cfg.user]),
-               exit_code=EXIT_CONFIGURE)
+    passwd = Path(target) / "etc/passwd"
+    entries = [line.split(":") for line in read_text(str(passwd)).splitlines()] if passwd.is_file() else []
+    existing = [entry for entry in entries if entry[0] == cfg.user]
+    if existing:
+        entry = existing[0]
+        if (len(existing) != 1 or len(entry) != 7 or not entry[2].isdigit()
+                or not entry[3].isdigit() or int(entry[2]) < 1000
+                or entry[5] != f"/home/{cfg.user}"):
+            raise InstallerError("目标中已有同名账号，不能作为安装用户重用", EXIT_CONFIGURE)
+        try:
+            parent = os.lstat(Path(target) / "home")
+            home = os.lstat(Path(target) / entry[5].lstrip("/"))
+            if (not stat.S_ISDIR(parent.st_mode) or not stat.S_ISDIR(home.st_mode)
+                    or (home.st_uid, home.st_gid) != (int(entry[2]), int(entry[3]))):
+                raise ValueError("家目录类型或属主不匹配")
+        except (OSError, ValueError) as exc:
+            raise InstallerError("已有安装用户的家目录缺失或属主不正确，不能直接重用",
+                                 EXIT_CONFIGURE, hint="先检查并修复目标系统的家目录，再重试配置") from exc
+        runner.run(chroot_argv(target, ["usermod", "-a", "-G", "wheel", "-s", "/bin/bash", cfg.user]),
+                   exit_code=EXIT_CONFIGURE)
+    else:
+        runner.run(chroot_argv(target, ["useradd", "-m", "-G", "wheel", "-s", "/bin/bash", cfg.user]),
+                   exit_code=EXIT_CONFIGURE)
     runner.reporter.emit(step_event("configure", "user-password", "设置用户密码"))
     runner.run(chroot_argv(target, ["chpasswd"]), input=f"{cfg.user}:{password}\n", exit_code=EXIT_CONFIGURE)
     verify_password(runner, cfg, cfg.user)
@@ -438,6 +541,7 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
         verify_password(runner, cfg, "root")
         runner.reporter.note("root 密码已设置（与用户密码同机制，走 stdin）")
     else:
+        runner.run(chroot_argv(target, ["passwd", "-l", "root"]), exit_code=EXIT_CONFIGURE)
         runner.reporter.note(
             f"root 未设密码（账号保持锁定）：只能用 {cfg.user} + sudo 提权。"
             f"要设就在装完之后 `arch-chroot {cfg.target} passwd root`，或重装时带上 --root-password-stdin"
@@ -454,7 +558,6 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
     runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinux"]), exit_code=EXIT_CONFIGURE)
     # archlinuxcn 的 key 只能在这里导入：装后 conf 已收紧（#135），而它的 keyring
     # 包由 pacstrap 装进目标 —— packages.init_keyring 跑在 pacstrap 之前，那里没有它
-    require_archlinuxcn_keyring(runner, cfg)
     runner.run(chroot_argv(target, ["pacman-key", "--populate", "archlinuxcn"]), exit_code=EXIT_CONFIGURE)
 
     # 5. 服务：检查点 6 要在装后系统里联网，NetworkManager 必须开机自起
@@ -469,13 +572,13 @@ def run_in_chroot(runner: Runner, cfg: TargetConfig, password: str,
         runner.run(chroot_argv(target, reflector_guard(True)), exit_code=EXIT_CONFIGURE)
         runner.reporter.note("目标里有 reflector，已 disable reflector.timer / reflector.service（#23）")
 
-    # 6. initramfs 放最后：它要往 /boot（= ESP）里写内核与 initramfs，
+    # 6. initramfs 放最后：按目标 preset 生成镜像（内核由内核包安装），
     #    所以必须在 ESP 挂好之后、boot.py 校验之前跑
-    #    -P 连 fallback 救援镜像一起生成：弱 CPU 上这一步以分钟计，**先说出来**
+    #    -P 处理所有 preset；只有启用了 fallback 才会生成救援镜像。弱 CPU 上以分钟计，
     #    才有用（实机「卡了六分钟」的高发点之一）—— 说「要等几分钟」是给用户的
     #    预期，说「输出会持续到达」是替工具打包票（mkinitcpio 大部分时间在压缩，
     #    本来就不怎么输出），而那句空头支票实机反馈里被点过名。
-    runner.reporter.emit(step_event("configure", "initramfs", "生成 initramfs（含救援镜像）"))
+    runner.reporter.emit(step_event("configure", "initramfs", "按 preset 生成 initramfs"))
     runner.reporter.note("弱 CPU 上以分钟计；大部分时间在压缩，期间不会有新输出")
     runner.run(chroot_argv(target, ["mkinitcpio", "-P"]), exit_code=EXIT_CONFIGURE)
 
@@ -489,6 +592,7 @@ def configure_system(
     password: str,
     root_password: str | None = None,
 ) -> None:
+    _validate_passwords(password, root_password)
     copy_pacman_config(runner, cfg)
     copy_mirror_switch(runner, cfg)
     copy_fonts_conf(runner, cfg)

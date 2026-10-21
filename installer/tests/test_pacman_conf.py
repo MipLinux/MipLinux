@@ -62,6 +62,17 @@ class TestTargetPacmanConf(unittest.TestCase):
         self.assertIn("[archlinuxcn]", out)
         self.assertTrue(out.endswith("\n"))
 
+    def test_removes_disabled_and_prefixed_signature_overrides(self):
+        for value in ("Never", "PackageNever", "PackageOptional", "PackageTrustAll",
+                      "DatabaseNever", "DatabaseTrustAll", "Required PackageNever"):
+            with self.subTest(value=value):
+                source = f"[core]\nSigLevel = {value}\n"
+                self.assertEqual(configure.target_pacman_conf(source), "[core]\n")
+
+    def test_comment_does_not_change_strict_signature_setting(self):
+        source = "SigLevel = Required DatabaseOptional # Optional TrustAll Never\n"
+        self.assertEqual(configure.target_pacman_conf(source), source)
+
     def test_keeps_siglevel_without_holes(self):
         source = "\n".join([
             "[core]",
@@ -84,6 +95,116 @@ class TestTargetPacmanConf(unittest.TestCase):
 
 
 class TestCopyPacmanConfig(unittest.TestCase):
+    def test_include_named_pacman_conf_does_not_overwrite_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            conf = source / "custom.conf"
+            conf.write_text("Include = pacman.conf\n")
+            included = source / "pacman.conf"
+            included.write_text("[core]\nInclude = mirrors\n")
+            (source / "mirrors").write_text("Server = https://example.invalid/$repo\n")
+            target = root / "target"
+            configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            child = configure.iter_includes((target / "etc/pacman.conf").read_text())[0]
+            self.assertNotEqual(child, "/etc/pacman.conf")
+            child_text = (target / child.lstrip("/")).read_text()
+            self.assertIn("[core]", child_text)
+            mirrors = configure.iter_includes(child_text)[0]
+            self.assertIn("Server =", (target / mirrors.lstrip("/")).read_text())
+
+    def test_include_paths_with_spaces_are_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = root / "custom.conf"
+            included = root / "mirror list"
+            included.write_text("Server = https://example.invalid/$repo\n")
+            conf.write_text(f"[core]\nInclude = {included}\n")
+            target = root / "target"
+            configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            self.assertEqual((target / str(included).lstrip("/")).read_text(), included.read_text())
+            self.assertEqual(configure.iter_includes((target / "etc/pacman.conf").read_text()), [str(included)])
+
+    def test_glob_and_nested_relative_includes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            (source / "repos").mkdir(parents=True)
+            (source / "lists").mkdir()
+            conf = source / "pacman.conf"
+            conf.write_text("Include = repos/*.conf\n")
+            (source / "repos/core.conf").write_text("[core]\nInclude = ../lists/core\n")
+            (source / "lists/core").write_text("Server = https://example.invalid/$repo\n")
+            target = root / "target"
+            configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            self.assertEqual((target / "etc/pacman.conf").read_text(), "Include = /etc/repos/core.conf\n")
+            self.assertEqual((target / "etc/repos/core.conf").read_text(), "[core]\nInclude = /etc/lists/core\n")
+            self.assertEqual((target / "etc/lists/core").read_text(), (source / "lists/core").read_text())
+
+    def test_packaged_baseline_glob_preserves_target_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = root / "baseline"
+            (baseline / "etc/repos").mkdir(parents=True)
+            (baseline / "etc/pacman.conf").write_text("Include = /etc/repos/*.conf\n")
+            (baseline / "etc/repos/core.conf").write_text("[core]\nServer = https://example.invalid\n")
+            target = root / "target"
+            with patch.object(configure, "PACMAN_BASELINE", baseline):
+                configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target)))
+            self.assertEqual((target / "etc/pacman.conf").read_text(), "Include = /etc/repos/core.conf\n")
+            self.assertTrue((target / "etc/repos/core.conf").is_file())
+
+    def test_packaged_baseline_include_cannot_escape_to_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = root / "baseline"
+            (baseline / "etc").mkdir(parents=True)
+            (baseline / "etc/pacman.conf").write_text("Include = /etc/outside\n")
+            outside = root / "outside"
+            outside.write_text("Server = https://example.invalid\n")
+            (baseline / "etc/outside").symlink_to(outside)
+            target = root / "target"
+            with patch.object(configure, "PACMAN_BASELINE", baseline):
+                with self.assertRaises(InstallerError):
+                    configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target)))
+            self.assertFalse(target.exists())
+
+    def test_signature_policy_applies_to_nested_includes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = root / "pacman.conf"
+            conf.write_text("[options]\nSigLevel = Required DatabaseOptional\nInclude = repo.conf\n")
+            (root / "repo.conf").write_text("[core]\nSigLevel = Never\nInclude = mirrors\n")
+            (root / "mirrors").write_text("SigLevel = PackageNever\nServer = https://example.invalid\n")
+            target = root / "target"
+            configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            self.assertIn("Required DatabaseOptional", (target / "etc/pacman.conf").read_text())
+            self.assertNotIn("SigLevel", (target / "etc/repo.conf").read_text())
+            self.assertEqual((target / "etc/mirrors").read_text(), "Server = https://example.invalid\n")
+
+    def test_include_cycle_fails_before_writing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = root / "pacman.conf"
+            conf.write_text("Include = pacman.conf\n")
+            target = root / "target"
+            with self.assertRaises(InstallerError) as ctx:
+                configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            self.assertEqual(ctx.exception.exit_code, EXIT_CONFIGURE)
+            self.assertFalse(target.exists())
+
+    def test_nested_missing_include_fails_before_writing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = root / "pacman.conf"
+            conf.write_text("Include = child.conf\n")
+            (root / "child.conf").write_text("Include = missing.conf\n")
+            target = root / "target"
+            with self.assertRaises(InstallerError):
+                configure.copy_pacman_config(FakeRunner(), TargetConfig(target=str(target), pacman_conf=str(conf)))
+            self.assertFalse(target.exists())
+
     def test_default_uses_packaged_baseline_for_both_lists(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

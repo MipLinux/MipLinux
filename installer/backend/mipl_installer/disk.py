@@ -13,7 +13,7 @@
 
 布局（roadmap §M1）：
 
-    | 1 MiB | ESP 512 MiB (vfat, esp 标志) | root 剩余 (ext4) |
+    | 1 MiB | ESP 1 GiB (vfat, esp 标志) | root 剩余 (ext4) |
 
 **ESP 挂 `/boot`**，不是 `/efi`：systemd-boot 只读 FAT，内核与 initramfs 必须
 落在 ESP 上，否则重启时它找不到 `/vmlinuz-linux`。
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -44,15 +45,15 @@ GiB = 1024 ** 3
 #: 1 MiB 对齐。512 字节扇区的盘上是 2048 扇区，4K 盘上是 256 —— 都是整数，
 #: 顺带把 4Kn 盘的对齐要求一起满足了。
 ALIGN = 1 * MiB
-ESP_SIZE = 512 * MiB
+ESP_SIZE = 1 * GiB
 #: **盘尾要留给 GPT 的备份表头**（最后 33 个扇区，按 1 MiB 对齐留）。
 #: 不留会怎样：分区压上去之后，内核要么把它裁短、要么干脆不收下 ——
 #: 表现为 `/proc/partitions` 里少一个分区、`/dev` 里没有节点，
 #: 而 `lsblk` 照样把盘上的表列出来（它自己去读设备），于是报错完全指不到这里。
 GPT_TAIL_RESERVE = 1 * MiB
-#: root 的下限。留 5 GiB 是因为 base + linux + linux-firmware 装完约 1.5 GiB，
-#: 再算上 pacman 缓存与将来的桌面环境。
-MIN_ROOT_SIZE = 5 * GiB
+#: 当前实测安装内容与包缓存合计约 6 GiB；留文件系统开销与安装余量。
+#: 这是拒绝明显不足磁盘的保守下限，不是未来包集合的容量保证。
+MIN_ROOT_SIZE = 8 * GiB
 
 FAT_LABEL = "MIPLINUX"
 EXT4_LABEL = "MIPLINUX"
@@ -171,22 +172,13 @@ class Candidate:
 
 
 # ── 该不该动手 ────────────────────────────────────────────────────────
-def mount_sources(mountinfo_text: str) -> set[str]:
-    """从 `/proc/self/mountinfo` 里取出「设备源」那一列。
+def _unescape_mount_field(value: str) -> str:
+    return re.sub(r"\\(040|011|012|134)", lambda m: chr(int(m[1], 8)), value)
 
-    mountinfo 的字段（空格分隔）：`id parent major:minor root mountpoint
-    options [optional...] - fstype source superopts`。`source` 在 `-` 之后，
-    所以不能取第 1 列也不能取第 3 列。
-    """
-    sources: set[str] = set()
-    for line in mountinfo_text.splitlines():
-        fields = line.split()
-        if "-" not in fields:
-            continue
-        sep = fields.index("-")
-        if len(fields) >= sep + 3:
-            sources.add(fields[sep + 2])
-    return sources
+
+def mount_sources(mountinfo_text: str) -> set[str]:
+    """读取并解码 mountinfo 的挂载源。"""
+    return {entry.source for entry in mount_entries(mountinfo_text)}
 
 
 def stray_mountpoints(mountinfo_text: str, devices: list[str], keep: set[str]) -> list[str]:
@@ -196,20 +188,10 @@ def stray_mountpoints(mountinfo_text: str, devices: list[str], keep: set[str]) -
     标签正是 MIPLINUX）：mkfs 一完它就扑上来。不解除的话目标盘整个安装过程都被
     udisks 额外挂着一份 —— 收尾的「卸载目标」成了谎话，盘也一直busy（实机教训）。
     """
-    strays: list[str] = []
-    for line in mountinfo_text.splitlines():
-        fields = line.split()
-        if "-" not in fields:
-            continue
-        sep = fields.index("-")
-        if len(fields) < sep + 3:
-            continue
-        source, mountpoint = fields[sep + 2], fields[4]
-        if mountpoint in keep:
-            continue
-        if any(same_device(source, device) for device in devices):
-            strays.append(mountpoint)
-    return strays
+    return [entry.mountpoint for entry in mount_entries(mountinfo_text)
+            if entry.mountpoint not in keep
+            and any(same_device(entry.source, device) for device in devices)]
+
 
 
 @dataclass(frozen=True)
@@ -234,7 +216,8 @@ def mount_entries(mountinfo_text: str) -> list[MountEntry]:
         sep = fields.index("-")
         if len(fields) < sep + 3:
             continue
-        entries.append(MountEntry(fields[4], fields[sep + 2], fields[sep + 1]))
+        entries.append(MountEntry(_unescape_mount_field(fields[4]),
+                                  _unescape_mount_field(fields[sep + 2]), fields[sep + 1]))
     return entries
 
 
@@ -286,15 +269,102 @@ def ancestor_mounts(mountinfo_text: str, target: str) -> list[MountEntry]:
     return [entry for entry in mount_entries(mountinfo_text) if entry.mountpoint in parents]
 
 
+def _block_ancestors(device: str, sysfs_root: str = "/sys") -> set[str]:
+    """块设备自身、所属整盘和映射依赖；用 sysfs 追踪 LUKS/LVM/RAID。"""
+    if not device.startswith("/dev/"):
+        return set()
+    name = Path(os.path.realpath(device)).name
+    try:
+        info = os.stat(device)
+        if stat.S_ISBLK(info.st_mode):
+            node = Path(sysfs_root) / "dev/block" / f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}"
+            if not node.exists():
+                raise InstallerError("无法确认挂载源块设备身份，拒绝擦盘", EXIT_GUARD)
+        else:
+            node = Path(sysfs_root) / "class/block" / name
+    except OSError:
+        node = Path(sysfs_root) / "class/block" / name
+    pending = [node]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop().resolve()
+        if current.name in seen or not current.exists():
+            continue
+        seen.add(current.name)
+        if (current / "partition").exists():
+            pending.append(current.parent)
+        slaves = current / "slaves"
+        if slaves.is_dir():
+            pending.extend(slaves.iterdir())
+    return seen
+
+
 def same_device(source: str, device: str) -> bool:
-    """`/dev/vda1` 属于 `/dev/vda`；`/dev/vda` 不等于 `/dev/vdb`。"""
+    """source 是否为 device 自身、它的分区或依赖它的映射设备。"""
+    source = os.path.realpath(source) if source.startswith("/dev/") else source
+    device = os.path.realpath(device) if device.startswith("/dev/") else device
     if source == device:
         return True
-    if not source.startswith(device):
-        return False
-    # 尾巴只能是分区号：1 / p1 / 12
-    tail = source[len(device):]
-    return tail.lstrip("0123456789p") == "" and tail != ""
+    # 同一块设备可以有不同的节点名；目标身份也从 major:minor 解析。
+    target_name = Path(device).name
+    try:
+        info = os.stat(device)
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISBLK(info.st_mode):
+        target_node = Path("/sys/dev/block") / f"{os.major(info.st_rdev)}:{os.minor(info.st_rdev)}"
+        try:
+            target_name = target_node.resolve(strict=True).name
+        except OSError as exc:
+            raise InstallerError("无法确认目标块设备身份，拒绝擦盘", EXIT_GUARD) from exc
+    ancestors = _block_ancestors(source)
+    if ancestors:
+        return target_name in ancestors
+    # 不存在的设备（包括 dry-run）没有 sysfs；只接受合法分区命名。
+    separator = "p" if device[-1:].isdigit() else ""
+    return re.fullmatch(re.escape(device + separator) + r"[1-9][0-9]*", source) is not None
+
+
+def _busy_sources(device: str, sources: set[str]) -> set[str]:
+    busy = {source for source in sources if same_device(source, device)}
+    try:
+        swaps = util.read_text("/proc/swaps").splitlines()[1:]
+        for line in swaps:
+            fields = line.split()
+            if fields:
+                source = _unescape_mount_field(fields[0])
+                if same_device(source, device):
+                    busy.add(source)
+        node = Path("/sys/class/block") / Path(os.path.realpath(device)).name
+        nodes = [node]
+        try:
+            info = os.stat(device)
+        except FileNotFoundError:
+            info = None
+        real_block = info is not None and stat.S_ISBLK(info.st_mode)
+        if real_block and not node.is_dir():
+            raise OSError("目标块设备缺少 sysfs 目录")
+        if node.is_dir():
+            nodes.extend(child for child in node.iterdir() if (child / "partition").exists())
+        for child in nodes:
+            holders = child / "holders"
+            if real_block and not holders.is_dir():
+                raise OSError("无法确认 holders 状态")
+            if holders.is_dir():
+                busy.update(f"/dev/{holder.name}" for holder in holders.iterdir())
+    except OSError as exc:
+        raise InstallerError("无法完整检查磁盘占用，拒绝擦盘", EXIT_GUARD) from exc
+    return busy
+
+
+def _assert_not_busy(device: str) -> None:
+    if not util.is_block_device(device):
+        raise InstallerError("目标块设备已不可用，拒绝擦盘", EXIT_GUARD)
+    sources = mount_sources(util.read_text("/proc/self/mountinfo"))
+    busy = _busy_sources(device, sources)
+    if busy:
+        raise InstallerError(f"这块盘正在被使用：{device}（{'、'.join(sorted(busy))}）",
+                             EXIT_GUARD, reason="diskInUse")
 
 
 def assert_usable(
@@ -349,7 +419,7 @@ def assert_usable(
             reason="targetMounted",
         )
 
-    in_use = sorted(s for s in sources if same_device(s, device))
+    in_use = sorted(_busy_sources(device, sources))
     if in_use:
         raise InstallerError(
             f"这块盘正在被使用：{device}（挂载来源：{'、'.join(in_use)}）",
@@ -361,9 +431,8 @@ def assert_usable(
 
 
 def is_mountpoint(path: str) -> bool:
-    """是不是挂载点。用 `os.path.ismount` 而不是读 /proc —— 后者在有 bind
-    mount 时会给出反直觉的答案。"""
-    return os.path.ismount(path)
+    """目标是否仍被挂载占用（含 bind mount 与残留子挂载）。"""
+    return os.path.ismount(path) or bool(mounts_under(util.read_text("/proc/self/mountinfo"), path))
 
 
 # ── 落到盘上 ──────────────────────────────────────────────────────────
@@ -564,7 +633,7 @@ def inspect(
         model=model_of(device, sysfs_root=sysfs_root),
         size=int(_sysfs_read(base / "size") or 0) * 512,
         removable=(_sysfs_read(base / "removable") or "0") == "1",
-        in_use=any(same_device(s, device) for s in sources),
+        in_use=bool(_busy_sources(device, sources)),
         table_type=_table_type(runner, device),
         partitions=tuple(partitions),
     )
@@ -597,7 +666,7 @@ def list_candidates(
     candidates: list[Candidate] = []
     for device in detect_disks(sysfs_root=sysfs_root, disk_root=disk_root):
         candidate = inspect(device, sysfs_root=sysfs_root, sources=sources, runner=runner)
-        mounted = {source for source in sources if same_device(source, device)}
+        mounted = _busy_sources(device, sources)
         ours = {source for source in stale if same_device(source, device)}
         # 「只有我们的」才算：盘上同时还挂着别人的东西时，它照旧不可选
         if ours and mounted <= ours:
@@ -636,33 +705,46 @@ def wipe_and_partition(runner: Runner, device: str, layout: Layout) -> tuple[str
     幂等：先擦掉盘上原有的分区表与残留文件系统，再重建 —— 同一块盘重复跑，
     结果一致（ROADMAP 的 S1 就是要验这一条）。
     """
+    if not runner.dry_run:
+        runner.require(util.STEP_TOOLS["disk"])
+        prepared = _prepare_partitioning(device, layout)
+        _assert_not_busy(device)
     runner.reporter.emit(step_event("disk", "wait-devices", "让内核与 udev 认全设备"))
     settle_udev(runner)
+    if not runner.dry_run:
+        _assert_not_busy(device)
 
     runner.reporter.emit(step_event("disk", "wipe", "擦除原有分区表与文件系统"))
     # 盘上原有的分区先各自 wipefs（有些布局里签名留在分区上，只擦盘头擦不掉）。
     # 只擦**内核收下、节点也在**的那些：盘上的表里有名字不代表设备存在。
     for old, _, _ in kernel_partitions(device):
         if runner.dry_run or os.path.exists(old):
+            if not runner.dry_run:
+                _assert_not_busy(device)
             runner.run(["wipefs", "-a", old], exit_code=EXIT_GUARD)
         else:
             runner.reporter.note(f"{old} 还没有设备节点，跳过预擦（整盘 wipefs 会清掉分区表）")
+    if not runner.dry_run:
+        _assert_not_busy(device)
     runner.run(["wipefs", "-a", device], exit_code=EXIT_GUARD)
 
     if runner.dry_run:
         # dry-run 不碰盘，也就没必要真的去建分区表（顺带让没装 pyparted 的机器
         # 也能跑 dry-run —— 那正是「先看命令再动手」的用途）
         runner.reporter.note("dry-run：跳过 pyparted 建分区表与重读分区")
-        return f"{device}1", f"{device}2"
+        return _partition_path(device, 1), _partition_path(device, 2)
 
     runner.reporter.emit(step_event("disk", "partition", "创建 GPT（ESP + root）"))
-    _parted_create(device, layout)
+    _assert_not_busy(device)
+    _parted_create(device, layout, prepared=prepared)
 
     # 分区表提交后让内核与 udev 跟上，再等节点出现（理由见 wait_for_partition_nodes）
     runner.reporter.emit(step_event("disk", "wait-parts", "等分区节点就绪"))
-    runner.run(["partprobe", device], check=False)
+    runner.run(["partprobe", device], exit_code=EXIT_GUARD)
     settle_udev(runner)
-    return wait_for_partition_nodes(runner, device)
+    parts = wait_for_partition_nodes(runner, device)
+    _verify_partition_layout(device, layout)
+    return parts
 
 
 #: 等设备节点：25 × 0.2s = 5 秒。慢磁盘上写分区表可能要一两秒才出节点。
@@ -682,18 +764,19 @@ def wait_for_partition_nodes(runner: Runner, device: str) -> tuple[str, str]:
         parts = kernel_partitions(device)
         seen = [path for path, _, _ in parts]
 
-        if len(parts) >= 2:
-            for path, major, minor in parts[:2]:
+        expected = [_partition_path(os.path.realpath(device), n) for n in (1, 2)]
+        if seen == expected:
+            for path, major, minor in parts:
                 if not os.path.exists(path):
                     _ensure_node(runner, path, major, minor)
-            if all(os.path.exists(path) for path, _, _ in parts[:2]):
+            if all(_node_matches(path, major, minor) for path, major, minor in parts):
                 return parts[0][0], parts[1][0]
 
         if attempt + 1 < WAIT_ATTEMPTS:
             runner.run(["sleep", WAIT_INTERVAL], check=False)
 
     raise InstallerError(
-        f"内核只收下了 {len(seen)} 个分区（预期 2 个）：{'、'.join(seen) if seen else '一个都没有'}",
+        f"内核只收下了 {len(seen)} 个分区或分区身份不符（预期分区 1、2）：{'、'.join(seen) if seen else '一个都没有'}",
         EXIT_GUARD,
         hint=(
             "分区表没被内核接受。最常见的原因是分区压到了 GPT 备份表头（盘尾 33 个扇区），"
@@ -701,6 +784,65 @@ def wait_for_partition_nodes(runner: Runner, device: str) -> tuple[str, str]:
             "并确认分区范围与 `lsblk` 报的不一样"
         ),
     )
+
+
+def _partition_path(device: str, number: int) -> str:
+    return f"{device}{'p' if device[-1:].isdigit() else ''}{number}"
+
+
+def _node_matches(path: str, major: int, minor: int) -> bool:
+    try:
+        info = os.stat(path)
+        return stat.S_ISBLK(info.st_mode) and info.st_rdev == os.makedev(major, minor)
+    except OSError:
+        return False
+
+
+def _verify_partition_layout(device: str, layout: Layout) -> None:
+    base = Path("/sys/class/block") / Path(os.path.realpath(device)).name
+    for number, start, size in ((1, layout.esp_start, layout.esp_size),
+                                (2, layout.root_start, layout.root_size)):
+        node = base / Path(_partition_path(os.path.realpath(device), number)).name
+        try:
+            actual = (int((node / "start").read_text()) * 512,
+                      int((node / "size").read_text()) * 512)
+        except (OSError, ValueError) as exc:
+            raise InstallerError("无法确认内核分区布局，停止格式化", EXIT_GUARD) from exc
+        if actual != (start, size):
+            raise InstallerError("内核分区布局与安装计划不一致，停止格式化", EXIT_GUARD)
+
+
+def _prepare_partitioning(device: str, layout: Layout):
+    """在第一次写盘前检查库、ESP 能力和几何约束，并构造内存中的新表。"""
+    try:
+        import parted
+    except ImportError as exc:
+        raise InstallerError("缺 python-pyparted（D14 定的分区库）", EXIT_USAGE) from exc
+    flag = _esp_flag(parted)
+    try:
+        dev = parted.getDevice(device)
+        sector = dev.sectorSize
+        if sector <= 0 or any(value % sector for value in (
+            layout.esp_start, layout.esp_size, layout.root_start, layout.root_size
+        )):
+            raise ValueError("分区布局不符合设备扇区大小")
+        table = parted.freshDisk(dev, "gpt")
+        constraint = dev.optimalAlignedConstraint
+        for start, size, fstype in ((layout.esp_start, layout.esp_size, "fat32"),
+                                    (layout.root_start, layout.root_size, "ext4")):
+            geometry = parted.Geometry(device=dev, start=start // sector, length=size // sector)
+            filesystem = parted.FileSystem(type=fstype, geometry=geometry)
+            partition = parted.Partition(disk=table, type=parted.PARTITION_NORMAL,
+                                         fs=filesystem, geometry=geometry)
+            table.addPartition(partition=partition, constraint=constraint)
+            if fstype == "fat32":
+                # GPT 中 boot 与 esp 为别名；legacy_boot 才是独立的传统启动属性。
+                partition.setFlag(flag)
+            if (partition.geometry.start * sector, partition.geometry.length * sector) != (start, size):
+                raise ValueError("分区库调整了计划布局")
+        return dev, table
+    except Exception as exc:
+        raise InstallerError(f"分区前置检查失败：{device}（{exc}）", EXIT_GUARD) from exc
 
 
 def _esp_flag(parted):
@@ -720,8 +862,8 @@ def _esp_flag(parted):
     return flag
 
 
-def _parted_create(device: str, layout: Layout) -> None:
-    """pyparted：clobber → 新 GPT → ESP + root。
+def _parted_create(device: str, layout: Layout, *, prepared=None) -> None:
+    """提交已经通过前置检查的 GPT + ESP + root 布局。
 
     API 名字照 pyparted 的**当前**写法（与 archinstall 的用法一致）：
     建新表是模块级 `freshDisk(dev, "gpt")`（不是 `Device.disk_new_fresh`），
@@ -731,54 +873,45 @@ def _parted_create(device: str, layout: Layout) -> None:
     **这一段只能在装了 pyparted 的环境里验**（Live 里 `python-pyparted`）。
     导入放在函数里，是为了让本模块在没装 pyparted 的机器上也能被导入和单测。
     """
+    dev, table = prepared if prepared is not None else _prepare_partitioning(device, layout)
     try:
-        import parted
-    except ImportError as exc:  # pragma: no cover - 只在缺依赖时走到
-        raise InstallerError(
-            "缺 python-pyparted（D14 定的分区库）",
-            EXIT_USAGE,
-            hint="Live 里： pacman -S python-pyparted",
-        ) from exc
-
-    try:
-        dev = parted.getDevice(device)                    # 注意是 camelCase：getDevice
-        dev.clobber()                                     # 抹掉旧分区表与签名
-        disk = parted.freshDisk(dev, "gpt")               # 新 GPT
-        sector = dev.sectorSize
-        constraint = dev.optimalAlignedConstraint         # 按设备的最优对齐（通常 1 MiB）
-
-        for start, size, fstype in (
-            (layout.esp_start, layout.esp_size, "fat32"),
-            (layout.root_start, layout.root_size, "ext4"),
-        ):
-            geometry = parted.Geometry(device=dev, start=start // sector, length=size // sector)
-            filesystem = parted.FileSystem(type=fstype, geometry=geometry)
-            partition = parted.Partition(
-                disk=disk,
-                type=parted.PARTITION_NORMAL,
-                fs=filesystem,
-                geometry=geometry,
-            )
-            disk.addPartition(partition=partition, constraint=constraint)
-            if fstype == "fat32":
-                # ESP 类型 GUID。**不**顺手加 boot 标志：那是 GPT 里的
-                # legacy-BIOS-可引导属性，与 UEFI 无关，加了只会让分区表更难看懂。
-                partition.setFlag(_esp_flag(parted))
-
-        disk.commit()                                     # 写盘 + 通知内核重读
-    except InstallerError:
-        raise
-    except Exception as exc:  # parted 的异常层级随版本变，统一收口成一句话
-        raise InstallerError(
-            f"分区失败：{device}（{exc}）",
-            EXIT_GUARD,
-            hint="盘上没有任何东西需要抢救 —— 重跑一次；仍失败就把这段输出贴进 tech/04",
-        ) from exc
+        dev.clobber()
+        table.commit()
+    except Exception as exc:
+        raise InstallerError(f"分区失败：{device}（{exc}）", EXIT_GUARD,
+                             hint="磁盘可能已被部分修改；先保留日志并检查现场") from exc
 
 
 def make_filesystems(runner: Runner, esp: str, root: str) -> None:
+    identities: dict[str, int] = {}
+    if not runner.dry_run:
+        for path in (esp, root):
+            _assert_not_busy(path)
+            try:
+                info = os.stat(path)
+            except OSError as exc:
+                raise InstallerError("格式化前无法读取分区身份", EXIT_GUARD) from exc
+            if not stat.S_ISBLK(info.st_mode) or not util.is_partition(path):
+                raise InstallerError("格式化目标不是块设备分区", EXIT_GUARD)
+            identities[path] = info.st_rdev
+        if identities[esp] == identities[root]:
+            raise InstallerError("ESP 与根分区指向同一设备，拒绝格式化", EXIT_GUARD)
+
+    def recheck(path: str) -> None:
+        if runner.dry_run:
+            return
+        _assert_not_busy(path)
+        try:
+            info = os.stat(path)
+        except OSError as exc:
+            raise InstallerError("格式化目标已不可用", EXIT_GUARD) from exc
+        if not stat.S_ISBLK(info.st_mode) or info.st_rdev != identities[path]:
+            raise InstallerError("格式化前分区身份发生变化", EXIT_GUARD)
+
+    recheck(esp)
     runner.reporter.emit(step_event("disk", "mkfs-esp", "格式化 ESP（vfat）"))
     runner.run(["mkfs.vfat", "-F", "32", "-n", FAT_LABEL, esp], exit_code=EXIT_GUARD)
+    recheck(root)
     runner.reporter.emit(step_event("disk", "mkfs-root", "格式化 root（ext4）"))
     runner.run(["mkfs.ext4", "-F", "-L", EXT4_LABEL, root], exit_code=EXIT_GUARD)
 
@@ -797,7 +930,7 @@ def mount_target(runner: Runner, root: str, esp: str, target: str = util.DEFAULT
         # mkfs 完到这儿之间，udisks 可能已经自动挂上了目标分区：先解除再挂我们的
         for point in stray_mountpoints(util.read_text("/proc/self/mountinfo"), [root, esp], set()):
             runner.reporter.note(f"解除 udisks 的自动挂载：{point}")
-            runner.run(["umount", point], check=False)
+            runner.run(["umount", point], exit_code=EXIT_GUARD)
     ensure_dir(runner, target)
     runner.run(["mount", root, target], exit_code=EXIT_GUARD)
     if on_root_mounted is not None and not runner.dry_run:
@@ -813,16 +946,31 @@ def unmount_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> None:
     # umount 要等整次安装攒下的脏页全部落盘：实机上这一步能以分钟计，而它自己
     # 一行输出都没有 —— 不说一句，收尾就显得「卡死」（Issue #97 实机教训）
     runner.reporter.note("卸载目标：等磁盘写缓存落盘，写入量大时这一步可能看似停住几分钟")
-    for argv in (["umount", "-R", target], ["umount", "-R", f"{target}/boot"], ["umount", target]):
-        runner.run(argv, check=False)
-    # **卸没卸掉要说出来。** `check=False` 一路静默，于是「卸载目标」这句旁白可以
-    # 与事实相反（实测：日志句柄把目标钉成 busy，挂载留了下来，用户只看到下一次
-    # 开工装不了，没有任何解释）。这里再看一眼挂载表，把真相摆在日志里（#105）。
-    if is_mountpoint(target):
-        runner.reporter.note(
-            f"卸载没成功：{target} 还挂着（多半有进程占着它）；"
-            f"下一次开工会自动清理，也可以手动 `umount -R {target}`"
-        )
+    try:
+        runner.run(["umount", "-R", target], check=False)
+    except (InstallerError, OSError) as exc:
+        runner.reporter.note(f"卸载命令失败：{target}（{exc}）")
+    try:
+        entries = mounts_under(util.read_text("/proc/self/mountinfo"), target)
+    except (InstallerError, OSError) as exc:
+        runner.reporter.note(f"无法确认卸载状态：{target}（{exc}）")
+        return
+    points = sorted({entry.mountpoint for entry in entries},
+                    key=lambda value: (value.count("/"), len(value)), reverse=True)
+    for point in points:
+        try:
+            runner.run(["umount", point], check=False)
+        except (InstallerError, OSError) as exc:
+            runner.reporter.note(f"卸载命令失败：{point}（{exc}）")
+    try:
+        remaining = mounts_under(util.read_text("/proc/self/mountinfo"), target)
+        still_mounted = bool(remaining) or is_mountpoint(target)
+    except (InstallerError, OSError) as exc:
+        runner.reporter.note(f"无法确认卸载状态：{target}（{exc}）")
+        return
+    if still_mounted:
+        runner.reporter.note("卸载没成功，仍有残留挂载：" +
+                             "、".join(entry.mountpoint for entry in remaining or [MountEntry(target, "", "")]))
 
 
 def cleanup_stale_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> list[str]:
@@ -845,7 +993,9 @@ def cleanup_stale_target(runner: Runner, target: str = util.DEFAULT_TARGET) -> l
     points = [entry.mountpoint for entry in entries]
     runner.reporter.note("清掉上一次留下的挂载：" + "、".join(points))
     unmount_target(runner, target)
-    return points
+    remaining = {entry.mountpoint for entry in
+                 mounts_under(util.read_text("/proc/self/mountinfo"), target)}
+    return [point for point in points if point not in remaining]
 
 
 def uuid_of(runner: Runner, device: str) -> str:

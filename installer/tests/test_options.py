@@ -56,7 +56,7 @@ class TestConfined(_RootCase):
 
 
 class TestZoneTable(_RootCase):
-    """随包的表本身（D19）：只回答「表里写了什么」，不碰运行系统。"""
+    """随包的表本身（D17）：只回答「表里写了什么」，不碰运行系统。"""
 
     def table(self, text: str) -> Path:
         path = self.root / "timezones.txt"
@@ -81,7 +81,7 @@ class TestZoneTable(_RootCase):
 
 
 class TestTimezones(_RootCase):
-    """名单 = 随包的表 ∩ 运行系统上真实存在的 zone（D19 的「运行时扔异」）。"""
+    """名单 = 随包的表 ∩ 运行系统上真实存在的 zone（D17 的「运行时扔异」）。"""
 
     def zone_file(self, zone: str) -> None:
         path = self.root / zone

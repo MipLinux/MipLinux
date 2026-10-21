@@ -461,7 +461,7 @@ class TestQueryShapes(unittest.TestCase):
         payload = queries.timezones()
         shanghai = [zone for zone in payload["timezones"] if zone["id"] == "Asia/Shanghai"]
         if not shanghai:
-            self.skipTest("随包的表里没有 Asia/Shanghai（或本机 zoneinfo 缺它，D19 会把它筛掉）")
+            self.skipTest("随包的表里没有 Asia/Shanghai（或本机 zoneinfo 缺它，D17 会把它筛掉）")
         self.assertEqual(shanghai[0]["offset"], "+08:00")
 
 

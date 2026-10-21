@@ -33,7 +33,7 @@ test('港 / 澳 / 台北收敛到 Asia/Shanghai', () => {
 test('有名时区给显示名 + 偏移；无名时区照实给 IANA id，绝不硬造名字', async () => {
   const t = await fakeI18n('zh_CN');
   assert.equal(formatZone({ id: 'Asia/Tokyo', offset: '+09:00' }, t), '日本标准时间（UTC+09:00）');
-  // Kathmandu 不在附 A 里，因此也不在名单里（D19）—— 界面不会出现它。
+  // Kathmandu 不在附 A 里，因此也不在名单里（D17）—— 界面不会出现它。
   // 这条测的是显示层的**防线**：拿到一个没有名字的区，照实显示 tzdata 自己的标识符，
   // 不编一个名字（那是我们要长期背的合规产物），也不像更早那样只剩「UTC+05:45」
   // （同偏移的区会塌成二十来行一模一样的字）。

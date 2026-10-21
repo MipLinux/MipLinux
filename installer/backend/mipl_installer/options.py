@@ -8,13 +8,13 @@
 
 | 项 | 名单 | 存在性判据 |
 |---|---|---|
-| 时区 | 随包走的 `data/timezones.txt`（**项目自维护**，D19） | `/usr/share/zoneinfo/<tz>` 是不是文件 |
+| 时区 | 随包走的 `data/timezones.txt`（**项目自维护**，D17） | `/usr/share/zoneinfo/<tz>` 是不是文件 |
 | 键盘 | `/usr/share/kbd/keymaps/**/*.map.gz` | 名字在不在名单里 |
 | 语言 | `/usr/share/i18n/SUPPORTED` | 目标系统的 `locale.gen` 里有没有这一行 |
 | 主机名 | 没有名单，只有规则 | RFC 1123 |
 | 目标挂载点 | 没有名单，只有命名空间 | `/mnt/` 下的规范化绝对路径（见 `validate_target()`） |
 
-时区那一行是**唯一的例外**，且例外只在「名单从哪来」这一层：D19 把名单换成
+时区那一行是**唯一的例外**，且例外只在「名单从哪来」这一层：D17 把名单换成
 项目自带、受版本控制、由 `tech/09` 附 A 生成的表（`tools/gen-timezones.py`），
 **存在性判据仍是运行系统上的 `zoneinfo`** —— 表里列了而运行系统没有的，一律不上界面
 （见 `timezones()`），所以「界面里能选、写进目标却不生效」那条老路（Issue #63 / #64）
@@ -132,9 +132,9 @@ def read_zone_table(path: Path | str | None = None) -> list[str]:
 def timezones(root: str = ZONEINFO, table: Path | str | None = None) -> list[str]:
     """界面上的 IANA 时区名单 = **随包的表** ∩ **运行系统上真实存在的 zone**。
 
-    名单来自项目自带的 `data/timezones.txt`（D19）：精选子集、按附 A 的过审中文名生成，
+    名单来自项目自带的 `data/timezones.txt`（D17）：精选子集、按附 A 的过审中文名生成，
     所以界面上的每一条都能显示成中文名。**表外的一律不可选** —— 那不是缺陷，
-    是这条决策本身：要加一个区，先在附 A 过审一行名字（D19）。
+    是这条决策本身：要加一个区，先在附 A 过审一行名字（D17）。
 
     `root` 是**运行系统**的 `zoneinfo`，只用来回答「这个 id 在这台机器上真的存在吗」：
     tzdata 升级会把区改名、并掉或删掉（`Europe/Kyiv` 就是新名，`Asia/Kolkata` 之外

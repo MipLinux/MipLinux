@@ -161,25 +161,30 @@ class TestDryRun(unittest.TestCase):
     def test_timezone_warning_goes_to_stderr_not_into_the_json(self):
         """名单类的出口：stdout 上只能有一份 JSON。
 
-        D19 的「运行时扔异」会打印一条警告（表里列了、这台机器上没有）——
+        D17 的「运行时扔异」会打印一条警告（表里列了、这台机器上没有）——
         它必须走 stderr：混进 stdout，前端 `JSON.parse` 就会当场炸，
         而症状看起来像「后端挂了」，不是「表该刷新了」。
+
+        假根 + 假表：不假定测试机装了哪份 zoneinfo —— 否则换台机器就假红。
         """
-        real_table = options.read_zone_table()          # 运行系统上真实存在的区
-        self.assertTrue(real_table, "随包的表是空的，这条测不出东西")
+        zone = "Asia/Shanghai"
 
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "zoneinfo"
+            (root / zone).parent.mkdir(parents=True)
+            (root / zone).write_text("TZif", encoding="utf-8")   # 存在即可，偏移取不到不影响这条
             table = Path(tmp) / "timezones.txt"
-            table.write_text(f"{real_table[0]}\nAsia/Nowhere\n", encoding="utf-8")
+            table.write_text(f"{zone}\nAsia/Nowhere\n", encoding="utf-8")
 
             out, err = io.StringIO(), io.StringIO()
             with mock.patch.object(options, "default_zone_table", return_value=table), \
+                    mock.patch.object(options, "ZONEINFO", str(root)), \
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = cli.main(["--print-timezones"])
 
         self.assertEqual(code, util.EXIT_OK, err.getvalue())
         payload = json.loads(out.getvalue())            # 解析不了正是这条要抓的东西
-        self.assertEqual([zone["id"] for zone in payload["timezones"]], [real_table[0]])
+        self.assertEqual([item["id"] for item in payload["timezones"]], [zone])
         self.assertNotIn("Nowhere", out.getvalue())
         self.assertIn("Asia/Nowhere", err.getvalue())   # 警告确实在，只是不在 stdout
 

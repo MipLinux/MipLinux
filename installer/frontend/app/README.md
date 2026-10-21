@@ -82,7 +82,7 @@ export default {
 - 唯一源：`docs/work/tech/09-安装器界面文案.md`（139 条界面文案 + 附 A 34 条时区名 = 173 键）。
 - 生成物：`renderer/i18n/{zh_CN,en_US}.json`，由 `tools/i18n.py --write` 生成、`--check` 守卫。
 - 时区显示名走 `timezone.name.<IANA>` 键；`tz-names.js` 只做**去重与拼装**（不撰写名字、不按日期算夏令时）。
-- **时区名单也不在前端**：后端随包的 `data/timezones.txt`（D19，34 条精选子集，入表条件 = 附 A 里有过审中文名）
+- **时区名单也不在前端**：后端随包的 `data/timezones.txt`（D17，34 条精选子集，入表条件 = 附 A 里有过审中文名）
   说了算；附 A 与那张表由 `tools/gen-timezones.py --check` 与 `i18n.py --check` 双向盯着。表外时区不上界面。
 - 顶栏「中 / EN」切换语言：重渲染即可，**不重启进程**。
 

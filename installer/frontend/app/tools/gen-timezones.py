@@ -4,7 +4,7 @@
 
 为什么要有它
 ------------
-D19 把界面上的时区名单从「运行系统的 `zone1970.tab`」换成**项目自维护的精选子集**。
+D17 把界面上的时区名单从「运行系统的 `zone1970.tab`」换成**项目自维护的精选子集**。
 子集的入表条件只有一条：**在 tech/09 附 A 里有已过审的中文名**。于是名单的真相
 还是那张审核表 —— 本脚本把它落成后端随包读的一行一个 IANA id 的表，
 `--check` 再比回去：改了附 A 没重生成、或手改了表，都会红。
@@ -43,7 +43,7 @@ TABLE_REL = "installer/backend/mipl_installer/data/timezones.txt"
 
 #: 表头。写在生成物里，免得有人对着它手改。
 HEADER = """\
-# MipLinux 时区名单 —— **生成物，不要手改**（D19）
+# MipLinux 时区名单 —— **生成物，不要手改**（D17）
 #
 # 来源：docs/work/tech/09-安装器界面文案.md 附 A「时区名表」（34 条，中英已过审）。
 # 生成：python3 installer/frontend/app/tools/gen-timezones.py --write

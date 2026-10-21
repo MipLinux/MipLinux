@@ -1,4 +1,4 @@
-"""随包的时区表（D19）：生成物本身、与附 A 的关系、与本机 tzdata 的关系。
+"""随包的时区表（D17）：生成物本身、与附 A 的关系、与本机 tzdata 的关系。
 
 这里回答三个不同的问题，别混：
 
@@ -56,7 +56,7 @@ class TestZoneTableArtifact(unittest.TestCase):
         self.assertEqual([zone for zone in approved if zone not in shipped], [],
                          "附 A 已过审、表里却没有 —— 名字成了死键；跑 gen-timezones.py --write")
         self.assertEqual([zone for zone in shipped if zone not in approved], [],
-                         "表里有附 A 没名字的区 —— D19 的入表条件被绕过")
+                         "表里有附 A 没名字的区 —— D17 的入表条件被绕过")
         self.assertEqual(approved, shipped, "同集不同序：顺序也是口径（附 A 的顺序）")
 
     def test_shipped_zones_exist_in_the_local_tzdata(self):

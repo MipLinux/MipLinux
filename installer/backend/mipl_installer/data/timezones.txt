@@ -1,4 +1,4 @@
-# MipLinux 时区名单 —— **生成物，不要手改**（D19）
+# MipLinux 时区名单 —— **生成物，不要手改**（D17）
 #
 # 来源：docs/work/tech/09-安装器界面文案.md 附 A「时区名表」（34 条，中英已过审）。
 # 生成：python3 installer/frontend/app/tools/gen-timezones.py --write

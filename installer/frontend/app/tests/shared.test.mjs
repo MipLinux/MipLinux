@@ -9,7 +9,7 @@
  * 顺带钉住替身名单的形状：键盘与语言两份替身**不**把默认值放在开头（真实出口也不放：
  * `localectl` 按名字排、`SUPPORTED` 按 locale 名排），替身要是先摆好了，
  * 探针里那条「默认项在第一行」就成了在验替身、不是在验界面。
- * 时区是例外：它的名单按附 A 顺序（D19），默认项本来就在首行。
+ * 时区是例外：它的名单按附 A 顺序（D17），默认项本来就在首行。
  */
 
 import { test } from 'node:test';
@@ -27,7 +27,7 @@ const ZONE_TABLE = path.join(APP, '..', '..', 'backend', 'mipl_installer', 'data
 
 const values = (items) => items.map((item) => item.value);
 
-test('替身的时区名单与后端随包的表逐条同序（D19）', async () => {
+test('替身的时区名单与后端随包的表逐条同序（D17）', async () => {
   // 替身是探针与单测唯一见得到的「名单」；它要是和后端那份漂开，
   // 探针就在验一个真后端不会给出的界面 —— 而且没有任何东西会红。
   const table = (await readFile(ZONE_TABLE, 'utf8'))
@@ -85,7 +85,7 @@ test('替身名单里默认值都不在第一行（否则探针那条断言是�
   // 所以「置顶」这件事在它们身上是**能被验出来的**（探针拿它们当判据）。
   assert.notEqual(KEYMAPS[0].id, DEFAULTS.keymap);
   assert.notEqual(LOCALES[0].id, DEFAULTS.locale);
-  // 时区是**例外**：D19 的名单按 tech/09 附 A 的顺序（亚洲在前），`Asia/Shanghai` 本来就在首行。
+  // 时区是**例外**：D17 的名单按 tech/09 附 A 的顺序（亚洲在前），`Asia/Shanghai` 本来就在首行。
   // 这条断言因此只对前两份名单成立 —— 别把它推广成「三份都不在首行」，
   // 那要么逼替身偏离真出口的顺序，要么让探针去验一个真后端不会给出的排列。
   assert.equal(TIMEZONES[0].id, DEFAULTS.timezone);

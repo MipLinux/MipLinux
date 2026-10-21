@@ -329,7 +329,7 @@ echo "keymaps=$(count --print-keymaps keymaps)"
 echo "locales=$(count --print-locales locales)"
 echo "timezones=$(count --print-timezones timezones)"
 echo "PROBE-COUNTS-END"
-# 名单**逐条**：条数相等不代表是同一批（D19 之后界面只列随包的表，验的是「哪 34 条」）。
+# 名单**逐条**：条数相等不代表是同一批（D17 之后界面只列随包的表，验的是「哪 34 条」）。
 # 一行逗号分隔，日志里能直接与 `data/timezones.txt` 对照。
 echo "PROBE-TIMEZONE-LIST=$({RUN} --print-timezones | python3 -c "import json,sys;print(','.join(z['id'] for z in json.load(sys.stdin)['timezones']))")"
 # 键位：解析结果与原文逐字对得上（Issue #65 的验收口径）
@@ -428,7 +428,9 @@ echo "INSTALL-DONE"
 
 
 def probe(serial: Serial, timeout: float) -> None:
-    serial.script("probe.sh", PROBE_SCRIPT)
+    # 也要过 `prepare()`：PROBE 里同样有 __MIRROR_SETUP__ / __TIMEZONE__ 占位符，
+    # 直接发原文等于把占位符当 shell 命令执行（CodeRabbit 在 PR #178 上抓到的）。
+    serial.script("probe.sh", prepare(PROBE_SCRIPT, "", ""))
     serial.run_script("probe.sh", r"PROBE-DONE", timeout=timeout)
 
 

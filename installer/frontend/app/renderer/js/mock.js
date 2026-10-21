@@ -118,7 +118,7 @@ const CANDIDATE_WIFI = [
  * 默认值摆在第一行是**界面**的事（`shared.withDefaultFirst`），
  * 替身要是自己先摆好了，那条断言就成了在验替身。
  *
- * **时区是例外**：它的名单是随包的表（D19），顺序照 tech/09 附 A（亚洲在前），
+ * **时区是例外**：它的名单是随包的表（D17），顺序照 tech/09 附 A（亚洲在前），
  * `Asia/Shanghai` 本来就在首行 —— 替身照抄真出口的顺序，不为了那条断言去挪。
  */
 export const KEYMAPS = [
@@ -141,7 +141,7 @@ export const LOCALES = [
 
 /** 时区候选：`offset` 是静态替身值（不带 UTC 前缀），名字走 JSON 里的 `timezone.name.<id>`。
  *
- * 34 条与后端随包的表（`mipl_installer/data/timezones.txt`，D19）逐条同序 —— 那是真出口
+ * 34 条与后端随包的表（`mipl_installer/data/timezones.txt`，D17）逐条同序 —— 那是真出口
  * 的名单；替身要是自己另摆一套，探针就会在验一个后端不会给出的界面。
  * （`tests/shared.test.mjs` 里有一条守卫盯着这份同序关系。） */
 export const TIMEZONES = [

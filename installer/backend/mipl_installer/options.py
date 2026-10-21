@@ -40,8 +40,26 @@ LOCALE_SUPPORTED = "/usr/share/i18n/SUPPORTED"
 HOSTNAME_RE = re.compile(r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
 
 #: 语言名的规范形态：`xx_YY.UTF-8`（`SUPPORTED` 里带字符集的那些）。
+#: 字符集的大小写与 `-` 可以不同（`utf8` / `utf-8` / `UTF8` 是同一个字符集的写法）。
 #: 用它只在**名单读不到**时兜底 —— 见 `validate_locale()` 的说明。
-LOCALE_RE = re.compile(r"[a-z]{2,3}_[A-Z]{2}\.UTF-8")
+LOCALE_RE = re.compile(r"[a-z]{2,3}_[A-Z]{2}\.[Uu][Tt][Ff]-?8")
+
+
+def locale_key(name: str) -> str:
+    """locale 名的**比较键**：只归一字符集那一段（大小写、`-`、`_`）。
+
+    语言 / 地区 / 修饰符保持原样 —— `zh_CN` 与 `zh_cn` 是两个名字，
+    `sr_RS@latin` 与 `sr_RS` 也是；把整名的标点都抹掉会把它们错误地合并。
+    `SUPPORTED` 写的是 `zh_CN.UTF-8`，而 `locale-gen` 生成、`locale -a` 列出的
+    目录是 `zh_CN.utf8` —— 同一个 locale 的两种写法，靠这个键认回规范名。
+
+    这是 locale 别名比较的**唯一实现**：`configure.py` 的 `has_locale()` /
+    `enable_locales()`（#152）要按同一规则比，否则「preflight 放行、落盘前失败」。
+    """
+    base, dot, charset = name.rpartition(".")
+    if not dot:
+        return name
+    return f"{base}.{charset.lower().replace('-', '').replace('_', '')}"
 
 #: 键盘映射名的形态：`vconsole.conf` 的 `KEYMAP=` 收的是**单段 basename**
 #: （`us`、`be-latin1`、`defkeymap_V1.0`），既不能是空串，也不能带目录或空白。
@@ -231,11 +249,21 @@ def validate_locale(locale: str, path: str = LOCALE_SUPPORTED) -> None:
     这里没有采用「在名单里**或**形如 `xx_YY.UTF-8` 就放行」的读法 —— 那样一个
     拼错的名字（`ja_XX.UTF-8`）会通过 preflight，然后在 chroot 里以
     `EXIT_CONFIGURE` 失败，而那正是这条校验要提前的失败。
+
+    **别名按 `locale_key()` 认回名单里的规范名。** `zh_CN.utf8` 与 `SUPPORTED`
+    里的 `zh_CN.UTF-8` 是同一个 locale（`locale-gen` 生成的目录就叫 `zh_CN.utf8`），
+    CLI 传前者不该在 preflight 被拒。只归一字符集 —— `zh_CN` / `zh_cn` /
+    `sr_RS@latin` 这些语言、地区、修饰符的差异仍然各算各的（不过度合并）。
+    `configure.py` 的 `has_locale()` / `enable_locales()` 必须用同一个键（#152）；
+    否则「preflight 放行、落盘前失败」，那正是这条校验要提前的失败。
     """
     available = locales(path)
     if locale in available:
         return
     if available:
+        known = {locale_key(name) for name in available}
+        if locale_key(locale) in known:
+            return
         raise InstallerError(
             f"语言不在名单里：{locale}",
             EXIT_CONFIGURE,
@@ -246,7 +274,7 @@ def validate_locale(locale: str, path: str = LOCALE_SUPPORTED) -> None:
         raise InstallerError(
             f"语言名不合法：{locale!r}",
             EXIT_CONFIGURE,
-            hint="形如 xx_YY.UTF-8，例如 ja_JP.UTF-8；这台机器列不出名单，只能按写法判断",
+            hint="形如 xx_YY.UTF-8（字符集也可写 utf8），例如 ja_JP.UTF-8；这台机器列不出名单，只能按写法判断",
             reason="format",
         )
 

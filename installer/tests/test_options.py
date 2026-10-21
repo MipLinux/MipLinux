@@ -318,11 +318,48 @@ class TestValidators(_RootCase):
             options.validate_locale("ja_XX.UTF-8", str(supported))
         self.assertEqual(ctx.exception.reason, "notInList")
 
+    def test_locale_accepts_the_charset_alias(self):
+        """`zh_CN.utf8` 与名单里的 `zh_CN.UTF-8` 是同一个 locale（维护者 #153 跨线要求）。
+
+        `locale-gen` 生成的目录就叫 `zh_CN.utf8`，CLI 传它不该在 preflight 被拒。
+        """
+        supported = self.root / "SUPPORTED"
+        supported.write_text("zh_CN.UTF-8 UTF-8\nsr_RS@latin.UTF-8 UTF-8\n", encoding="utf-8")
+        for alias in ("zh_CN.utf8", "zh_CN.utf-8", "zh_CN.UTF8", "sr_RS@latin.utf8"):
+            with self.subTest(alias=alias):
+                options.validate_locale(alias, str(supported))                 # 不该抛
+
+    def test_locale_alias_does_not_over_merge(self):
+        """只归一**字符集**：语言 / 地区 / 修饰符不同仍是不同的 locale。"""
+        supported = self.root / "SUPPORTED"
+        supported.write_text(
+            "zh_CN.UTF-8 UTF-8\nzh_CN.GB18030 GB18030\nsr_RS@latin.UTF-8 UTF-8\n",
+            encoding="utf-8",
+        )
+        options.validate_locale("zh_CN.gb18030", str(supported))               # 同字符集的另一种写法
+        for bad in ("zh_CN.GBK", "zh_CN", "zh_cn.UTF-8", "sr_RS.UTF-8"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(InstallerError) as ctx:
+                    options.validate_locale(bad, str(supported))
+                self.assertEqual(ctx.exception.reason, "notInList")
+
+    def test_preflight_accepts_the_locale_alias(self):
+        """维护者点名的路径：CLI 先过 `pipeline.preflight()`，别名不能在那里被拒。"""
+        from mipl_installer import pipeline
+
+        if "zh_CN.UTF-8" not in options.locales():
+            self.skipTest("本机 /usr/share/i18n/SUPPORTED 里没有 zh_CN.UTF-8")
+        if not Path("/usr/share/zoneinfo/Asia/Shanghai").is_file():
+            self.skipTest("本机没有 Asia/Shanghai（preflight 还会校验时区）")
+        pipeline.preflight(pipeline.Plan(disk="/dev/vda", locale="zh_CN.utf8"))   # 不该抛
+
     def test_locale_falls_back_to_shape_when_the_list_is_unreadable(self):
         """名单读不到时不装作能判断，但也不放垃圾过去（与 `validate_keymap` 同形）。"""
         missing = str(self.root / "nope")
-        options.validate_locale("ja_JP.UTF-8", missing)                     # 形如 xx_YY.UTF-8 → 放行
-        for bad in ("中文", "ja_JP", "ja_JP.utf8", "", "../etc/passwd"):
+        for ok in ("ja_JP.UTF-8", "ja_JP.utf8", "ja_JP.utf-8"):
+            with self.subTest(ok=ok):
+                options.validate_locale(ok, missing)                       # 形如 xx_YY.UTF-8（含字符集别名）→ 放行
+        for bad in ("中文", "ja_JP", "ja_JP.UTF16", "ja_JP.utf8x", "", "../etc/passwd"):
             with self.subTest(bad=bad):
                 with self.assertRaises(InstallerError) as ctx:
                     options.validate_locale(bad, missing)

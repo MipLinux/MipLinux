@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shlex
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -191,6 +192,27 @@ class TestWriteText(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "旧内容\n")
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["pacman.conf"],
                              "失败后临时文件也不许留在目标目录里")
+
+    def test_the_rename_is_flushed_through_the_parent_directory_fd(self):
+        """**回归测试**（评审指出）：只 fsync 内容不够，改名后的目录项也要落盘。
+
+        `os.replace` 改的是目录项，临时文件的内容 fsync 管不到它：断电后目录项可能
+        退回改名之前，fstab / pacman.conf 就成了「写成功、重启又变回旧内容」。
+        """
+        real_fsync = os.fsync
+        directory_fsyncs: list[bool] = []
+
+        def spy(fd):
+            directory_fsyncs.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            real_fsync(fd)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("mipl_installer.util.os.fsync", side_effect=spy):
+            path = Path(tmp) / "etc" / "pacman.conf"
+            util.write_text(Runner(RecordingReporter()), str(path), "[options]\n")
+
+        self.assertEqual(directory_fsyncs, [False, True],
+                         "先 fsync 内容（普通文件），再 fsync 父目录（让改名落盘）")
 
     def test_replacing_an_existing_file_keeps_its_mode(self):
         """`mode=None` 覆盖已有文件时，权限要照旧 —— 别被临时文件的 umask 改掉。"""

@@ -758,6 +758,8 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
     **先写临时文件，`fsync` 后再 `os.replace`**：直接 `O_TRUNC` 覆盖的话，写到一半
     失败 / 断电会在目标路径上留下半份配置（fstab、pacman.conf 半份就等于起不来的
     系统）。同目录的临时文件 + 原子改名让目标要么是旧内容、要么是新内容。
+    改名之后再 `fsync` 一次**父目录 fd**：只同步内容不足以让目录项（改名本身）扛住
+    断电 —— 目录项可能退回改名前的状态，刚写完的配置「看起来成功、重启又没了」。
 
     **不跟随符号链接**（`O_NOFOLLOW`）：写的是 `<target>/etc/pacman.conf` 这类
     目标盘路径，而目标盘内容在 `--steps configure` 这种续跑场景里不一定是安装器
@@ -825,7 +827,8 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
                 handle.flush()
                 os.fsync(handle.fileno())      # 内容先落盘，再让改名把它换上去
             os.replace(temp, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-            temp = None
+            temp = None                    # 改名成功：清理分支别再删这个名字
+            os.fsync(parent_fd)            # 让改名后的目录项也落盘（只 fsync 内容不够）
         finally:
             if fd >= 0:
                 try:

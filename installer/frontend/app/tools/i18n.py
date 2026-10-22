@@ -4,7 +4,7 @@
 
 为什么要有它
 ------------
-文案的唯一源是 `docs/work/tech/09-安装器界面文案.md` 第三节那张审核表（105 条 ID）。
+文案的唯一源是 `docs/work/tech/09-安装器界面文案.md` 第三节那张审核表（条数以它为准，别在这里抄数）。
 渲染层读的是 `renderer/i18n/{zh_CN,en_US}.json`。两者之间**只能有一份真相**：
 JSON 由本脚本从表里生成，`--check` 再逐字比对回去 —— 改了表没重生成、或手改了 JSON，都会红。
 
@@ -16,7 +16,8 @@ JSON 由本脚本从表里生成，`--check` 再逐字比对回去 —— 改了
 
 纪律
 ----
-- **只读第三节**。附 A 时区名表（34 条）走 `renderer/js/tz-names.js` 自己的守卫；附 B / 附 C 是历史记录，不是界面文案。
+- **只把第三节当界面文案**。附 A 的时区名表（34 条）另有用处：它是 `renderer/js/tz-names.js` 的名字源，
+  也是**后端随包时区表的名单源**（D17）—— `--check` 因此会顺手比一次两者逐条一致（`check_zone_table`）。
 - 表里为了标重点用的 `**…**` 是**审阅排版**，落进 JSON 时去掉；界面上的强调由 CSS 表达。
 - 只依赖标准库；不需要 root、不需要 Live、不联网。
 """
@@ -36,6 +37,9 @@ SECTION_END = "## 四、i18n 机制"
 #: 附 A 时区名表的起止标题（含）。34 条中英已过审，以 `timezone.name.<IANA>` 入 JSON。
 ZONE_START = "## 附 A"
 ZONE_END = "## 附 B"
+
+#: D17 的后端随包时区表（**名单**，相对仓库根）——`--check` 比它一眼，防名字与名单各走各的。
+CHECK_ZONE_TABLE = "installer/backend/mipl_installer/data/timezones.txt"
 
 #: 审核表里出现、但**不是**界面文案的元行 —— 它们是给维护者看的说明。
 META_IDS = {"timezone.name.<IANA>", "timezone.fallback"}
@@ -94,7 +98,7 @@ def parse_zone_names(text: str) -> dict[str, dict[str, str]]:
 
 
 def parse_all(text: str) -> dict[str, dict[str, str]]:
-    """第三节的 104 条界面文案 + 附 A 的 34 条时区名 = 完整键空间。"""
+    """第三节的界面文案 + 附 A 的时区名 = 完整键空间。"""
     entries = parse_deck(text)
     zones = parse_zone_names(text)
     clash = sorted(set(entries) & set(zones))
@@ -138,6 +142,56 @@ def parse_deck(text: str) -> dict[str, dict[str, str]]:
     if skipped:
         print(f"（跳过 {len(skipped)} 条元行：{', '.join(skipped)}）", file=sys.stderr)
     return entries
+
+
+def zone_ids_from_names(zone_entries: dict[str, dict[str, str]]) -> list[str]:
+    """附 A 的键 → IANA id（保持表里的顺序）。"""
+    return [key[len("timezone.name."):] for key in zone_entries]
+
+
+def check_zone_table(zone_entries: dict[str, dict[str, str]], *, root: Path | None = None) -> int:
+    """名单守卫：附 A 的时区（= 有名字的那批）⇄ D17 的后端随包表，返回不一致的处数。
+
+    **两个方向都要报**：
+    - 表里少了 → 界面列不出这个区，而我们已经为它过审过一个名字（名字成了死键）；
+    - 表里多了 → 界面会出现一个没有过审名字的区（显示成 IANA id），D17 的入表条件被绕过。
+
+    表的**逐字生成**与刷新由 `tools/gen-timezones.py` 负责；这里只回答
+    「名字与名单还是同一批吗」—— 这样任何一次 `--check` 都能拦住「改了一边忘了另一边」。
+    """
+    table = (root if root is not None else Path(__file__).resolve().parents[4]) / CHECK_ZONE_TABLE
+    try:
+        table_ids = [
+            name
+            for line in table.read_text(encoding="utf-8").splitlines()
+            if (name := line.split("#", 1)[0].strip())
+        ]
+    except OSError as exc:
+        print(f"❌ 读不到时区表 {table}：{exc}")
+        return 1
+
+    problems = 0
+    approved = zone_ids_from_names(zone_entries)
+    missing = [zone for zone in approved if zone not in table_ids]
+    extra = [zone for zone in table_ids if f"timezone.name.{zone}" not in zone_entries]
+    duplicated = sorted({zone for zone in table_ids if table_ids.count(zone) > 1})
+    if missing:
+        print(f"❌ 时区表里少了附 A 已过审的 {len(missing)} 条：{missing[:6]}")
+        print("   （跑 tools/gen-timezones.py --write 重生成；要改名单先改附 A）")
+        problems += 1
+    if extra:
+        print(f"❌ 时区表里有附 A 没名字的 {len(extra)} 条：{extra[:6]}")
+        print("   （D17 的入表条件是在附 A 有过审中文名 —— 要么补名字过审，要么从名单里去掉）")
+        problems += 1
+    if duplicated:
+        print(f"❌ 时区表里有重复的 {len(duplicated)} 条：{duplicated[:6]}")
+        problems += 1
+    if not missing and not extra and not duplicated and table_ids != approved:
+        print("❌ 时区表的顺序与附 A 不一致（顺序也是口径：附 A 在前、界面就按它排）")
+        problems += 1
+    if not problems:
+        print(f"✅ 时区名单：{len(table_ids)} 条与附 A 的过审时区逐条一致（含顺序）")
+    return problems
 
 
 def dump_json(path: Path, payload: dict[str, str]) -> None:
@@ -211,6 +265,9 @@ def main() -> int:
             problems += 1
         if not (missing or extra or diff) and not args.quiet:
             print(f"✅ {lang}: {len(payload)} 条与 tech/09 逐字一致")
+
+    # 名单那一半也要过一遍 —— 名字与名单同源于附 A，任何一侧漂了都得红。
+    problems += check_zone_table(zone_entries)
 
     if problems:
         print(f"\n结论：{problems} 处不一致 —— 改表后跑 `--write`，或把 JSON 改回表里的字。")

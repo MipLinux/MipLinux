@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import shutil
 import tempfile
 import unittest
@@ -53,25 +55,82 @@ class TestConfined(_RootCase):
                          self.root / "Asia" / "Shanghai")
 
 
+class TestZoneTable(_RootCase):
+    """随包的表本身（D17）：只回答「表里写了什么」，不碰运行系统。"""
+
+    def table(self, text: str) -> Path:
+        path = self.root / "timezones.txt"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_comments_blanks_and_duplicates(self):
+        path = self.table("# 注释\n\nAsia/Shanghai  # 行尾注释\nAsia/Tokyo\nAsia/Shanghai\n")
+        self.assertEqual(options.read_zone_table(path), ["Asia/Shanghai", "Asia/Tokyo"])
+
+    def test_missing_table_is_an_empty_list(self):
+        """表读不到就空着 —— 回落去扫运行系统会让「列的是过审那批」悄悄失效。"""
+        self.assertEqual(options.read_zone_table(self.root / "没有这个文件"), [])
+
+    def test_default_table_ships_inside_the_package(self):
+        """默认表跟着包走（与装后包清单同一套做法），不依赖 cwd、不依赖 profile/。"""
+        default = options.default_zone_table()
+        self.assertTrue(default.is_file(), f"随包的表不在：{default}")
+        self.assertEqual(default.name, options.ZONE_TABLE_NAME)
+        self.assertEqual(default.parent.name, options.ZONE_TABLE_DIR)
+        self.assertTrue(options.read_zone_table())
+
+
 class TestTimezones(_RootCase):
-    TAB = "\n".join([
-        "# 注释行不算",
-        "CN\t+3114+12128\tAsia/Shanghai",
-        "",
-        "US\t+404251-0740023\tAmerica/New_York",
-    ])
+    """名单 = 随包的表 ∩ 运行系统上真实存在的 zone（D17 的「运行时扔异」）。"""
 
-    def test_reads_field_three_and_skips_comments_and_blanks(self):
-        (self.root / "zone1970.tab").write_text(self.TAB, encoding="utf-8")
-        self.assertEqual(options.timezones(str(self.root)), ["Asia/Shanghai", "America/New_York"])
+    def zone_file(self, zone: str) -> None:
+        path = self.root / zone
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("TZif", encoding="utf-8")
 
-    def test_falls_back_to_zone_tab(self):
-        (self.root / "zone.tab").write_text("CN\t+3114+12128\tAsia/Shanghai\n", encoding="utf-8")
-        self.assertEqual(options.timezones(str(self.root)), ["Asia/Shanghai"])
+    def test_keeps_table_order_and_drops_what_the_system_lacks(self):
+        table = self.root / "table.txt"
+        table.write_text("Asia/Shanghai\nAsia/Nowhere\nAmerica/New_York\n", encoding="utf-8")
+        for zone in ("Asia/Shanghai", "America/New_York"):
+            self.zone_file(zone)
 
-    def test_no_tab_file_is_an_empty_list(self):
-        """读不到就空着 —— 内建一份名单会掩盖「这个环境列不出来」。"""
-        self.assertEqual(options.timezones(str(self.root)), [])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            kept = options.timezones(str(self.root), table)
+
+        self.assertEqual(kept, ["Asia/Shanghai", "America/New_York"])
+        self.assertIn("Asia/Nowhere", stderr.getvalue(), "扔掉的那条要在 stderr 上说一声")
+
+    def test_path_escape_in_the_table_never_becomes_a_zone(self):
+        """表是受版本控制的，也照样过 `confined()`：`../etc/passwd` 不该被当成时区。"""
+        (self.root / ".." / "escape").mkdir(exist_ok=True)
+        table = self.root / "table.txt"
+        table.write_text("../escape\n/etc/passwd\n\nAsia/Shanghai\n", encoding="utf-8")
+        self.zone_file("Asia/Shanghai")
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(options.timezones(str(self.root), table), ["Asia/Shanghai"])
+
+    def test_directory_with_a_zone_name_is_not_a_zone(self):
+        """`posix/`、`right/` 这种同义树与历史名不该上界面 —— 目录不算。"""
+        (self.root / "Asia").mkdir()
+        table = self.root / "table.txt"
+        table.write_text("Asia\n", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(options.timezones(str(self.root), table), [])
+
+    def test_missing_table_is_an_empty_list_not_a_directory_scan(self):
+        self.zone_file("Asia/Shanghai")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(options.timezones(str(self.root), self.root / "没有这个文件"), [])
+
+    def test_nothing_is_invented_when_the_system_has_less_than_the_table(self):
+        """运行系统的 tzdata 比表旧（区被删）→ 少列几条，不造假、不报错。"""
+        table = self.root / "table.txt"
+        table.write_text("Asia/Shanghai\nAsia/Tokyo\n", encoding="utf-8")
+        self.zone_file("Asia/Shanghai")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(options.timezones(str(self.root), table), ["Asia/Shanghai"])
 
     def test_undecodable_tab_is_empty_not_a_traceback(self):
         """表在、但解不出 UTF-8：与读不到同一种结果。

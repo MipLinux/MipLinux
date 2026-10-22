@@ -1,0 +1,42 @@
+# MipLinux 时区名单 —— **生成物，不要手改**（D17）
+#
+# 来源：docs/work/tech/09-安装器界面文案.md 附 A「时区名表」（34 条，中文名已审）。
+# 生成：python3 installer/frontend/app/tools/gen-timezones.py --write
+# 守卫：python3 installer/frontend/app/tools/gen-timezones.py --check
+#
+# 一行一个 IANA id；后端 `options.timezones()` 读它，并只列**运行系统上真的存在**的那些。
+# 加一个时区 = 先在附 A 过审一行中文名，再重生成；不要在这里手加。
+Asia/Shanghai
+Asia/Hong_Kong
+Asia/Macau
+Asia/Taipei
+Asia/Tokyo
+Asia/Seoul
+Asia/Singapore
+Asia/Bangkok
+Asia/Jakarta
+Asia/Kolkata
+Asia/Dhaka
+Asia/Dubai
+Asia/Tehran
+Asia/Jerusalem
+Asia/Riyadh
+Europe/London
+Europe/Paris
+Europe/Berlin
+Europe/Madrid
+Europe/Moscow
+Europe/Kyiv
+America/New_York
+America/Chicago
+America/Denver
+America/Los_Angeles
+America/Sao_Paulo
+America/Mexico_City
+Australia/Sydney
+Australia/Perth
+Pacific/Auckland
+Africa/Cairo
+Africa/Johannesburg
+Africa/Lagos
+UTC

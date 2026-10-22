@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import socket
 import sys
 import time
@@ -55,6 +56,17 @@ RUN = f"PYTHONPATH={BACKEND} python3 -m mipl_installer"
 #: 依赖字体 / 输入法 / NVIDIA 那些大包。
 PACKAGES_PATH = "/tmp/mipl-packages.txt"
 
+#: 装盘那一轮用的时区（`--timezone` 可换）。默认取**非默认值**（安装器的默认是
+#: `Asia/Shanghai`），这样装后系统才验得出「选择真的写进去了」；`readlink` 那条
+#: 验收判据（#149）要与它对上。定义在脚本常量之前 —— 那几段是 f-string，导入期就求值。
+TIMEZONE = "Asia/Tokyo"
+
+#: `--mirror`：这一轮给 Live 用的镜像（Server 行，含 `$repo` / `$arch`）。空 = 用 ISO 自带那份。
+MIRROR = ""
+
+#: Live 的镜像列表（`--mirror` 覆盖的就是它）。
+LIVE_MIRRORLIST = "/etc/pacman.d/mirrorlist"
+
 
 def packages_setup(packages: str) -> str:
     """在客机里写下精简清单（不给 `--packages` 时是空串，脚本里留了占位符）。"""
@@ -73,15 +85,38 @@ def run_options(packages: str, steps: str) -> str:
     return (" ".join(parts) + " ") if parts else ""
 
 
+def mirror_setup() -> str:
+    """`--mirror`：把一条镜像**只放进这一轮的运行环境**（Live 的 mirrorlist），空串 = 不动。
+
+    为什么需要它：Live 的 mirrorlist 是我们写的国内源（D11），其中几个在 QEMU 里
+    吞吐只有 ~100–270 KiB/s，`pacstrap` 会在解析依赖之后拿不到包直接失败 ——
+    症状看起来像安装器坏了，其实是这一轮的网。验收要验的不是镜像，所以允许点名一个
+    快的（例如 `https://geo.mirror.pkgbuild.com/$repo/os/$arch`）。
+
+    **只改运行环境，不改仓库里的 mirrorlist** —— 那两份是产品配置，动它要走 D11 那条线。
+    """
+    if not MIRROR:
+        return ""
+    mirror = shlex.quote(MIRROR)
+    return (f"rm -f {LIVE_MIRRORLIST}\n"
+            f"printf 'Server = %s\\n' {mirror} > {LIVE_MIRRORLIST}\n"
+            f"printf 'MIRROR-SET=%s\\n' {mirror}\n"
+            # 换了镜像就顺手同步一次库：ISO 里的库是构建那天的，`pacstrap` 拿到旧库
+            # 去解析一个滚动更新的源，失败方式很像「安装器坏了」。
+            f"pacman -Sy --noconfirm >/dev/null 2>&1 && echo \"MIRROR-SYNC=ok\"\n")
+
+
 def prepare(script: str, packages: str, steps: str) -> str:
     """把脚本里的占位符换成实际开关。
 
-    脚本是 import 时求值的 f-string，而这两个值要到 `main()` 才知道，所以用占位符 +
+    脚本是 import 时求值的 f-string，而这几个值要到 `main()` 才知道，所以用占位符 +
     发送前替换 —— 比把整段 heredoc 塞进函数体（那会改动缩进，而缩进是发给客机的
     正文）安全得多。
     """
     return (script.replace("__PACKAGES_SETUP__", packages_setup(packages))
-                  .replace("__RUN_OPTIONS__", run_options(packages, steps)))
+                  .replace("__RUN_OPTIONS__", run_options(packages, steps))
+                  .replace("__TIMEZONE__", shlex.quote(TIMEZONE))
+                  .replace("__MIRROR_SETUP__", mirror_setup()))
 
 #: ANSI 控制序列：CSI（`\x1b[...m` 之类）、OSC（`\x1b]3008;...\x1b\\`，systemd 的会话跟踪）、
 #: 以及字符集切换（`\x1b(B`）。串口上这些一个都不少 —— 见 `wait_for` 的说明。
@@ -203,12 +238,23 @@ class Serial:
         self.sock.close()
 
 
+#: 默认时区在下面 `TIMEZONE` 里（`--timezone` 可换）；这里只解析参数。
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    # `global` 要在任何引用之前（Python 的语法就是这么定的），所以先声明再读默认值。
+    global TIMEZONE, MIRROR  # noqa: PLW0603 —— 模块级常量，导入期就得进 f-string
     parser = argparse.ArgumentParser(description="经串口 socket 驱动 Live 里的安装器")
     parser.add_argument("socket", help="out/installer-serial.sock")
     parser.add_argument("--log", default=None, help="把串口上的每个字节记到这里")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                         help=f"等提示符的超时（默认 {DEFAULT_TIMEOUT:.0f}s）")
+    parser.add_argument("--timezone", default=TIMEZONE,
+                        help=f"装盘那一轮用的时区（默认 {TIMEZONE}）；验收时与 "
+                             f"VERIFY-LOCALTIME-RESOLVED 对照")
+    parser.add_argument("--mirror", default=MIRROR,
+                        help="这一轮给 Live 用的镜像（Server 行，含 $repo/$arch）。"
+                             "ISO 自带那份国内源在本机只有 ~100–270 KiB/s 时会拖死 pacstrap；"
+                             "**只动运行环境，不改仓库里的 mirrorlist**")
     parser.add_argument("--probe-only", action="store_true",
                         help="只做只读取证（数据面 + 键位对账），不装盘")
     parser.add_argument("--verify-target", action="store_true",
@@ -221,7 +267,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="只跑其中几个阶段（逗号分隔，例：disk,packages）")
     parser.add_argument("--skip-kill", action="store_true",
                         help="跳过强杀那一轮（默认跑：残留 + 候选表取证，恢复由真装那轮证明）")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # 脚本常量在模块导入时就成了字符串，所以这里回填一次（`prepare()` 只换占位符）。
+    TIMEZONE = args.timezone
+    MIRROR = args.mirror
+    return args
 
 
 # ── 步骤 ──────────────────────────────────────────────────────────────
@@ -263,7 +313,7 @@ PROBE_SCRIPT = f"""#!/bin/sh
 #
 # 头一段是**检查点 2 的证据**：安装器界面是不是自己起来了（不碰键盘就出来）。
 # 它跑在 tty1 上，而我们在 ttyS0 上干活，所以两者互不打扰。
-echo "PROBE-GUI-BEGIN"
+__MIRROR_SETUP__echo "PROBE-GUI-BEGIN"
 echo "installer-active=$(systemctl is-active mipl-installer.service 2>&1)"
 echo "installer-result=$(systemctl show -p Result --value mipl-installer.service 2>&1)"
 echo "--- journalctl -u mipl-installer（末 30 行）---"
@@ -281,6 +331,9 @@ echo "keymaps=$(count --print-keymaps keymaps)"
 echo "locales=$(count --print-locales locales)"
 echo "timezones=$(count --print-timezones timezones)"
 echo "PROBE-COUNTS-END"
+# 名单**逐条**：条数相等不代表是同一批（D17 之后界面只列随包的表，验的是「哪 34 条」）。
+# 一行逗号分隔，日志里能直接与 `data/timezones.txt` 对照。
+echo "PROBE-TIMEZONE-LIST=$({RUN} --print-timezones | python3 -c "import json,sys;print(','.join(z['id'] for z in json.load(sys.stdin)['timezones']))")"
 # 键位：解析结果与原文逐字对得上（Issue #65 的验收口径）
 {RUN} --print-keymap de > /tmp/km.json
 python3 -c "import json;print(chr(10).join(json.load(open('/tmp/km.json'))['lines']))" > /tmp/km.txt
@@ -296,7 +349,7 @@ CANCEL_SCRIPT = f"""#!/bin/sh
 # 目标路径底下会留着一堆挂载点，而那正是最难查的现场（pipeline.run 的注释写着这条）。
 echo "CANCEL-BEFORE-FINDMNT=[$(findmnt -R -n -o TARGET /mnt/mipl 2>/dev/null | tr '\\n' ' ')]"
 __PACKAGES_SETUP__printf '%s\\n' mipltest | {RUN} __RUN_OPTIONS__--disk /dev/vda --yes --password-stdin --json-events \\
-  --locale ja_JP.UTF-8 --keymap de --timezone Asia/Tokyo --hostname mipl-e2e \\
+  --locale ja_JP.UTF-8 --keymap de --timezone __TIMEZONE__ --hostname mipl-e2e \\
   > /tmp/cancel.jsonl 2> /tmp/cancel.err &
 PID=$!
 i=0
@@ -357,7 +410,7 @@ INSTALL_SCRIPT = f"""#!/bin/sh
 # （默认是 zh_CN.UTF-8 / us / Asia/Shanghai，验不出「选择真的写进去了」）。
 __PACKAGES_SETUP__printf '%s\\n' mipltest | {RUN} __RUN_OPTIONS__--disk /dev/vda --yes --password-stdin --json-events \\
   --log /tmp/ev.jsonl \\
-  --locale ja_JP.UTF-8 --keymap de --timezone Asia/Tokyo --hostname mipl-e2e
+  --locale ja_JP.UTF-8 --keymap de --timezone __TIMEZONE__ --hostname mipl-e2e
 echo "INSTALL-EXIT=$?"
 # 恢复的直接证据：这一轮开工时清掉了上一次强杀留下的挂载。中文在串口上会被打成
 # U+FFFD，所以这里只报**计数**；逐字那句在下面的 base64 里，解出来能核对。
@@ -377,7 +430,9 @@ echo "INSTALL-DONE"
 
 
 def probe(serial: Serial, timeout: float) -> None:
-    serial.script("probe.sh", PROBE_SCRIPT)
+    # 也要过 `prepare()`：PROBE 里同样有 __MIRROR_SETUP__ / __TIMEZONE__ 占位符，
+    # 直接发原文等于把占位符当 shell 命令执行（CodeRabbit 在 PR #178 上抓到的）。
+    serial.script("probe.sh", prepare(PROBE_SCRIPT, "", ""))
     serial.run_script("probe.sh", r"PROBE-DONE", timeout=timeout)
 
 
@@ -415,6 +470,7 @@ for f in etc/locale.conf etc/vconsole.conf etc/hostname etc/locale.gen; do
   cat "/mnt/mipl/$f" 2>&1 | head -5
 done
 echo "VERIFY-LOCALTIME=$(readlink /mnt/mipl/etc/localtime 2>&1)"
+echo "VERIFY-LOCALTIME-RESOLVED=$(readlink -f /mnt/mipl/etc/localtime 2>&1)"
 echo "VERIFY-JA-ENABLED=$(grep -c '^ja_JP.UTF-8' /mnt/mipl/etc/locale.gen 2>&1)"
 echo "VERIFY-FSTAB-BEGIN"
 cat /mnt/mipl/etc/fstab 2>&1

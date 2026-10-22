@@ -8,21 +8,29 @@
 
 | 项 | 名单 | 存在性判据 |
 |---|---|---|
-| 时区 | `/usr/share/zoneinfo/zone1970.tab` | `/usr/share/zoneinfo/<tz>` 是不是文件 |
+| 时区 | 随包走的 `data/timezones.txt`（**项目自维护**，D17） | `/usr/share/zoneinfo/<tz>` 是不是文件 |
 | 键盘 | `/usr/share/kbd/keymaps/**/*.map.gz` | 名字在不在名单里 |
 | 语言 | `/usr/share/i18n/SUPPORTED` | 目标系统的 `locale.gen` 里有没有这一行 |
 | 主机名 | 没有名单，只有规则 | RFC 1123 |
 | 目标挂载点 | 没有名单，只有命名空间 | `/mnt/` 下的规范化绝对路径（见 `validate_target()`） |
 
+时区那一行是**唯一的例外**，且例外只在「名单从哪来」这一层：D17 把名单换成
+项目自带、受版本控制、由 `tech/09` 附 A 生成的表（`tools/gen-timezones.py`），
+**存在性判据仍是运行系统上的 `zoneinfo`** —— 表里列了而运行系统没有的，一律不上界面
+（见 `timezones()`），所以「界面里能选、写进目标却不生效」那条老路（Issue #63 / #64）
+依然堵着。
+
 **名单读不到就是空的，绝不内建一份兜底名单。** 内建一份，就等于把
 「界面里能选、写进目标却不生效」重新种回去 —— Issue #63 / #64 正是这么长出来的。
 界面对空名单该说的是「这个环境列不出名单」，不是摆一排好看的假选项。
+对时区表，这条读作：**表读不到 = 空名单**，不回落到扫描运行系统。
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path, PurePosixPath
 from zoneinfo import ZoneInfo
@@ -33,6 +41,17 @@ from .util import DEFAULT_TARGET, EXIT_CONFIGURE, EXIT_USAGE, InstallerError
 ZONEINFO = "/usr/share/zoneinfo"
 KEYMAP_ROOT = "/usr/share/kbd/keymaps"
 LOCALE_SUPPORTED = "/usr/share/i18n/SUPPORTED"
+
+#: 时区名单：**随包走的数据**（不是运行系统上的文件），见包内 `data/`。
+#: 放包内而不是 `profile/`：它跟着 `installer/` 一起被拷进 airootfs，少一条「忘了拷」的路。
+ZONE_TABLE_NAME = "timezones.txt"
+ZONE_TABLE_DIR = "data"
+
+
+def default_zone_table() -> Path:
+    """`mipl_installer/data/timezones.txt`（相对本包定位，不依赖 cwd）—— 与包清单同一套做法。"""
+    return Path(__file__).resolve().parent / ZONE_TABLE_DIR / ZONE_TABLE_NAME
+
 
 #: 主机名：字母数字开头结尾，中间可以有连字符，单段最长 63。
 #: 与 `HostnamePage.qml` 原来那条正则**同一条规则** —— 只是搬到了后端，
@@ -86,29 +105,57 @@ def confined(root: str, value: str) -> Path | None:
 
 
 # ── 名单 ──────────────────────────────────────────────────────────────
-def timezones(root: str = ZONEINFO) -> list[str]:
-    """IANA 时区名单。
+def read_zone_table(path: Path | str | None = None) -> list[str]:
+    """随包的表 → IANA id 列表（原样保留文件顺序，去重按首次出现）。
 
-    用 `zone1970.tab` 而不是遍历目录：目录里混着 `posix/`、`right/`、`SystemV/`
-    这些同义树与历史名，摆进界面只会让人选错。
+    一行一个 id，`#` 起注释。**这里不做任何存在性判断** —— 那是 `timezones()`
+    的活；分开是为了让「表里有什么」与「这台机器上能用什么」各测各的。
     """
-    tab = Path(root) / "zone1970.tab"
-    if not tab.is_file():
-        tab = Path(root) / "zone.tab"
+    table = Path(path) if path is not None else default_zone_table()
     try:
-        text = tab.read_text(encoding="utf-8")
+        text = table.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         # 解码失败与读不出来的后果一样：这台机器列不出名单。硬要读出一份半截
         # 名单，等于把「界面里能选、写进目标却不生效」重新种回去。
         return []
 
     out: list[str] = []
-    for line in text.splitlines():
-        if not line.strip() or line.startswith("#"):
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        name = raw.split("#", 1)[0].strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def timezones(root: str = ZONEINFO, table: Path | str | None = None) -> list[str]:
+    """界面上的 IANA 时区名单 = **随包的表** ∩ **运行系统上真实存在的 zone**。
+
+    名单来自项目自带的 `data/timezones.txt`（D17）：精选子集、按附 A 的过审中文名生成，
+    所以界面上的每一条都能显示成中文名。**表外的一律不可选** —— 那不是缺陷，
+    是这条决策本身：要加一个区，先在附 A 过审一行名字（D17）。
+
+    `root` 是**运行系统**的 `zoneinfo`，只用来回答「这个 id 在这台机器上真的存在吗」：
+    tzdata 升级会把区改名、并掉或删掉（`Europe/Kyiv` 就是新名，`Asia/Kolkata` 之外
+    还有别名树）。表是构建时的快照，运行系统是当下的现实 —— 两者对不上时（默认口径
+    「运行时扔异」），**信运行系统**：那一条不上界面，也就绝不会被写成一个悬空软链
+    （Issue #66 的形状）。扔掉的每一条都会在 stderr 上说一声，好让「表该刷新了」看得见。
+
+    表读不到 = 空名单（`read_zone_table` 返回空）：**不回落到扫描运行系统** ——
+    那会让「界面列的是我们过审过的那批」这件事悄悄失效。
+    """
+    out: list[str] = []
+    for zone in read_zone_table(table):
+        candidate = confined(root, zone)
+        if candidate is None or not candidate.is_file():
+            print(
+                f"警告：时区表里的 {zone} 在这台机器上没有（{root}），已从界面名单里去掉；"
+                f"表该对着当前 tzdata 刷新了（tools/gen-timezones.py 与 tech/09 附 A）",
+                file=sys.stderr,
+            )
             continue
-        fields = line.split("\t")
-        if len(fields) >= 3:
-            out.append(fields[2])
+        out.append(zone)
     return out
 
 

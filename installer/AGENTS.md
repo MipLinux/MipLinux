@@ -26,7 +26,7 @@ installer/
 │       ├── keymap_view.py 键位映射的解析与 include 展开（键盘页那张图的数据源）
 │       ├── disk.py       分区、候选盘枚举、动手前的守卫
 │       ├── network.py    Live 的网络状态与连网（`nmcli`）
-│       └── data/         随包走的数据（装后系统包清单）
+│       └── data/         随包走的数据（装后系统包清单、时区名单）
 ├── frontend/             Electron 前端：只画界面，不实现逻辑
 │   ├── mipl-installer    Live 侧入口（Python 启动器），由 cage 拉起
 │   ├── mipl-kiosk        kiosk 启动脚本（见 #79）

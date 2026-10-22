@@ -654,6 +654,93 @@ def chroot_argv(target: str, argv: list[str]) -> list[str]:
 
 
 # ── 文件 ──────────────────────────────────────────────────────────────
+#: 打开父链上一级目录用的 flags。**`O_NOFOLLOW` 是这里的核心**：目标盘里的
+#: 目录一旦被换成符号链接，`openat` 就拒绝它，而不是跟到宿主机（Live）上同名
+#: 的目录 —— 那是 root 越过目标盘的一次写入（#174）。
+_DIR_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+def _symlink_error(parent_fd: int, name: str, link_path: Path, target: Path,
+                   cause: OSError) -> InstallerError | None:
+    """父链上这一级是不是符号链接；是就给一条说清路径的 `EXIT_GUARD`。
+
+    只对 `ELOOP` / `ENOTDIR` 两类错误做这项判断：`O_NOFOLLOW` 遇到链接时
+    在不同内核 / 系统上落在这两个 errno 上（带 `O_DIRECTORY` 的 Linux 是
+    `ENOTDIR`）。判据看 `lstat` 本身，而不是「打开失败」—— 一个普通文件同样
+    会让 `O_DIRECTORY` 报 `ENOTDIR`，那不是符号链接，不该按守卫拒绝。
+    """
+    if cause.errno not in (errno.ELOOP, errno.ENOTDIR):
+        return None
+    try:
+        st = os.lstat(name, dir_fd=parent_fd)
+    except OSError:
+        return None
+    if not stat.S_ISLNK(st.st_mode):
+        return None
+    return InstallerError(
+        f"拒绝写入：父目录是符号链接 —— {link_path}",
+        EXIT_GUARD,
+        hint=f"要写的是 {target}；安装器只沿真实目录写，不跟着链接改到目标盘外",
+    )
+
+
+def _open_dir(parent_fd: int, name: str, link_path: Path, target: Path) -> int:
+    """在 `parent_fd` 下打开一级目录；父链上遇到符号链接就拒绝。"""
+    try:
+        return os.open(name, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        error = _symlink_error(parent_fd, name, link_path, target, exc)
+        if error is not None:
+            raise error from exc
+        raise
+
+
+def _open_or_make_dir(parent_fd: int, name: str, link_path: Path, target: Path) -> int:
+    """在 `parent_fd` 下打开一级父目录；缺失就建，**绝不跟随符号链接**。
+
+    名字相对 `parent_fd` 解析，父链上的每一级都钉在它自己的上一层目录上 ——
+    这样「符号链接」不再是字符串解析时看不见的一件事，而是这一级 `openat`
+    的直接结果。
+    """
+    try:
+        return _open_dir(parent_fd, name, link_path, target)
+    except FileNotFoundError:
+        pass                              # 还没建：下面建它
+    try:
+        os.mkdir(name, dir_fd=parent_fd)
+    except FileExistsError:
+        pass                              # 并发（或续跑）刚建出来：按同一条纪律打开
+    return _open_dir(parent_fd, name, link_path, target)
+
+
+def _open_parent_dir(target: Path) -> int:
+    """从根（相对路径则从当前目录）逐级打开 `target` 的父目录，返回它的 fd。
+
+    调用方负责 `os.close()`。逐级 `openat` 的意义见 `write_text` 的 docstring：
+    父链上的符号链接在**它所在的那一级**就被拒绝，不会解析到目标盘外。
+    """
+    base = Path(os.sep) if target.is_absolute() else Path(".")
+    fd = os.open(str(base), _DIR_OPEN_FLAGS)
+    walked = base
+    try:
+        for part in target.parent.parts:
+            if part in (os.sep, "."):
+                continue
+            walked = walked / part
+            child = _open_or_make_dir(fd, part, walked, target)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)                      # 半途失败：已经打开的那几级也还回去
+        raise
+    return fd
+
+
 def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
                secret: bool = False) -> None:
     """写一个文件（含父目录）。dry-run 下只打印内容，不落盘。
@@ -671,12 +758,22 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
     **先写临时文件，`fsync` 后再 `os.replace`**：直接 `O_TRUNC` 覆盖的话，写到一半
     失败 / 断电会在目标路径上留下半份配置（fstab、pacman.conf 半份就等于起不来的
     系统）。同目录的临时文件 + 原子改名让目标要么是旧内容、要么是新内容。
+    改名之后再 `fsync` 一次**父目录 fd**：只同步内容不足以让目录项（改名本身）扛住
+    断电 —— 目录项可能退回改名前的状态，刚写完的配置「看起来成功、重启又没了」。
 
     **不跟随符号链接**（`O_NOFOLLOW`）：写的是 `<target>/etc/pacman.conf` 这类
     目标盘路径，而目标盘内容在 `--steps configure` 这种续跑场景里不一定是安装器
     自己刚铺的。一个 `pacman.conf -> /etc/pacman.conf` 的链接会让 root 在宿主机
     （Live）上改文件 —— 越过目标盘的一次根写入。目标系统里这些文件本来就该是
     普通文件，遇到链接就拒绝并说清楚。
+
+    **父链上的每一级也不跟随**（#174）：从根开始逐级
+    `os.open(..., O_DIRECTORY|O_NOFOLLOW, dir_fd=...)`，缺失的目录用
+    `os.mkdir(..., dir_fd=...)` 建（`EEXIST` 时再按同一条纪律打开）。只守最后
+    一个分量不够 —— `<target>/etc/foo -> /etc` 这种**父目录**链接会让
+    `<target>/etc/foo/x` 写进 Live 的 `/etc`，同样是一次越过目标盘的根写入。
+    临时文件与改名也都挂在最后一级父目录的 fd 上：父链打开之后，路径解析不再
+    经过字符串。
     """
     runner.reporter.note(f"写入 {path}" + (f"（mode {mode:04o}）" if mode is not None else "")
                          + ("（内容不打印）" if secret else ""))
@@ -685,62 +782,69 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
             _preview(runner.reporter, text)
         return
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    parent_fd = _open_parent_dir(target)
     try:
-        existing = os.lstat(target)
-    except FileNotFoundError:
-        existing = None
-    if existing is not None and stat.S_ISLNK(existing.st_mode):
-        raise InstallerError(
-            f"拒绝写入符号链接：{path}",
-            EXIT_GUARD,
-            hint="目标系统里这个路径是符号链接 —— 安装器只写普通文件，不跟着链接改别处",
-        )
-    # 覆盖已有文件时保持它原来的属主、属组和权限（与 O_TRUNC 直接写的旧行为一致）。
-    existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
+        try:
+            existing = os.lstat(target.name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise InstallerError(
+                f"拒绝写入符号链接：{path}",
+                EXIT_GUARD,
+                hint="目标系统里这个路径是符号链接 —— 安装器只写普通文件，不跟着链接改别处",
+            )
+        # 覆盖已有文件时保持它原来的属主、属组和权限（与 O_TRUNC 直接写的旧行为一致）。
+        existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = -1
-    temp: Path | None = None
-    try:
-        for _ in range(100):
-            candidate = target.parent / f".{target.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
-            try:
-                fd = os.open(candidate, flags, 0o666)   # umask 照常生效
-            except FileExistsError:
-                continue
-            temp = candidate
-            break
-        else:
-            raise OSError(errno.EEXIST, f"找不到可用的临时文件名：{path}")
-        if existing is not None:
-            # chown 可能清除 setuid/setgid 位，因此先恢复属主和属组，再设置权限。
-            os.fchown(fd, existing.st_uid, existing.st_gid)
-        if mode is not None:
-            # `os.open` 的 mode 会被 umask 掩掉；fchmod 一次拿到调用方要求的精确
-            # 权限，仍然在写内容之前。
-            os.fchmod(fd, mode)
-        elif existing_mode is not None:
-            os.fchmod(fd, existing_mode)
-        handle = os.fdopen(fd, "w", encoding="utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = -1
-        with handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())      # 内容先落盘，再让改名把它换上去
-        os.replace(temp, target)
-        temp = None
+        temp: str | None = None
+        try:
+            for _ in range(100):
+                candidate = f".{target.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+                try:
+                    fd = os.open(candidate, flags, 0o666, dir_fd=parent_fd)   # umask 照常生效
+                except FileExistsError:
+                    continue
+                temp = candidate
+                break
+            else:
+                raise OSError(errno.EEXIST, f"找不到可用的临时文件名：{path}")
+            if existing is not None:
+                # chown 可能清除 setuid/setgid 位，因此先恢复属主和属组，再设置权限。
+                os.fchown(fd, existing.st_uid, existing.st_gid)
+            if mode is not None:
+                # `os.open` 的 mode 会被 umask 掩掉；fchmod 一次拿到调用方要求的精确
+                # 权限，仍然在写内容之前。
+                os.fchmod(fd, mode)
+            elif existing_mode is not None:
+                os.fchmod(fd, existing_mode)
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+            fd = -1
+            with handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())      # 内容先落盘，再让改名把它换上去
+            os.replace(temp, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            temp = None                    # 改名成功：清理分支别再删这个名字
+            os.fsync(parent_fd)            # 让改名后的目录项也落盘（只 fsync 内容不够）
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if temp is not None:
+                try:
+                    os.unlink(temp, dir_fd=parent_fd)   # 失败时别在目标目录里留下半份临时文件
+                except OSError:
+                    pass
     finally:
-        if fd >= 0:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        if temp is not None:
-            try:
-                temp.unlink()              # 失败时别在目标目录里留下半份临时文件
-            except OSError:
-                pass
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
 
 
 #: dry-run 里预览内容的最多行数。mirrorlist 那种几十行的文件不值得占满屏幕。

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shlex
 import signal
+import stat
 import sys
 import tempfile
 import threading
@@ -192,6 +193,27 @@ class TestWriteText(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["pacman.conf"],
                              "失败后临时文件也不许留在目标目录里")
 
+    def test_the_rename_is_flushed_through_the_parent_directory_fd(self):
+        """**回归测试**（评审指出）：只 fsync 内容不够，改名后的目录项也要落盘。
+
+        `os.replace` 改的是目录项，临时文件的内容 fsync 管不到它：断电后目录项可能
+        退回改名之前，fstab / pacman.conf 就成了「写成功、重启又变回旧内容」。
+        """
+        real_fsync = os.fsync
+        directory_fsyncs: list[bool] = []
+
+        def spy(fd):
+            directory_fsyncs.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+            real_fsync(fd)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("mipl_installer.util.os.fsync", side_effect=spy):
+            path = Path(tmp) / "etc" / "pacman.conf"
+            util.write_text(Runner(RecordingReporter()), str(path), "[options]\n")
+
+        self.assertEqual(directory_fsyncs, [False, True],
+                         "先 fsync 内容（普通文件），再 fsync 父目录（让改名落盘）")
+
     def test_replacing_an_existing_file_keeps_its_mode(self):
         """`mode=None` 覆盖已有文件时，权限要照旧 —— 别被临时文件的 umask 改掉。"""
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,6 +276,63 @@ class TestWriteText(unittest.TestCase):
             self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
             self.assertIn("符号链接", str(ctx.exception))
             self.assertEqual(victim.read_text(encoding="utf-8"), "原样\n")
+
+    def test_a_symlinked_parent_directory_is_refused(self):
+        """**回归测试**（#174）：父目录是符号链接时，root 不许写穿到目标盘外。
+
+        只对最后一个分量上 `O_NOFOLLOW` 挡不住 `<root>/etc/foo -> <victim>`：
+        写 `<root>/etc/foo/x` 时，`foo` 是**父目录**、不是终点，旧实现会在
+        victim 里凭空造出 `x` —— 一次越过目标盘的根写入。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            (root / "etc").mkdir(parents=True)
+            victim = Path(tmp) / "victim"
+            victim.mkdir()
+            sentinel = victim / "keep"
+            sentinel.write_text("原样\n", encoding="utf-8")
+            link = root / "etc" / "foo"
+            link.symlink_to(victim)
+
+            with self.assertRaises(InstallerError) as ctx:
+                util.write_text(Runner(RecordingReporter()), str(link / "x"), "覆盖\n")
+            self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+            self.assertIn("符号链接", str(ctx.exception))
+            self.assertIn(str(link), str(ctx.exception),
+                          "报错要说清父链上是哪一级链接，只给终点路径没法排错")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "原样\n")
+            self.assertEqual(sorted(p.name for p in victim.iterdir()), ["keep"],
+                             "写入顺着父目录链接落到了目标盘外")
+
+    def test_a_symlink_higher_up_the_parent_chain_is_refused(self):
+        """父链不止最后一级：`<root>/var -> ../victim` 时 `<root>/var/lib/x` 也拒绝。
+
+        链接的目标故意写成相对路径 —— 逐级 `openat` 的判据必须看 `lstat` 的结果，
+        而不是「绝对路径里有没有一处像链接」。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            victim = Path(tmp) / "victim"
+            victim.mkdir()
+            (root / "var").symlink_to(Path("..") / "victim")
+
+            with self.assertRaises(InstallerError) as ctx:
+                util.write_text(Runner(RecordingReporter()), str(root / "var/lib/app/x"), "x\n")
+            self.assertEqual(ctx.exception.exit_code, EXIT_GUARD)
+            self.assertIn(str(root / "var"), str(ctx.exception))
+            self.assertEqual(list(victim.iterdir()), [],
+                             "父链上更靠上的链接被跟随后，victim 里被建出了目录")
+
+    def test_a_normal_parent_chain_is_created_and_written(self):
+        """逐级打开不该误伤正常路径：`<root>/etc/...` 缺失的目录仍然照建照写。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            path = root / "etc" / "pacman.d" / "mirrorlist"
+            util.write_text(Runner(RecordingReporter()), str(path), "Server = x\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "Server = x\n")
+            self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["mirrorlist"],
+                             "正常写入在目标目录里留下了临时文件")
 
 
 class TestLineFeeder(unittest.TestCase):

@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import importlib.util
+import shlex
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -41,6 +44,22 @@ class TestLiveE2EArguments(unittest.TestCase):
         args = self.module.parse_args(["out/x.sock"])
         self.assertNotEqual(args.timezone, "Asia/Shanghai")
 
+    def test_timezone_is_one_literal_shell_argument(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "injected"
+            values = ("Asia/Tokyo", "", f"Asia/'\"; touch {marker}; # $(touch {marker})")
+            for timezone in values:
+                with self.subTest(timezone=timezone):
+                    self.module.parse_args(["out/x.sock", "--timezone", timezone])
+                    prepared = self.module.prepare("printf '%s\\n' __TIMEZONE__\n", "", "")
+                    result = subprocess.run(["sh", "-c", prepared], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, timezone + "\n")
+                    self.assertFalse(marker.exists())
+                    for name in ("INSTALL_SCRIPT", "CANCEL_SCRIPT"):
+                        args = shlex.split(self.module.prepare(getattr(self.module, name), "", ""))
+                        self.assertEqual(args[args.index("--timezone") + 1], timezone)
+
     def test_mirror_setup_only_touches_the_live_mirrorlist(self):
         """`--mirror` 是**这一轮**的取巧：只写运行环境的 mirrorlist，不碰仓库里的配置。"""
         prepared = self.module.prepare(self.module.PROBE_SCRIPT, "", "")
@@ -54,6 +73,22 @@ class TestLiveE2EArguments(unittest.TestCase):
         self.assertIn("'https://geo.mirror.pkgbuild.com/$repo/os/$arch'", prepared)
         self.assertIn(f"> {self.module.LIVE_MIRRORLIST}", prepared)
         self.assertIn("pacman -Sy", prepared, "换了镜像要顺手同步库，否则解析的是构建那天的旧库")
+
+    def test_mirror_file_and_status_preserve_shell_characters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mirrorlist = Path(directory) / "mirrorlist"
+            marker = Path(directory) / "injected"
+            mirror = (f"https://example.test/$repo/os/$arch?quote='\"; touch {marker}; #\n"
+                      f"$(touch {marker})`touch {marker}`\\tail")
+            self.module.LIVE_MIRRORLIST = str(mirrorlist)
+            self.module.parse_args(["out/x.sock", "--mirror", mirror])
+            # pacman 由空函数替身接住；验证真实 shell 的解析，不联网、不改宿主机镜像。
+            script = "pacman() { :; }\n" + self.module.mirror_setup()
+            result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(mirrorlist.read_text(), f"Server = {mirror}\n")
+            self.assertEqual(result.stdout, f"MIRROR-SET={mirror}\nMIRROR-SYNC=ok\n")
+            self.assertFalse(marker.exists())
 
     def test_verify_script_reports_the_resolved_path(self):
         """#149 的验收判据就在这一行上：`readlink -f` 要能直接与所选 IANA id 对照。"""

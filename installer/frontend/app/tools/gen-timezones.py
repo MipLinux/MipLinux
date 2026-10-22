@@ -45,7 +45,7 @@ TABLE_REL = "installer/backend/mipl_installer/data/timezones.txt"
 HEADER = """\
 # MipLinux 时区名单 —— **生成物，不要手改**（D17）
 #
-# 来源：docs/work/tech/09-安装器界面文案.md 附 A「时区名表」（34 条，中英已过审）。
+# 来源：docs/work/tech/09-安装器界面文案.md 附 A「时区名表」（34 条，中文名已审）。
 # 生成：python3 installer/frontend/app/tools/gen-timezones.py --write
 # 守卫：python3 installer/frontend/app/tools/gen-timezones.py --check
 #

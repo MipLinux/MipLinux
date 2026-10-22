@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import socket
 import sys
 import time
@@ -96,9 +97,10 @@ def mirror_setup() -> str:
     """
     if not MIRROR:
         return ""
+    mirror = shlex.quote(MIRROR)
     return (f"rm -f {LIVE_MIRRORLIST}\n"
-            f"printf 'Server = %s\\n' '{MIRROR}' > {LIVE_MIRRORLIST}\n"
-            f"echo \"MIRROR-SET={MIRROR}\"\n"
+            f"printf 'Server = %s\\n' {mirror} > {LIVE_MIRRORLIST}\n"
+            f"printf 'MIRROR-SET=%s\\n' {mirror}\n"
             # 换了镜像就顺手同步一次库：ISO 里的库是构建那天的，`pacstrap` 拿到旧库
             # 去解析一个滚动更新的源，失败方式很像「安装器坏了」。
             f"pacman -Sy --noconfirm >/dev/null 2>&1 && echo \"MIRROR-SYNC=ok\"\n")
@@ -113,7 +115,7 @@ def prepare(script: str, packages: str, steps: str) -> str:
     """
     return (script.replace("__PACKAGES_SETUP__", packages_setup(packages))
                   .replace("__RUN_OPTIONS__", run_options(packages, steps))
-                  .replace("__TIMEZONE__", TIMEZONE)
+                  .replace("__TIMEZONE__", shlex.quote(TIMEZONE))
                   .replace("__MIRROR_SETUP__", mirror_setup()))
 
 #: ANSI 控制序列：CSI（`\x1b[...m` 之类）、OSC（`\x1b]3008;...\x1b\\`，systemd 的会话跟踪）、

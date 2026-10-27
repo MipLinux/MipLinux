@@ -72,6 +72,15 @@ class InstallerError(Exception):
         return f"{text}\n  → {self.hint}" if self.hint else text
 
 
+class DirectorySyncError(InstallerError):
+    """写入已经替换目标文件，但父目录 fsync 失败 —— 一次**部分提交**。
+
+    `write_text` 先 `os.replace` 成功、再 `fsync` 父目录；后者失败时，目标路径上
+    **已经是新内容**，只是目录项能不能扛住断电还没有确认。它和「没写进去」不是
+    一回事：调用方不能按「目标文件还是旧内容」处理，也不能吞掉这次失败。
+    """
+
+
 #: 一条命令跑满多少秒就在日志里留一句「耗时 Ns」。这一句是给实机复盘用的：
 #: 「二十分钟花在哪了」该由日志回答，不该由截图猜（Issue #97 实机教训）。
 SLOW_COMMAND_SECONDS = 15
@@ -760,6 +769,8 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
     系统）。同目录的临时文件 + 原子改名让目标要么是旧内容、要么是新内容。
     改名之后再 `fsync` 一次**父目录 fd**：只同步内容不足以让目录项（改名本身）扛住
     断电 —— 目录项可能退回改名前的状态，刚写完的配置「看起来成功、重启又没了」。
+    目录 fsync 失败时抛 `DirectorySyncError`：**目标路径上已经是新内容**，失败的是
+    「这次改名能否扛住断电」，与「没写进去」是两回事，调用方不许混为一谈。
 
     **不跟随符号链接**（`O_NOFOLLOW`）：写的是 `<target>/etc/pacman.conf` 这类
     目标盘路径，而目标盘内容在 `--steps configure` 这种续跑场景里不一定是安装器
@@ -828,7 +839,18 @@ def write_text(runner: Runner, path: str, text: str, *, mode: int | None = None,
                 os.fsync(handle.fileno())      # 内容先落盘，再让改名把它换上去
             os.replace(temp, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             temp = None                    # 改名成功：清理分支别再删这个名字
-            os.fsync(parent_fd)            # 让改名后的目录项也落盘（只 fsync 内容不够）
+            try:
+                os.fsync(parent_fd)        # 让改名后的目录项也落盘（只 fsync 内容不够）
+            except OSError as exc:
+                # 改名已生效：目标路径上就是新内容，失败的只是「目录项能否扛住断电」。
+                # 不能报成普通的写入失败（那会让调用方以为目标还是旧内容），也不能吞。
+                detail = exc.strerror or str(exc) or type(exc).__name__
+                raise DirectorySyncError(
+                    f"文件已替换，但目录项持久化未确认：{path}（父目录 fsync 失败：{detail}）",
+                    hint=("目标路径上已经是新内容（os.replace 成功）；这次改名能否扛住"
+                          "断电没确认 —— 它不是「没写进去」，但断电后可能退回旧内容。"
+                          "先查 dmesg / 磁盘健康，再重跑这一步。"),
+                ) from exc
         finally:
             if fd >= 0:
                 try:

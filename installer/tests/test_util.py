@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shlex
 import signal
@@ -213,6 +214,36 @@ class TestWriteText(unittest.TestCase):
 
         self.assertEqual(directory_fsyncs, [False, True],
                          "先 fsync 内容（普通文件），再 fsync 父目录（让改名落盘）")
+
+    def test_a_directory_fsync_failure_reports_a_partial_commit(self):
+        """**回归测试**（评审指出）：改名成功但父目录 fsync 失败，不许报成「没写进去」。
+
+        `os.replace` 成功后目标路径上已经是新内容；父目录 fsync 失败只说明这次改名
+        能不能扛住断电没确认。这里拦住父目录那一次 fsync，断言抛的是有明确语义的
+        `DirectorySyncError`，并且报错时文件确实已经替换、临时文件没有残留。
+        """
+        real_fsync = os.fsync
+
+        def fail_on_directory(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(errno.EIO, "模拟目录 fsync 失败")
+            real_fsync(fd)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("mipl_installer.util.os.fsync", side_effect=fail_on_directory):
+            path = Path(tmp) / "etc" / "fstab"
+            with self.assertRaises(util.DirectorySyncError) as ctx:
+                util.write_text(Runner(RecordingReporter()), str(path), "UUID=新\n")
+
+            self.assertIsInstance(ctx.exception, InstallerError)
+            self.assertIn("已替换", str(ctx.exception))
+            self.assertIn("持久化未确认", str(ctx.exception))
+            self.assertIn("模拟目录 fsync 失败", str(ctx.exception))
+            self.assertIsInstance(ctx.exception.__cause__, OSError)
+            self.assertEqual(path.read_text(encoding="utf-8"), "UUID=新\n",
+                             "报错不许把「文件其实已经替换」说成「没写进去」")
+            self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["fstab"],
+                             "改名已经成功，失败路径不该留下临时文件")
 
     def test_replacing_an_existing_file_keeps_its_mode(self):
         """`mode=None` 覆盖已有文件时，权限要照旧 —— 别被临时文件的 umask 改掉。"""
